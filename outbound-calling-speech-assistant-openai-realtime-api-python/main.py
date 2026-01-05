@@ -40,6 +40,11 @@ Your goal is to assist customers with Sales & Distribution inquiries.
 - Tone: Professional, enthusiastic, warm, and helpful.
 - Behavior: detailed and conversational.
 - Objective: Explain our products/services and ask if they would like to request a quote or schedule a consultation.
+- **Languages:** You are consistently multilingual.
+    - **Detect the language** the user is speaking (English, Hindi, Tamil, Telugu, Malayalam, Urdu, or Sanskrit).
+    - **Reply in the SAME language** the user spoke.
+    - If the user switches language, you switch immediately.
+    - Ensure technical terms (like "Samsung", "OLED", "VRF") are kept in English if appropriate for that language's colloquial usage.
 
 **Conversation Style:**
 - Keep responses concise (1-3 sentences) suitable for voice.
@@ -55,6 +60,36 @@ DOMAIN = os.getenv("DOMAIN") # e.g. "your-id.ngrok-free.app"
 if DOMAIN:
     DOMAIN = DOMAIN.replace("http://", "").replace("https://", "").replace("/", "")
 PORT = int(os.getenv("PORT", 6060))
+
+# Mock Inventory Data
+INVENTORY = {
+    "samsung 55 tv": {"stock": 5, "price": "₹65,000"},
+    "samsung s24": {"stock": 12, "price": "₹75,000"},
+    "galaxy watch": {"stock": 0, "price": "₹25,000"},
+    "vrf system": {"stock": 2, "price": "₹4,00,000", "note": "Requires installation team"},
+}
+
+def check_inventory(product_name: str):
+    """
+    Checks the stock status and price of a product in the warehouse.
+    
+    Args:
+        product_name: The name of the product to check (e.g., 'Samsung 55 TV', 'S24').
+    
+    Returns:
+        JSON string with stock details.
+    """
+    print(f"Tool Triggered: check_inventory({product_name})")
+    product_key = product_name.lower()
+    
+    # Simple fuzzy match
+    for key, data in INVENTORY.items():
+        if key in product_key or product_key in key:
+            return json.dumps({"product": key, "status": data})
+    
+    return json.dumps({"product": product_name, "status": "Not found in catalog", "available_items": list(INVENTORY.keys())})
+
+tools = [check_inventory]
 
 # Emergency Safety
 BLOCKED_NUMBERS = {"911", "112", "999"}
@@ -152,7 +187,14 @@ async def handle_media_stream(websocket: WebSocket):
     model = "gemini-2.0-flash-exp"
     config = {
         "response_modalities": ["AUDIO"],
-        "system_instruction": types.Content(parts=[types.Part(text=SYSTEM_INSTRUCTION)])
+        "system_instruction": types.Content(parts=[types.Part(text=SYSTEM_INSTRUCTION)]),
+        "speech_config": {
+            "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
+        },
+        "tools": [{"function_declarations": [tools[0]]}] # or simply tools=[check_inventory] depending on SDK version, but manual declaration is safer if using simple client. 
+        # actually for google-genai SDK 0.x, we can pass tools list directly to client or config.
+        # Let's try the simplest way supported by the new SDK context.
+        "tools": [types.Tool(function_declarations=[check_inventory])]
     }
 
     async with gemini_client.aio.live.connect(model=model, config=config) as session:
@@ -178,6 +220,11 @@ async def handle_media_stream(websocket: WebSocket):
                         # 1. Decode mulaw to 16-bit PCM (8kHz)
                         pcm_8k = audioop.ulaw2lin(chunk, 2)
                         
+                        # Debug: Print audio energy (RMS) to see if we are receiving silence
+                        rms = audioop.rms(pcm_8k, 2)
+                        if rms > 100: # Only log if there's significant sound to avoid spam
+                            print(f"Audio received (RMS: {rms})")
+                        
                         # 2. Upsample 8kHz -> 16kHz
                         # simple way: ratecv(fragment, width, nchannels, inrate, outrate, state)
                         pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
@@ -200,6 +247,27 @@ async def handle_media_stream(websocket: WebSocket):
                     if response.server_content is None:
                         continue
 
+                    # Handle Tool Call
+                    tool_call = response.server_content.tool_call
+                    if tool_call is not None:
+                        print(f"Gemini requested tool: {tool_call.function_calls[0].name}")
+                        for fc in tool_call.function_calls:
+                            if fc.name == "check_inventory":
+                                args = fc.args
+                                result = check_inventory(args["product_name"])
+                                
+                                # Send result back to Gemini
+                                tool_response = types.LiveClientToolResponse(
+                                    function_responses=[types.FunctionResponse(
+                                        name=fc.name,
+                                        id=fc.id,
+                                        response={"result": result}
+                                    )]
+                                )
+                                print(f"Sending tool response: {result}")
+                                await session.send(input=tool_response)
+
+                    # Handle Audio
                     model_turn = response.server_content.model_turn
                     if model_turn is not None:
                         for part in model_turn.parts:
@@ -226,6 +294,8 @@ async def handle_media_stream(websocket: WebSocket):
                                 })
             except Exception as e:
                 print(f"Error sending to Twilio: {e}")
+                import traceback
+                traceback.print_exc()
 
         await asyncio.gather(receive_from_twilio(), send_to_twilio())
 
@@ -233,4 +303,4 @@ if __name__ == "__main__":
     import uvicorn
     # Twilio does not support WebSocket Ping/Pong, so we must disable it in Uvicorn
     # to prevent "keepalive ping timeout" errors.
-    uvicorn.run(app, host="0.0.0.0", port=PORT, ws_ping_interval=None, ws_ping_timeout=None)
+    uvicorn.run(app, host="0.0.0.0", port=PORT, ws_ping_interval=None, ws_ping_timeout=None, timeout_keep_alive=60)
