@@ -1,69 +1,107 @@
-# AI Voice & SMS Assistant (Rio)
+# Rio CRM - AI Voice & Sales Assistant
 
-A real-time AI voice assistant capable of holding natural, low-latency conversations over the phone. Powered by **Twilio Media Streams** and **Google Gemini Multimodal Live API**.
+**Rio** is a next-generation AI Sales Assistant designed for **Yexis Electronics**. It combines a real-time voice agent with a full-stack CRM dashboard to automate customer interactions, manage leads, and answer complex queries using RAG (Retrieval-Augmented Generation).
 
-Currently customized as "Rio", a sales assistant for **Yexis Electronics**.
+![Rio Dashboard](https://github.com/user-attachments/assets/placeholder)
 
 ## 🚀 Features
 
--   **Real-time Voice AI**: <1s latency conversations using WebSockets.
--   **SMS Capabilities**: Send and receive SMS messages (with auto-reply).
--   **Intelligent Persona**: "Rio" knows product catalogs (Samsung B2B) and can conduct sales conversations.
--   **Audio Transcoding**: Handles Twilio (8kHz mu-law) <-> Gemini (High-Fidelity PCM) conversion on the fly.
--   **Resiliency**: Auto-reconnection logic and silence handling.
+### 🤖 AI Voice Agent
+-   **Real-time Conversations**: \<1s latency voice interaction using **Google Gemini 2.0 Flash** + **Twilio Media Streams**.
+-   **Contextual Awareness**: Knows exactly who is calling (Name, History, Status) and updates the CRM automatically.
+-   **Multilingual**: Speaks English, Hindi, Tamil, Telugu, Malayalam, Urdu, and Sanskrit.
+-   **Tool Use**:
+    -   `check_inventory`: Checks live stock and pricing.
+    -   `query_knowledge_base`: Answers policy/warranty questions using **RAG** (ChromaDB).
+    -   `update_lead`: Saves call notes and status directly to the database.
 
-## 🛠️ Tech Stack
+### 💻 Modern CRM Dashboard
+-   **Tech Stack**: Next.js 15, React, Tailwind CSS.
+-   **Theme**: Professional Light Mode (SaaS/Enterprise style).
+-   **Capabilities**:
+    -   manage Leads (Add/Edit/Search).
+    -   **One-Click Call**: Trigger AI calls directly from the browser.
+    -   View Call History & Settings.
 
--   **Python 3.12+**
--   **FastAPI** (Web Server)
--   **Uvicorn** (ASGI Server)
--   **Twilio** (Telephony & SMS)
--   **Google Gemini 2.0 Flash Exp** (LLM & Voice Generation)
--   **WebSockets** (Streaming Audio)
+### ⚙️ Backend Architecture
+-   **FastAPI**: High-performance Python web server.
+-   **PostgreSQL**: Primary database for Leads and Call logs.
+-   **ChromaDB**: Vector store for RAG (Knowledge Base).
+-   **WebSockets**: Bi-directional audio streaming for voice.
 
-## 📦 Setup
+---
 
-1.  **Clone the repository**
-    ```bash
-    git clone https://github.com/iLokeshKumar/Make-Call.git
-    cd Make-Call
-    ```
+## 🛠️ Installation & Setup
 
-2.  **Install Dependencies**
-    Navigate to the source code folder and install:
-    ```bash
-    cd outbound-calling-speech-assistant-openai-realtime-api-python
-    pip install -r requirements.txt
-    ```
+### Prerequisites
+-   Python 3.12+
+-   Node.js 18+
+-   Twilio Account (SID, Token, Phone Number)
+-   Google Gemini API Key
 
-3.  **Environment Variables**
-    Create a `.env` file in the source folder with your credentials:
-    ```env
-    TWILIO_ACCOUNT_SID=your_sid
-    TWILIO_AUTH_TOKEN=your_token
-    PHONE_NUMBER_FROM=+1234567890
-    GEMINI_API_KEY=your_google_ai_key
-    DOMAIN=your-ngrok-url.ngrok-free.app
-    PORT=6060
-    ```
+### 1. clone the Repository
+```bash
+git clone https://github.com/iLokeshKumar/Make-Call.git
+cd Make-Call
+```
 
-4.  **Run the Server**
-    ```bash
-    python main.py
-    ```
+### 2. Backend Setup
+Navigate to the backend folder and install dependencies:
+```bash
+cd outbound-calling-speech-assistant-openai-realtime-api-python
+pip install -r requirements.txt
+```
 
-5.  **Expose to Internet (Ngrok)**
-    Twilio needs a public URL to connect to your localhost.
-    ```bash
-    ngrok http 6060
-    ```
-    *Copy the ngrok URL and update `DOMAIN` in your `.env` file.*
+Create a `.env` file in this folder:
+```env
+TWILIO_ACCOUNT_SID=your_sid
+TWILIO_AUTH_TOKEN=your_token
+PHONE_NUMBER_FROM=+1234567890
+GEMINI_API_KEY=your_gemini_key
+DATABASE_URL=postgresql://user:pass@localhost/calls
+DOMAIN=your-ngrok-url.ngrok-free.app
+PORT=6060
+```
 
-## 📞 Usage
+### 3. Frontend Setup
+Navigate to the frontend folder and install dependencies:
+```bash
+cd ../frontend
+npm install
+```
 
--   **Make a Call**: Send a POST request to `/make-call` with the destination number.
--   **Receive SMS**: Configure your Twilio number's messaging webhook to `https://[your-ngrok]/incoming-sms`.
+---
+
+## 🚀 Usage
+
+### One-Click Start (Windows)
+Simply run the startup script:
+```bash
+start_servers.bat
+```
+This will launch both the Backend (Port 6060) and Frontend (Port 3006).
+
+### Manual Start
+**Backend:**
+```bash
+cd outbound-calling-speech-assistant-openai-realtime-api-python
+python main.py
+```
+
+**Frontend:**
+```bash
+cd frontend
+npm run dev
+```
+
+### Access the App
+Open your browser and go to:
+[http://localhost:3006](http://localhost:3006)
+
+---
+
+## 🤝 Contribution
+Feel free to open issues or submit PRs.
 
 ## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+MIT License.
