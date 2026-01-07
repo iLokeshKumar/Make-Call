@@ -2,6 +2,9 @@ fastapi
 uvicorn
 twilio
 websockets
+sqlmodel
+psycopg2-binary
+chromadb
 python-dotenv
 google-genai
 numpy
