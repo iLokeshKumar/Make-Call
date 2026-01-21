@@ -1,33 +1,38 @@
 # Rio CRM - AI Voice & Sales Assistant
 
-**Rio** is a next-generation AI Sales Assistant designed for **Yexis Electronics**. It combines a real-time voice agent with a full-stack CRM dashboard to automate customer interactions, manage leads, and answer complex queries using RAG (Retrieval-Augmented Generation).
+**Rio** is a next-generation AI Sales Assistant designed for **Yexis Electronics** and **Talentrus**. It combines a real-time voice agent with a full-stack CRM dashboard to automate customer interactions, manage leads, and answer complex queries using RAG (Retrieval-Augmented Generation).
 
-![Rio Dashboard](https://github.com/user-attachments/assets/placeholder)
+---
 
-## 🚀 Features
+## 🚀 Latest Updates
 
-### 🤖 AI Voice Agent
--   **Real-time Conversations**: \<1s latency voice interaction using **Google Gemini 2.0 Flash** + **Twilio Media Streams**.
--   **Contextual Awareness**: Knows exactly who is calling (Name, History, Status) and updates the CRM automatically.
--   **Multilingual**: Speaks English, Hindi, Tamil, Telugu, Malayalam, Urdu, and Sanskrit.
--   **Tool Use**:
-    -   `check_inventory`: Checks live stock and pricing.
-    -   `query_knowledge_base`: Answers policy/warranty questions using **RAG** (ChromaDB).
-    -   `update_lead`: Saves call notes and status directly to the database.
+### 🎙️ Multi-Engine Voice AI
+- **Dual Architecture**: Switch seamlessly between **Gemini 2.0 Flash** (native multimodal) and a custom **Mistral/Deepgram/ElevenLabs** pipeline.
+- **Low Latency**: Real-time WebSocket streaming ensures response times under 500ms.
 
-### 💻 Modern CRM Dashboard
--   **Tech Stack**: Next.js 15, React, Tailwind CSS.
--   **Theme**: Professional Light Mode (SaaS/Enterprise style).
--   **Capabilities**:
-    -   manage Leads (Add/Edit/Search).
-    -   **One-Click Call**: Trigger AI calls directly from the browser.
-    -   View Call History & Settings.
+### 📞 Telephony Abstraction
+- **EnableX Integration**: Full support for EnableX telephony alongside Twilio, providing local routing and cost-effective scaling for the Indian market.
+- **Dynamic Routing**: Toggle between carriers instantly via the Settings dashboard.
 
-### ⚙️ Backend Architecture
--   **FastAPI**: High-performance Python web server.
--   **PostgreSQL**: Primary database for Leads and Call logs.
--   **ChromaDB**: Vector store for RAG (Knowledge Base).
--   **WebSockets**: Bi-directional audio streaming for voice.
+### 📥 Intelligent Lead Ingestion
+- **Apollo.io Integration**: Automated lead fetching from Apollo's organization database.
+- **Bulk Upload**: Standardized processing for Excel and CSV files with duplicate detection.
+- **Audit Trails**: Every record now tracks `created_by`, `updated_by`, and timestamps for full transparency.
+
+### � Dynamic Management
+- **Inventory Control**: Add and edit products live. Rio's brain updates instantly to reflect current stock and pricing.
+- **Live Scripting**: Modify Rio's personality and instructions from the dashboard without restarting the server.
+
+---
+
+## 🎯 Long-Term Vision: The Autonomous Sales Operation
+
+Our goal is to transform Rio from a simple assistant into a fully **Autonomous Sales Operation** capable of handling the entire top-of-funnel lifecycle:
+
+- **Phase 1: Prospecting & Enrichment**: Full "Waterfall" enrichment (Local -> Apollo -> Lusha -> Validation) to ensure high-quality contact data.
+- **Phase 2: Multi-Channel Sequence**: Automated follow-ups via Voice, WhatsApp, and Email based on customer sentiment.
+- **Phase 3: Live Handoff**: Intelligent escalation to human sales reps for high-value leads with real-time context transfer.
+- **Phase 4: Quote to Close**: Automated PDF quotation generation and CRM conversion using deep tool-calling integrations.
 
 ---
 
@@ -36,35 +41,21 @@
 ### Prerequisites
 -   Python 3.12+
 -   Node.js 18+
--   Twilio Account (SID, Token, Phone Number)
--   Google Gemini API Key
+-   API Keys for: Twilio/EnableX, Gemini, Deepgram, ElevenLabs, Mistral, Apollo.io.
 
-### 1. clone the Repository
+### 1. Clone the Repository
 ```bash
 git clone https://github.com/iLokeshKumar/Make-Call.git
 cd Make-Call
 ```
 
 ### 2. Backend Setup
-Navigate to the backend folder and install dependencies:
 ```bash
 cd outbound-calling-speech-assistant-openai-realtime-api-python
 pip install -r requirements.txt
 ```
 
-Create a `.env` file in this folder:
-```env
-TWILIO_ACCOUNT_SID=your_sid
-TWILIO_AUTH_TOKEN=your_token
-PHONE_NUMBER_FROM=+1234567890
-GEMINI_API_KEY=your_gemini_key
-DATABASE_URL=postgresql://user:pass@localhost/calls
-DOMAIN=your-ngrok-url.ngrok-free.app
-PORT=6060
-```
-
 ### 3. Frontend Setup
-Navigate to the frontend folder and install dependencies:
 ```bash
 cd ../frontend
 npm install
@@ -75,33 +66,16 @@ npm install
 ## 🚀 Usage
 
 ### One-Click Start (Windows)
-Simply run the startup script:
-```bash
-start_servers.bat
-```
-This will launch both the Backend (Port 6060) and Frontend (Port 3006).
-
-### Manual Start
-**Backend:**
-```bash
-cd outbound-calling-speech-assistant-openai-realtime-api-python
-python main.py
-```
-
-**Frontend:**
-```bash
-cd frontend
-npm run dev
-```
-
-### Access the App
-Open your browser and go to:
-[http://localhost:3006](http://localhost:3006)
+Run `start_servers.bat` to launch both the Backend (6060) and Frontend (3006).
 
 ---
 
-## 🤝 Contribution
-Feel free to open issues or submit PRs.
+## 🤝 Partners & Attribution
+**Developed by [Adomita](https://adomita.com/)** for:
+- [Yexis Electronics](https://www.yexis.in/)
+- [Talentrus](https://talentrus.net/)
+- [Manufacturing Talentrus](https://manufacturing.talentrus.net/)
+- [Distribution Talentrus](https://distribution.talentrus.net/)
 
 ## 📄 License
-MIT License.
+This project is licensed under the MIT License.

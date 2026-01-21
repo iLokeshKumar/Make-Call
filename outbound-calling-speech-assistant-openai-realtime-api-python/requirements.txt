@@ -9,3 +9,11 @@ python-dotenv
 google-genai
 numpy
 scipy
+mistralai
+deepgram-sdk>=5.0.0,<6.0.0
+elevenlabs
+aiohttp
+pandas
+openpyxl
+python-multipart
+requests

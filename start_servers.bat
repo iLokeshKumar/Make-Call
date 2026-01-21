@@ -3,7 +3,7 @@ echo Starting Rio CRM System...
 
 :: Start Backend
 start "Rio Backend (FastAPI)" cmd /k "cd outbound-calling-speech-assistant-openai-realtime-api-python && python main.py"
-
+:: start "Rio Backend (FastAPI)" cmd /k "cd outbound-calling-speech-assistant-openai-realtime-api-python && myenvironment\Scripts\python.exe main.py"
 :: Start Frontend
 start "Rio Dashboard (Next.js)" cmd /k "cd frontend && npm run dev"
 
