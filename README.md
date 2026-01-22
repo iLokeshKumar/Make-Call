@@ -72,10 +72,11 @@ Run `start_servers.bat` to launch both the Backend (6060) and Frontend (3006).
 
 ## 🤝 Partners & Attribution
 **Developed by [Adomita](https://adomita.com/)** for:
-- [Yexis Electronics](https://www.yexis.in/)
+- [Yexis Solutions](https://www.yexis.in/)
+- [Yexis Electronics](https://www.yexiselectronics.com/)
 - [Talentrus](https://talentrus.net/)
-- [Manufacturing Talentrus](https://manufacturing.talentrus.net/)
-- [Distribution Talentrus](https://distribution.talentrus.net/)
+- [Talentrus Manufacturing](https://manufacturing.talentrus.net/)
+- [Talentrus Distribution](https://distribution.talentrus.net/)
 
-## 📄 License
-This project is licensed under the MIT License.
+## 🔒 License
+Proprietary and Confidential. Unauthorized use or distribution is prohibited.
