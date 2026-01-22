@@ -41,6 +41,7 @@ class Lead(AuditMixin, table=True):
     status: str = Field(default="New")
     source: str = Field(default="Manual") 
     notes: Optional[str] = None
+    enrichment_status: Optional[str] = Field(default="Not Enriched") # e.g. "Apollo Enriched", "Lusha Enriched"
     # created_at handled by mixin
 
 class LeadCreate(SQLModel):

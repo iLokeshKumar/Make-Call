@@ -43,6 +43,7 @@ import aiohttp
 from database import init_db, get_session, Lead, LeadCreate, engine, Interaction, Product, SystemSettings
 from sqlmodel import Session, select, func, text, col, SQLModel
 from rag_service import search_knowledge_base
+from enrichment_service import enrich_lead_cascade
 
 # Initialize DB on startup
 init_db()
@@ -167,6 +168,14 @@ async def fetch_apollo(search: ApolloSearch, session: Session = Depends(get_sess
     except Exception as e:
         print(f"Apollo Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/leads/{lead_id}/enrich")
+async def enrich_lead(lead_id: int):
+    """Triggers the waterfall enrichment for a specific lead."""
+    result = enrich_lead_cascade(lead_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
 
 # Dashboard Stats Endpoint
 @app.get("/dashboard/stats")

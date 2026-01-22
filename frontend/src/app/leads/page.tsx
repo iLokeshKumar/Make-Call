@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search } from "lucide-react";
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles } from "lucide-react";
 
 interface Lead {
     id: number;
@@ -11,7 +11,7 @@ interface Lead {
     status: string;
     source: string;
     notes?: string;
-
+    enrichment_status?: string;
 }
 
 export default function LeadsPage() {
@@ -189,10 +189,10 @@ export default function LeadsPage() {
 
             {/* Apollo Section */}
             <div className="rounded-2xl glass p-8 border border-white/40 dark:border-white/10 shadow-xl relative overflow-hidden mb-8">
-                 <div className="absolute top-0 right-0 p-4 opacity-10">
+                <div className="absolute top-0 right-0 p-4 opacity-10">
                     <Search className="w-32 h-32" />
-                 </div>
-                 <div className="flex flex-col md:flex-row items-center gap-8 relative z-10">
+                </div>
+                <div className="flex flex-col md:flex-row items-center gap-8 relative z-10">
                     <div className="flex-1 space-y-4">
                         <div className="flex items-center space-x-3">
                             <div className="p-3 rounded-xl bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
@@ -202,25 +202,25 @@ export default function LeadsPage() {
                         </div>
                         <p className="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
                             Connect to <strong>Apollo.io</strong> to verify and fetch potential leads automatically.
-                            <br/>Enter target keywords (e.g., "Software Companies", "Hospitals") to populate your queue.
+                            <br />Enter target keywords (e.g., "Software Companies", "Hospitals") to populate your queue.
                         </p>
                     </div>
 
                     <div className="flex-1 w-full max-w-md">
                         <div className="space-y-4">
-                             <input 
+                            <input
                                 type="text"
                                 placeholder="Target Industry or Keywords..."
                                 className="block w-full rounded-xl border-slate-300 p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
                                 id="apollo-search"
-                             />
-                             <button
+                            />
+                            <button
                                 onClick={async () => {
                                     const input = document.getElementById('apollo-search') as HTMLInputElement;
                                     const keywords = input.value || "Technology";
                                     const btn = document.getElementById('apollo-btn') as HTMLButtonElement;
-                                    
-                                    if(btn) {
+
+                                    if (btn) {
                                         btn.disabled = true;
                                         btn.innerText = "Fetching...";
                                     }
@@ -228,20 +228,20 @@ export default function LeadsPage() {
                                     try {
                                         const res = await fetch(`${API_BASE}/leads/fetch-apollo`, {
                                             method: 'POST',
-                                            headers: {'Content-Type': 'application/json'},
-                                            body: JSON.stringify({ keywords }) 
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ keywords })
                                         });
                                         const data = await res.json();
-                                        if(res.ok) {
+                                        if (res.ok) {
                                             alert(data.message);
                                             fetchLeads();
                                         } else {
                                             alert("Error: " + data.detail);
                                         }
-                                    } catch(e) {
+                                    } catch (e) {
                                         alert("Connection Error");
                                     } finally {
-                                        if(btn) {
+                                        if (btn) {
                                             btn.disabled = false;
                                             btn.innerText = "Fetch from Apollo";
                                         }
@@ -249,10 +249,10 @@ export default function LeadsPage() {
                                 }}
                                 id="apollo-btn"
                                 className="w-full flex items-center justify-center space-x-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-3 font-semibold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all disabled:opacity-50"
-                             >
+                            >
                                 <Search className="h-5 w-5" />
                                 <span>Fetch from Apollo</span>
-                             </button>
+                            </button>
                         </div>
                     </div>
                 </div>
@@ -314,13 +314,39 @@ export default function LeadsPage() {
                                             </span>
                                         </td>
                                         <td className="px-6 py-4 text-right">
-                                            <button
-                                                onClick={() => handleCall(lead.phone, lead.id)}
-                                                className="inline-flex items-center space-x-1 bg-violet-100 hover:bg-violet-200 text-violet-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors"
-                                            >
-                                                <Phone className="h-3 w-3" />
-                                                <span>Call</span>
-                                            </button>
+                                            <div className="flex justify-end items-center space-x-2">
+                                                <button
+                                                    onClick={async () => {
+                                                        try {
+                                                            const res = await fetch(`${API_BASE}/leads/${lead.id}/enrich`, { method: 'POST' });
+                                                            if (res.ok) {
+                                                                alert("Successfully Enriched");
+                                                                fetchLeads();
+                                                            } else {
+                                                                alert("Enrichment failed");
+                                                            }
+                                                        } catch (e) {
+                                                            alert("Link Error");
+                                                        }
+                                                    }}
+                                                    title={lead.enrichment_status || "Not Enriched"}
+                                                    className={`inline-flex items-center space-x-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${lead.enrichment_status && lead.enrichment_status !== 'Not Enriched'
+                                                            ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                                                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                                        }`}
+                                                >
+                                                    <Sparkles className="h-3 w-3" />
+                                                    <span>Enrich</span>
+                                                </button>
+
+                                                <button
+                                                    onClick={() => handleCall(lead.phone, lead.id)}
+                                                    className="inline-flex items-center space-x-1 bg-violet-100 hover:bg-violet-200 text-violet-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors"
+                                                >
+                                                    <Phone className="h-3 w-3" />
+                                                    <span>Call</span>
+                                                </button>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))
