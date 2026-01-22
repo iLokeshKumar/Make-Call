@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles } from "lucide-react";
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles, UserPlus, Plus, Mail, StickyNote } from "lucide-react";
 
 interface Lead {
     id: number;
@@ -21,6 +21,8 @@ export default function LeadsPage() {
     const [file, setFile] = useState<File | null>(null);
     const [uploadResult, setUploadResult] = useState<{ message: string; errors: string[] } | null>(null);
     const [searchQuery, setSearchQuery] = useState("");
+    const [manualLead, setManualLead] = useState({ name: "", phone: "", email: "", notes: "" });
+    const [isModalOpen, setIsModalOpen] = useState(false);
 
     const API_BASE = "http://localhost:6060";
 
@@ -86,12 +88,20 @@ export default function LeadsPage() {
         }
     };
 
+    const handleOpenModal = () => {
+        setIsModalOpen(true);
+    };
+
     // Keep existing delete functionality
     const handleDeleteLead = async (id: number) => {
         if (!confirm("Are you sure you want to delete this lead?")) return;
         try {
             const res = await fetch(`${API_BASE}/leads/${id}`, { method: "DELETE" });
-
+            if (res.ok) {
+                fetchLeads();
+            } else {
+                alert("Failed to delete lead");
+            }
         } catch (error) {
             console.error("Error deleting lead:", error);
         }
@@ -114,6 +124,13 @@ export default function LeadsPage() {
                         Import and manage your sales leads.
                     </p>
                 </div>
+                <button
+                    onClick={() => handleOpenModal()}
+                    className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-6 py-3 font-semibold text-white shadow-lg shadow-violet-500/50 hover:shadow-xl hover:scale-105 transition-all duration-300"
+                >
+                    <Plus className="h-5 w-5" />
+                    <span>Add Lead</span>
+                </button>
             </div>
 
             {/* Upload Section */}
@@ -331,8 +348,8 @@ export default function LeadsPage() {
                                                     }}
                                                     title={lead.enrichment_status || "Not Enriched"}
                                                     className={`inline-flex items-center space-x-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${lead.enrichment_status && lead.enrichment_status !== 'Not Enriched'
-                                                            ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
-                                                            : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                                                        ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
+                                                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
                                                         }`}
                                                 >
                                                     <Sparkles className="h-3 w-3" />
@@ -346,6 +363,14 @@ export default function LeadsPage() {
                                                     <Phone className="h-3 w-3" />
                                                     <span>Call</span>
                                                 </button>
+
+                                                <button
+                                                    onClick={() => handleDeleteLead(lead.id)}
+                                                    className="inline-flex items-center space-x-1 bg-rose-100 hover:bg-rose-200 text-rose-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors"
+                                                >
+                                                    <Trash2 className="h-3 w-3" />
+                                                    <span>Delete</span>
+                                                </button>
                                             </div>
                                         </td>
                                     </tr>
@@ -355,6 +380,123 @@ export default function LeadsPage() {
                     </table>
                 </div>
             </div>
+
+            {/* Modal Overlay */}
+            {isModalOpen && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
+                    <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-white/20 overflow-hidden animate-in zoom-in-95 duration-200">
+                        <div className="p-6 border-b border-slate-100 dark:border-white/5 flex items-center justify-between bg-gradient-to-r from-violet-50 to-blue-50 dark:from-violet-900/20 dark:to-blue-900/20">
+                            <div className="flex items-center space-x-3">
+                                <div className="p-2.5 rounded-xl bg-violet-600 text-white shadow-lg shadow-violet-500/30">
+                                    <UserPlus className="h-5 w-5" />
+                                </div>
+                                <h2 className="text-xl font-bold">Add New Lead</h2>
+                            </div>
+                            <button
+                                onClick={() => setIsModalOpen(false)}
+                                className="p-2 hover:bg-white/50 dark:hover:bg-white/10 rounded-full transition-colors"
+                            >
+                                <X className="h-5 w-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-6 space-y-6">
+                            <div className="space-y-4">
+                                <div className="space-y-2">
+                                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Lead Name</label>
+                                    <input
+                                        type="text"
+                                        placeholder="Enter full name"
+                                        className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 px-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all"
+                                        value={manualLead.name}
+                                        onChange={(e) => setManualLead({ ...manualLead, name: e.target.value })}
+                                    />
+                                </div>
+                                <div className="space-y-2">
+                                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Phone Number</label>
+                                    <div className="relative">
+                                        <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
+                                            <Phone className="h-4 w-4 text-slate-400" />
+                                        </div>
+                                        <input
+                                            type="text"
+                                            placeholder="+1234567890"
+                                            className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 pl-11 pr-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all"
+                                            value={manualLead.phone}
+                                            onChange={(e) => setManualLead({ ...manualLead, phone: e.target.value })}
+                                        />
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Email Address</label>
+                                <div className="relative">
+                                    <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
+                                        <Mail className="h-4 w-4 text-slate-400" />
+                                    </div>
+                                    <input
+                                        type="email"
+                                        placeholder="john@example.com"
+                                        className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 pl-11 pr-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all"
+                                        value={manualLead.email}
+                                        onChange={(e) => setManualLead({ ...manualLead, email: e.target.value })}
+                                    />
+                                </div>
+                            </div>
+
+                            <div className="space-y-2">
+                                <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Notes</label>
+                                <div className="relative">
+                                    <div className="absolute top-4 left-4 flex items-center pointer-events-none">
+                                        <StickyNote className="h-4 w-4 text-slate-400" />
+                                    </div>
+                                    <textarea
+                                        placeholder="Add any relevant notes..."
+                                        rows={3}
+                                        className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 pl-11 pr-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all resize-none"
+                                        value={manualLead.notes}
+                                        onChange={(e) => setManualLead({ ...manualLead, notes: e.target.value })}
+                                    />
+                                </div>
+                            </div>
+                        </div>
+                        <div className="flex space-x-3 pt-2">
+                            <button
+                                onClick={() => setIsModalOpen(false)}
+                                className="flex-1 px-4 py-3.5 rounded-2xl font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                disabled={!manualLead.name || !manualLead.phone}
+                                onClick={async () => {
+                                    try {
+                                        const res = await fetch(`${API_BASE}/leads`, {
+                                            method: 'POST',
+                                            headers: { 'Content-Type': 'application/json' },
+                                            body: JSON.stringify({ ...manualLead, source: "Manual" })
+                                        });
+                                        if (res.ok) {
+                                            setManualLead({ name: "", phone: "", email: "", notes: "" });
+                                            setIsModalOpen(false);
+                                            fetchLeads();
+                                        } else {
+                                            const data = await res.json();
+                                            alert("Error: " + (data.detail || "Failed to add lead"));
+                                        }
+                                    } catch (e) {
+                                        alert("Connection Error");
+                                    }
+                                }}
+                                className="flex-2 px-8 py-3.5 rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 font-bold text-white shadow-xl shadow-violet-500/30 hover:shadow-2xl hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:grayscale"
+                            >
+                                Add Lead
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

@@ -4,6 +4,7 @@ import asyncio
 import base64
 import sys
 import audioop
+import re
 import pandas as pd
 import io
 from datetime import datetime, timezone
@@ -44,6 +45,7 @@ from database import init_db, get_session, Lead, LeadCreate, engine, Interaction
 from sqlmodel import Session, select, func, text, col, SQLModel
 from rag_service import search_knowledge_base
 from enrichment_service import enrich_lead_cascade
+from email_service import send_smtp_email, get_styled_html
 
 # Initialize DB on startup
 init_db()
@@ -183,11 +185,7 @@ async def get_dashboard_stats(session: Session = Depends(get_session)):
     """Fetch aggregated stats for the dashboard."""
     total_leads = session.exec(select(func.count(Lead.id))).one()
     
-    # Calls today (created_at >= start of today). 
-    # SQLite doesn't have easy date functions like PG, so we might check python side or basic sql.
-    # PROPER WAY: use date(now).
-    # For compatibility/simplicity, we'll try a basic filter or fetch all and filter (for small scale).
-    # Better: SQLModel standard way.
+    
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
     calls_today = session.exec(select(func.count(Interaction.id)).where(Interaction.type == "call").where(Interaction.timestamp >= today_start)).one()
     
@@ -226,7 +224,7 @@ ENABLEX_APP_ID = os.getenv("EnableX_App_ID")
 ENABLEX_APP_KEY = os.getenv("EnableX_App_Key")
 ENABLEX_FROM_NUMBER = os.getenv("ENABLEX_FROM_NUMBER")
 
-DOMAIN = os.getenv("DOMAIN") # e.g. "your-id.ngrok-free.app"
+DOMAIN = os.getenv("DOMAIN")
 if DOMAIN:
     DOMAIN = DOMAIN.replace("http://", "").replace("https://", "").replace("/", "")
 PORT = int(os.getenv("PORT", 6060))
@@ -301,7 +299,48 @@ def update_lead_tool(phone: str, notes: str, status: str = None):
              # Create new lead if not exists? For now just report.
             return "Lead not found for this number."
 
-tools = [check_inventory, query_knowledge_base, update_lead_tool]
+def send_email_tool(phone: str, email: str, subject: str, body: str):
+    """
+    Sends an email to the lead. Update lead's email if provided.
+    """
+    print(f"Tool Triggered: send_email_tool({phone}, {email})")
+    with Session(engine) as session:
+        statement = select(Lead).where(Lead.phone == phone)
+        lead = session.exec(statement).first()
+        
+        # Priority: use provided email, fallback to DB
+        target_email = email or (lead.email if lead else None)
+        
+        if not target_email:
+            return "Error: No email address available for this lead. Please ask the user for their email."
+
+        # Update lead in DB if email was captured on call
+        if lead and email and lead.email != email:
+            lead.email = email
+            lead.notes = (lead.notes or "") + f"\n[AI]: Captured email address: {email}"
+            session.add(lead)
+            session.commit()
+            print(f"Updated lead {lead.name} with email {email}")
+
+        # Generate Premium HTML
+        html_content = get_styled_html(subject, body, lead.name if lead else "Valued Customer")
+        success = send_smtp_email(target_email, subject, body, html_body=html_content)
+        
+        if success:
+            # Log as interaction
+            interaction = Interaction(
+                lead_id=lead.id if lead else 0,
+                type="email",
+                content=f"Sent Email: {subject}",
+                timestamp=datetime.now(timezone.utc)
+            )
+            session.add(interaction)
+            session.commit()
+            return f"Successfully sent email to {target_email}."
+        else:
+            return "Failed to send email. Ensure SMTP settings are configured in .env."
+
+tools = [check_inventory, query_knowledge_base, update_lead_tool, send_email_tool]
 
 # Emergency Safety
 BLOCKED_NUMBERS = {"911", "112", "999"}
@@ -741,7 +780,7 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
         "speech_config": {
             "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
         },
-        "tools": [check_inventory, query_knowledge_base, update_lead_tool]
+        "tools": [check_inventory, query_knowledge_base, update_lead_tool, send_email_tool]
     }
 
     try:
@@ -824,6 +863,26 @@ async def handle_enablex_media_stream(websocket: WebSocket, session: Session = D
     else:
         await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
 
+def clean_voice_text(text: str, max_chars: int = 300) -> str:
+    """Removes markdown and truncates text for voice output."""
+    if not text:
+        return ""
+    
+    # Remove markdown bold/italic/headers
+    text = re.sub(r'[*#_~`>]', '', text)
+    
+    # Remove links
+    text = re.sub(r'\[.*?\]\(.*?\)', '', text)
+    
+    # Clean whitespace
+    text = " ".join(text.split())
+    
+    # Truncate
+    if len(text) > max_chars:
+        text = text[:max_chars].rsplit(' ', 1)[0] + "..."
+        
+    return text.strip()
+
 async def run_tool(name, args, transcript_accumulator, interaction_id):
     """Shared tool runner for all pipelines."""
     result = "Unknown tool"
@@ -836,6 +895,9 @@ async def run_tool(name, args, transcript_accumulator, interaction_id):
     elif name == "update_lead_tool":
         result = update_lead_tool(phone=args.get("phone"), notes=args.get("notes"), status=args.get("status"))
         transcript_accumulator.append(f"[System]: Updated lead info (Status: {args.get('status')})")
+    elif name == "send_email_tool":
+        result = send_email_tool(phone=args.get("phone"), email=args.get("email"), subject=args.get("subject"), body=args.get("body"))
+        transcript_accumulator.append(f"[System]: Sent email to {args.get('email') or 'lead'}")
     
     save_transcript(interaction_id, transcript_accumulator)
     return result
@@ -937,6 +999,23 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                     }
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_email_tool",
+                "description": "Send a professional email to the lead with details they requested.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "phone": {"type": "string", "description": "The lead's phone number as shown in context."},
+                        "email": {"type": "string", "description": "The lead's email address. If they tell you on the call, provide it here."},
+                        "subject": {"type": "string", "description": "Email subject line."},
+                        "body": {"type": "string", "description": "The full professional email content."}
+                    },
+                    "required": ["phone", "subject", "body"]
+                }
+            }
         }
     ]
 
@@ -946,8 +1025,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         """Streaming TTS from ElevenLabs to Twilio."""
         if not text.strip(): return
         
-        # Clean Markdown
-        clean_text = text.replace("*", "").replace("#", "").strip()
+        # Voice Performance Tuning: Strip Markdown & Truncate
+        clean_text = clean_voice_text(text, max_chars=350)
         
         url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
         print(f"Connecting to ElevenLabs TTS (PCM 16k) using Voice: {ELEVENLABS_VOICE_ID}... Text len: {len(clean_text)}")

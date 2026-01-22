@@ -77,6 +77,7 @@ Run `start_servers.bat` to launch both the Backend (6060) and Frontend (3006).
 - [Talentrus](https://talentrus.net/)
 - [Talentrus Manufacturing](https://manufacturing.talentrus.net/)
 - [Talentrus Distribution](https://distribution.talentrus.net/)
+- [Yexis Consulting](https://yexisconsulting.com/)
 
 ## 🔒 License
 Proprietary and Confidential. Unauthorized use or distribution is prohibited.
