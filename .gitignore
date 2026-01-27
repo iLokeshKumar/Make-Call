@@ -25,10 +25,7 @@ __pycache__/
 *.so
 .Python
 env/
-build/
 develop-eggs/
-dist/
-downloads/
 eggs/
 .eggs/
 lib/
@@ -43,7 +40,6 @@ wheels/
 
 # Virtual Environments
 venv/
-env/
 ENV/
 myenvironment/
 
@@ -57,5 +53,10 @@ myenvironment/
 # Sensitive Media
 *.wav
 *.mp3
+
+# Database
+*.db
+*.sqlite
+
 # (Optional: If you want to keep knowledge base, un-comment next line. Usually DBs are ignored)
 # knowledge_base/
