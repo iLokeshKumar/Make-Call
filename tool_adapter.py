@@ -36,9 +36,7 @@ from mcp_server import (
 
 logger = logging.getLogger(__name__)
 
-# ============================================
 # MISTRAL TOOL SCHEMA CONVERTER
-# ============================================
 
 def get_mistral_tools():
     """
@@ -135,9 +133,7 @@ def get_mistral_tools():
     ]
 
 
-# ============================================
 # UNIFIED TOOL EXECUTOR
-# ============================================
 
 async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
     """
@@ -209,10 +205,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
         logger.error(f"[execute_mcp_tool] Exception: {error}", exc_info=True)
         return error
 
-
-# ============================================
 # TOOL METADATA (for documentation/debugging)
-# ============================================
 
 TOOL_DESCRIPTIONS = {
     "check_icp_qualification": {

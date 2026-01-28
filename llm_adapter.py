@@ -1,9 +1,3 @@
-"""
-LLM Adapter Factory
-Provides pluggable LLM clients for any provider
-Enables easy switching between Gemini, Mistral, Qwen, Claude, etc.
-"""
-
 from enum import Enum
 from typing import Any, Dict
 import os
@@ -109,10 +103,7 @@ class LLMClient:
         else:
             raise ValueError(f"Unsupported provider: {provider}")
 
-
-# ============================================
-# FUTURE LLM TOOL CONVERTERS
-# ============================================
+# LLM TOOL CONVERTERS
 
 def get_qwen_tools() -> list:
     """Convert MCP tools to Qwen function calling format"""
@@ -182,12 +173,9 @@ def get_openai_tools() -> list:
 
 def get_llama_tools() -> list:
     """Convert MCP tools to LLaMA format (if supported)"""
-    return []  # LLaMA typically runs locally, adjust as needed
+    return []  # META LLaMA typically runs locally, adjust as needed
 
-
-# ============================================
-# USAGE EXAMPLES
-# ============================================
+# DEMO USAGE EXAMPLES
 
 """
 # Switch to Qwen

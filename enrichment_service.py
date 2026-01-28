@@ -20,7 +20,7 @@ def enrich_lead_cascade(lead_id: int):
 
         print(f"Starting enrichment for Lead: {lead.name} (ID: {lead_id})")
 
-        # Step 1: Apollo Enrichment (Organization Level)
+        # Step 1: Apollo Enrichment if Kumar Sir gives money for API(Organization Level)
         # ---------------------------------------------
         if lead.enrichment_status == "Not Enriched":
             try:
@@ -28,9 +28,6 @@ def enrich_lead_cascade(lead_id: int):
                 domain = None
                 if lead.email and "@" in lead.email:
                     domain = lead.email.split("@")[-1]
-                
-                # If no domain, we can't do much with Apollo organizations/enrich easily without search
-                # For now, let's assume we have a domain or try to match it.
                 
                 if domain:
                     url = "https://api.apollo.io/v1/organizations/enrich"
@@ -61,8 +58,8 @@ def enrich_lead_cascade(lead_id: int):
         # Step 2: Lusha Enrichment (Stub)
         # ------------------------------
         if lead.enrichment_status in ["Not Enriched", "Apollo Enriched"]:
-            # Placeholder for Lusha logic
-            # Once API key is provided, we can add logic here to find direct person info
+            # Placeholder for Lusha logic, Kumar Sir will not give money for this
+            # If will not happen, but my accident if API key is provided, we can add logic here to find direct person info
             pass
 
         session.add(lead)
@@ -77,7 +74,7 @@ def enrich_lead_cascade(lead_id: int):
         }
 
 if __name__ == "__main__":
-    # Quick test logic
+    # test this logic
     import sys
     if len(sys.argv) > 1:
         print(enrich_lead_cascade(int(sys.argv[1])))

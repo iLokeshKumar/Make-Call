@@ -47,8 +47,9 @@ myenvironment/
 .vscode/
 .idea/
 
-# Logs
-*.log
+# Google API
+google_credentials.json
+token.pickle
 
 # Sensitive Media
 *.wav

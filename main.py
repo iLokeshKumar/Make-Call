@@ -21,9 +21,6 @@ from google import genai
 from google.genai import types
 from mistralai import Mistral as MistralClient
 
-# ============================================
-# ENHANCED LOGGING SETUP
-# ============================================
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - [%(levelname)s] [%(name)s] %(message)s'
@@ -62,10 +59,6 @@ from tool_adapter import get_mistral_tools, execute_mcp_tool
 init_db()
 
 from fastapi.middleware.cors import CORSMiddleware
-
-# ============================================
-# RIO PERSONA & SYSTEM PROMPT (2026 RACE Framework)
-# ============================================
 
 RIO_PERSONA_PROMPT = """
 You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
@@ -114,9 +107,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:3000", 
         "http://localhost:3006",
-        "http://127.0.0.1:3000",
         "http://127.0.0.1:3006"
     ],
     allow_credentials=True,
@@ -289,7 +280,7 @@ async def get_interactions(session: Session = Depends(get_session)):
     return interactions
 
 # AI Instructions and Configuration are now loaded dynamically from the database.
-# See SystemSettings model in database.py.
+# Check SystemSettings model in database.py.
 
 # Configuration
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -447,9 +438,8 @@ def book_demo_tool(phone: str, time_str: str, notes: str = None):
         if not lead:
             return "Error: Lead not found for this phone number."
 
-        # Simplistic parsing/mock for demo. In 2026, we'd use a real datetime parser or LLM.
         try:
-            # Placeholder: just use now + some logic or the raw string for demo
+            # just use now + some logic or the raw string for demo
             appt_time = datetime.now(timezone.utc) # Mocking the parse
             new_appt = Appointment(
                 lead_id=lead.id,
@@ -514,7 +504,7 @@ def query_mcp_resource(resource_uri: str):
 
 tools = [check_inventory, query_knowledge_base, update_lead_tool, send_email_tool, book_demo_tool, query_mcp_resource]
 
-# Emergency Safety
+# Emergency Safety Numbers just for safety or else Twilio will charge $75 as fine.
 BLOCKED_NUMBERS = {"911", "112", "999"}
 
 
@@ -533,7 +523,7 @@ from fastapi.middleware.cors import CORSMiddleware
 # Enable CORS for Dashboard
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # Allow all for demo purposes (or specific localhost ports)
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -728,7 +718,6 @@ async def upload_leads(file: UploadFile = File(...), session: Session = Depends(
             raise HTTPException(status_code=400, detail="Invalid file format. Please upload .csv or .xlsx")
         
         # Standardize columns (basic mapping)
-        # Expected: Name, Phone, Email (optional), Notes (optional)
         df.columns = [c.lower().strip() for c in df.columns]
         
         leads_added = 0
@@ -813,7 +802,7 @@ async def fetch_apollo(search: ApolloSearch, session: Session = Depends(get_sess
                 new_lead = Lead(
                     name=name,
                     phone=phone,
-                    email=None, # Or org.get("primary_domain")
+                    email=None,
                     notes=f"Apollo Import: {org.get('primary_domain')}",
                     source="Apollo API",
                     status="New"
@@ -833,7 +822,6 @@ async def get_leads(session: Session = Depends(get_session)):
     """Fetch all leads."""
     return session.exec(select(Lead)).all()
 
-# Management Endpoints (Phase 3)
 @app.get("/inventory", response_model=list[Product])
 async def get_inventory(session: Session = Depends(get_session)):
     """Fetch all products."""
@@ -981,7 +969,6 @@ class EnableXCommunicator(TelephonyCommunicator):
 async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
     """Handles the Native Multimodal Live API logic for Gemini."""
     
-    # ✅ Log LLM selection
     logger.info(f"🤖 [LLM] Selected: GEMINI 2.0 Flash")
     logger.info(f"🤖 [LLM] Interaction ID: {interaction_id}")
     
@@ -1106,17 +1093,14 @@ def clean_voice_text(text: str, max_chars: int = 300) -> str:
 async def run_tool(name, args, transcript_accumulator, interaction_id):
     """Shared tool runner - uses unified MCP tools for both Gemini and Mistral."""
     
-    # ✅ Log MCP tool invocation
     logger.info(f"📋 [MCP] Calling tool: {name}")
     logger.debug(f"📋 [MCP] Arguments: {args}")
     
     # Use unified MCP tool executor
     result = await execute_mcp_tool(name, args)
     
-    # ✅ Log MCP tool result
     logger.info(f"📋 [MCP] Tool result: {result}")
     
-    # Log to transcript
     if isinstance(result, dict) and "error" not in result:
         transcript_accumulator.append(f"[System]: Executed {name} -> Success")
     else:
@@ -1153,7 +1137,6 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     interaction_id = websocket.query_params.get("interaction_id")
     transcript_accumulator = []
     
-    # Load dynamic instruction and engine selection
     settings = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
     dynamic_instruction = settings.value if settings else "You are a helpful assistant."
     
@@ -1182,7 +1165,7 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
 async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
     """Orchestrates Deepgram (STT), Mistral (LLM with MCP tools), and ElevenLabs (TTS)."""
     
-    # ✅ Log LLM selection
+    
     logger.info(f"🤖 [LLM] Selected: MISTRAL Large")
     logger.info(f"🤖 [LLM] Interaction ID: {interaction_id}")
     
@@ -1191,10 +1174,19 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
     logger.debug(f"🤖 [LLM] Mistral tools loaded: {len(mistral_tools)} tools")
 
     messages = [{"role": "system", "content": dynamic_instruction}]
+    
+    # ✅ Track Rio's speaking state for barge-in detection
+    is_rio_speaking = False
 
     async def speak(text):
         """Streaming TTS from ElevenLabs to Twilio."""
+        nonlocal is_rio_speaking
+        
         if not text.strip(): return
+
+        # ✅ Mark Rio as speaking (for barge-in detection)
+        is_rio_speaking = True
+        logger.info("🎤 Rio starts speaking...")
         
         # Voice Performance Tuning: Strip Markdown & Truncate
         clean_text = clean_voice_text(text, max_chars=350)
@@ -1223,7 +1215,6 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                     await el_ws.send_json({"text": ""}) # EOS
 
                     async for message in el_ws:
-                        # Log message type for deep debugging
                         # print(f"ElevenLabs Msg Type: {message.type}")
                         
                         if message.type == aiohttp.WSMsgType.TEXT:
@@ -1249,7 +1240,6 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             
                             if data.get("isFinal"):
                                 print("ElevenLabs isFinal received.")
-                                # Important: Don't break if we expect more audio, but for /stream-input it usually means done.
                                 break
                             
                             if "error" in data or "message" in data:
@@ -1266,6 +1256,10 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                 print("Connection closed during TTS playback.")
             else:
                 print(f"ElevenLabs Exception in speak(): {e}")
+        finally:
+            # ✅ Mark Rio as NOT speaking (for barge-in detection)
+            is_rio_speaking = False
+            logger.info("🔇 Rio stops speaking...")
 
     async def process_mistral(user_input):
         print(f"Processing Mistral Input: {user_input}")
@@ -1281,13 +1275,11 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             
             choice = response.choices[0].message
             if choice.tool_calls:
-                # UX Improvement: Provide immediate feedback while tools run.
                 # Use asyncio.create_task so it starts immediately without blocking the tool result fetching.
                 filler_msg = "One moment, let me check the stock for you..."
                 asyncio.create_task(speak(filler_msg))
                 
-                # Mistral requires the assistant message containing tool_calls 
-                # to be in the history BEFORE the tool results.
+                # Mistral requires the assistant message containing tool_calls to be in the history BEFORE the tool results.
                 messages.append(choice)
                 
                 for tc in choice.tool_calls:
@@ -1325,8 +1317,6 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
     loop = asyncio.get_event_loop()
 
     def on_message(self, result, **kwargs):
-        # Deepgram might return result as an object or a dict depending on the version
-        # We'll handle both defensively if possible, but standard v5 is object access
         try:
             sentence = result.channel.alternatives[0].transcript
             if sentence.strip() and result.is_final:
@@ -1378,7 +1368,6 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 alt = res["channel"]["alternatives"][0]
                                 is_final = res.get("is_final", False)
                                 
-                                # ✅ Log Deepgram transcript with isFinal flag
                                 if alt["transcript"]:
                                     if is_final:
                                         logger.info(f"🎤 [Deepgram] FINAL: {alt['transcript']}")
@@ -1387,6 +1376,13 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 
                                 if alt["transcript"] and is_final:
                                     transcript = alt["transcript"]
+                                    
+                                    # ✅ BARGE-IN DETECTION: Check if Rio is speaking
+                                    if is_rio_speaking:
+                                        logger.info("🛑 Barge-in detected! User interrupted Rio's response")
+                                        logger.info("   → Stopping TTS and clearing audio buffer...")
+                                        await communicator.clear_audio_buffer()
+                                    
                                     print(f"User (Deepgram Raw): {transcript}")
                                     transcript_accumulator.append(f"User: {transcript}")
                                     save_transcript(interaction_id, transcript_accumulator)
@@ -1405,6 +1401,5 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
 
 if __name__ == "__main__":
     import uvicorn
-    # Twilio does not support WebSocket Ping/Pong, so we must disable it in Uvicorn
-    # to prevent "keepalive ping timeout" errors.
+    # Twilio does not support WebSocket Ping/Pong, so we must disable it in Uvicorn to prevent "keepalive ping timeout" errors.
     uvicorn.run(app, host="0.0.0.0", port=PORT, ws_ping_interval=None, ws_ping_timeout=None, timeout_keep_alive=60)

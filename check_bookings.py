@@ -1,7 +1,3 @@
-#!/usr/bin/env python
-# -*- coding: utf-8 -*-
-"""Check if demo bookings were saved to database"""
-
 from database import engine
 from sqlalchemy import text
 

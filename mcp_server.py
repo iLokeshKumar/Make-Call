@@ -7,10 +7,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Setup logging
+# Logger
 logger = logging.getLogger(__name__)
 
-# Setup MCP Server
+# MCP Server
 mcp = FastMCP("Rio CRM Navigator")
 
 # Database Setup
@@ -25,6 +25,14 @@ try:
 except ImportError:
     EMAIL_SERVICE_AVAILABLE = False
     logger.warning("Email service not available - book_meeting will skip email sending")
+
+# Import Google Calendar service for Meet link generation
+try:
+    from google_calendar_service import create_google_meet_for_booking
+    GOOGLE_CALENDAR_AVAILABLE = True
+except ImportError:
+    GOOGLE_CALENDAR_AVAILABLE = False
+    logger.warning("Google Calendar service not available - Meet links will not be generated")
 
 @mcp.resource("crm://leads/summary")
 def get_leads_summary():
@@ -191,28 +199,33 @@ def check_guardrails(requested_discount_percent: float, requested_price: float =
         }
 
 @mcp.tool()
-def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -> dict:
+def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None) -> dict:
     """
-    Book a meeting/demo for a qualified lead AND send confirmation email.
+    Book a meeting/demo for a qualified lead with Google Meet link.
     This MCP tool is self-contained - it handles all side effects internally:
     
     ACTIONS PERFORMED:
-    1. Database: Create appointment record
-    2. Email: Send calendar invite to lead email
-    3. Logging: Track all operations
+    1. Database: Fetch lead (or create if missing email)
+    2. Google Calendar: Create event with Google Meet link
+    3. Email: Send calendar invite with Meet link to lead
+    4. Database: Create appointment record
+    5. Logging: Track all operations
     
     Args:
     - lead_id (required): Database ID of the lead
     - proposed_time (required): Meeting time (natural language or ISO format)
     - meeting_type: "demo", "consultation", "follow-up", "discovery"
+    - lead_email (optional): If provided and lead has no email, will update lead record
     
     Returns: {
         "confirmed": bool,
         "appointment_id": int,
         "lead_name": str,
         "lead_email": str,
+        "google_meet_link": str,
         "calendar_url": str,
         "email_sent": bool,
+        "needs_email": bool,
         "message": str
     }
     """
@@ -230,15 +243,66 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -
             if not lead:
                 error_msg = f"Lead with ID {lead_id} not found"
                 logger.error(f"[book_meeting] {error_msg}")
-                return {"confirmed": False, "error": error_msg}
+                return {"confirmed": False, "error": error_msg, "needs_email": False}
             
             lead_dict = dict(lead._mapping)
-            logger.info(f"[book_meeting] Lead found: {lead_dict['name']} ({lead_dict['email']})")
+            logger.info(f"[book_meeting] Lead found: {lead_dict['name']}")
             
-            # STEP 2: Create appointment record in database
+            # STEP 1B: Handle missing email
+            if not lead_dict.get("email"):
+                if not lead_email:
+                    # Email missing and not provided - need to ask Rio to collect it
+                    logger.warning(f"[book_meeting] Lead {lead_id} has no email. Requesting from Rio...")
+                    return {
+                        "confirmed": False,
+                        "needs_email": True,
+                        "lead_id": lead_id,
+                        "lead_name": lead_dict["name"],
+                        "message": f"⚠️ {lead_dict['name']} doesn't have an email on file. Please ask them for their email address so we can send the meeting confirmation."
+                    }
+                else:
+                    # Email provided by Rio - update the lead record
+                    logger.info(f"[book_meeting] Updating email for lead {lead_id}: {lead_email}")
+                    session.execute(
+                        text("UPDATE lead SET email = :email WHERE id = :lid"),
+                        {"email": lead_email, "lid": lead_id}
+                    )
+                    session.commit()
+                    lead_dict["email"] = lead_email
+                    logger.info(f"[book_meeting] Email updated successfully")
+            
+            # STEP 2: Create Google Meet link
+            google_meet_link = None
+            calendar_url = None
+            
+            if GOOGLE_CALENDAR_AVAILABLE and lead_dict.get("email"):
+                try:
+                    meet_result = create_google_meet_for_booking(
+                        lead_name=lead_dict["name"],
+                        lead_email=lead_dict["email"],
+                        proposed_time=proposed_time,
+                        meeting_type=meeting_type
+                    )
+                    
+                    if meet_result.get("success"):
+                        google_meet_link = meet_result.get("google_meet_link")
+                        calendar_url = meet_result.get("calendar_link")
+                        logger.info(f"[book_meeting] Google Meet link created: {google_meet_link}")
+                    else:
+                        logger.warning(f"[book_meeting] Google Meet creation failed: {meet_result.get('error')}")
+                
+                except Exception as e:
+                    logger.warning(f"[book_meeting] Google Meet error: {e}")
+            else:
+                if not GOOGLE_CALENDAR_AVAILABLE:
+                    logger.warning("[book_meeting] Google Calendar not available - Meet link will not be generated")
+                elif not lead_dict.get("email"):
+                    logger.warning("[book_meeting] Cannot create Meet link without email")
+            
+            # STEP 3: Create appointment record in database
             appointment_insert = text("""
-                INSERT INTO appointment (lead_id, appointment_time, status)
-                VALUES (:lid, :atime, :status)
+                INSERT INTO appointment (lead_id, appointment_time, status, google_meet_link)
+                VALUES (:lid, :atime, :status, :meet_link)
                 RETURNING id
             """)
             
@@ -247,20 +311,39 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -
                 {
                     "lid": lead_id,
                     "atime": proposed_time,
-                    "status": "scheduled"
+                    "status": "scheduled",
+                    "meet_link": google_meet_link
                 }
             )
             session.commit()
             appointment_id = result.scalar()
             logger.info(f"[book_meeting] Appointment created: ID={appointment_id}")
             
-            # STEP 3: Send email with calendar invite
+            # STEP 4: Send email with calendar invite and Meet link
             email_sent = False
             email_error = None
             
             if EMAIL_SERVICE_AVAILABLE and lead_dict.get("email"):
                 try:
                     email_subject = f"Your {meeting_type.title()} Meeting is Confirmed - Rio Sales Assistant"
+                    
+                    # Build email body with Google Meet link if available
+                    meet_section = ""
+                    if google_meet_link:
+                        meet_section = f"""
+                        <div style="background-color: #e8f5e9; padding: 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #27ae60;">
+                            <h3 style="color: #27ae60; margin-top: 0;">📞 Join on Google Meet</h3>
+                            <p style="margin: 10px 0;">
+                                <a href="{google_meet_link}" 
+                                   style="display: inline-block; background-color: #4285f4; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px;">
+                                    Join Google Meet
+                                </a>
+                            </p>
+                            <p style="color: #666; font-size: 12px; margin: 10px 0 0 0;">
+                                📌 This is an automated Google Meet link. You can join directly from this email.
+                            </p>
+                        </div>
+                        """
                     
                     email_body = f"""
                     <html>
@@ -275,7 +358,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -
                         <p>Great news! Your {meeting_type} has been scheduled successfully.</p>
                         
                         <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
-                            <h3 style="color: #27ae60; margin-top: 0;">Meeting Details:</h3>
+                            <h3 style="color: #27ae60; margin-top: 0;">📅 Meeting Details:</h3>
                             <ul style="list-style: none; padding: 0;">
                                 <li style="padding: 8px 0;"><strong>Type:</strong> {meeting_type.title()}</li>
                                 <li style="padding: 8px 0;"><strong>Time:</strong> {proposed_time}</li>
@@ -283,10 +366,12 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -
                             </ul>
                         </div>
                         
+                        {meet_section}
+                        
                         <p>
-                            <a href=\"https://rio-crm.example.com/appointment/{appointment_id}\" 
-                               style=\"display: inline-block; background-color: #27ae60; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;\">
-                                View Meeting Details
+                            <a href="https://rio-crm.example.com/appointment/{appointment_id}" 
+                               style="display: inline-block; background-color: #27ae60; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">
+                                View Full Meeting Details
                             </a>
                         </p>
                         
@@ -294,8 +379,16 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -
                         
                         <p>Looking forward to our conversation!</p>
                         
-                        <div style=\"border-top: 1px solid #ecf0f1; padding-top: 20px; margin-top: 30px; color: #7f8c8d; font-size: 12px;\">
-                            <p>\n                            <strong>Rio</strong> - Your AI Sales Assistant<br/>\n                            Powered by Advanced Conversational AI<br/>\n                            </p>\n                        </div>\n                    </div>\n                    </body>\n                    </html>\n                    """
+                        <div style="border-top: 1px solid #ecf0f1; padding-top: 20px; margin-top: 30px; color: #7f8c8d; font-size: 12px;">
+                            <p>
+                            <strong>Rio</strong> - Your AI Sales Assistant<br/>
+                            Powered by Advanced Conversational AI<br/>
+                            </p>
+                        </div>
+                    </div>
+                    </body>
+                    </html>
+                    """
                     
                     send_smtp_email(
                         to_email=lead_dict["email"],
@@ -314,19 +407,22 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo") -
                 if not lead_dict.get("email"):
                     logger.warning(f"[book_meeting] No email address for lead {lead_id}")
             
-            # STEP 4: Return success response
-            calendar_url = f"https://rio-crm.example.com/appointment/{appointment_id}"
+            # STEP 5: Return success response
+            crm_calendar_url = f"https://rio-crm.example.com/appointment/{appointment_id}"
             
             return {
                 "confirmed": True,
                 "appointment_id": appointment_id,
                 "lead_name": lead_dict["name"],
                 "lead_email": lead_dict["email"],
-                "calendar_url": calendar_url,
+                "google_meet_link": google_meet_link,
+                "calendar_url": calendar_url or crm_calendar_url,
                 "email_sent": email_sent,
                 "meeting_type": meeting_type,
                 "proposed_time": proposed_time,
+                "needs_email": False,
                 "message": f"✅ {meeting_type.title()} confirmed for {lead_dict['name']} on {proposed_time}" + 
+                          (f" | Meet: {google_meet_link[:50]}..." if google_meet_link else "") +
                           (f" | Invite sent to {lead_dict['email']}" if email_sent else " (email not sent)")
             }
             

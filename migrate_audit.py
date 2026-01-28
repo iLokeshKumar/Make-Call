@@ -16,13 +16,10 @@ def migrate_audit():
             print(f"Migrating table: {table}")
             for col_name, col_type in columns:
                 try:
-                    # Check if column exists first to avoid errors (or just try/except)
-                    # For simplicity in this script, we'll try to add and catch error if it exists.
                     print(f"  Adding {col_name}...")
                     conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_name} {col_type}"))
                 except Exception as e:
                     print(f"  Skipping {col_name} (might exist): {e}")
-                    # If it exists, we might want to set default if null, but schema update is main goal.
             
             conn.commit()
     
