@@ -4,11 +4,13 @@ import "./globals.css";
 import Sidebar from "@/components/Sidebar";
 import { ThemeProvider } from "@/components/ThemeProvider";
 
-import { AuthProvider } from "@/context/AuthContext";
-import ClientLayout from "@/components/ClientLayout";
-
 const inter = Inter({ subsets: ["latin"] });
-// ... (metadata)
+
+export const metadata: Metadata = {
+  title: "Rio CRM - Intelligent Voice Agent",
+  description: "AI-powered CRM for Yexis Electronics",
+};
+
 export default function RootLayout({
   children,
 }: Readonly<{
@@ -18,11 +20,10 @@ export default function RootLayout({
     <html lang="en" suppressHydrationWarning>
       <body className={`${inter.className} flex h-screen overflow-hidden`}>
         <ThemeProvider>
-          <AuthProvider>
-            <ClientLayout>
-              {children}
-            </ClientLayout>
-          </AuthProvider>
+          <Sidebar />
+          <main className="flex-1 overflow-y-auto p-8">
+            {children}
+          </main>
         </ThemeProvider>
       </body>
     </html>

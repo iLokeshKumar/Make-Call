@@ -7,14 +7,13 @@
   /* Light Mode Colors */
   --color-bg-primary: #ffffff;
   --color-bg-secondary: #f8fafc;
-  --color-bg-gradient-start: #f3e8ff;
-  --color-bg-gradient-mid: #e0e7ff;
-  --color-bg-gradient-end: #dbeafe;
+  --color-bg-gradient-start: #f8fafc;
+  --color-bg-gradient-mid: rgba(239, 246, 255, 0.3);
+  --color-bg-gradient-end: rgba(250, 245, 255, 0.2);
 
-  --color-text-primary: #1e293b;
-  --color-text-secondary: #475569;
-  --color-border: #cbd5e1;
-  --color-border-light: #e2e8f0;
+  --color-text-primary: #0f172a;
+  --color-text-secondary: #64748b;
+  --color-border: rgba(255, 255, 255, 0.2);
 
   /* Dark Mode Colors */
   --color-bg-primary-dark: #0f172a;
@@ -37,7 +36,10 @@
 /* Light Mode (default) */
 body {
   font-family: var(--font-family-sans);
-  background: #f5f7fa;
+  background: linear-gradient(to bottom right,
+      var(--color-bg-gradient-start),
+      var(--color-bg-gradient-mid),
+      var(--color-bg-gradient-end));
   color: var(--color-text-primary);
   min-height: 100vh;
 }
@@ -53,11 +55,11 @@ body {
 
 /* Glass Effect - Light Mode */
 .glass {
-  background-color: rgba(255, 255, 255, 0.95);
+  background-color: rgba(255, 255, 255, 0.7);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
 }
 
 /* Glass Effect - Dark Mode */
@@ -133,30 +135,4 @@ body {
 
 ::-webkit-scrollbar-thumb:hover {
   background-image: linear-gradient(to bottom, var(--color-violet-600), var(--color-blue-600));
-}
-
-/* Light Mode Card Enhancements */
-.light .glass {
-  background-color: rgba(255, 255, 255, 0.9);
-}
-
-.light .bg-slate-100 {
-  background-color: #f1f5f9 !important;
-}
-
-.light .text-slate-400 {
-  color: #94a3b8 !important;
-}
-
-.light .text-slate-500 {
-  color: #64748b !important;
-}
-
-/* Light Mode Hover States */
-.light button:hover {
-  filter: brightness(0.98);
-}
-
-.light .dark\:bg-slate-700 {
-  background-color: #f1f5f9 !important;
 }

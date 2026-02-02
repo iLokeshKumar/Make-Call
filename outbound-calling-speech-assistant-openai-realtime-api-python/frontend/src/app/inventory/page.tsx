@@ -2,8 +2,6 @@
 
 import { useEffect, useState } from "react";
 import { Package, Plus, Trash2, Edit, AlertCircle, Save, X } from "lucide-react";
-import { useAuth } from "@/context/AuthContext";
-import { useRouter } from "next/navigation";
 
 interface Product {
     id?: number;
@@ -14,8 +12,6 @@ interface Product {
 }
 
 export default function InventoryPage() {
-    const { user, isLoading } = useAuth();
-    const router = useRouter();
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -37,16 +33,8 @@ export default function InventoryPage() {
     };
 
     useEffect(() => {
-        if (!isLoading && user?.role !== "admin") {
-            router.push("/");
-        }
-    }, [user, isLoading, router]);
-
-    useEffect(() => {
-        if (user?.role === "admin") {
-            fetchInventory();
-        }
-    }, [user]);
+        fetchInventory();
+    }, []);
 
     const handleOpenModal = (product?: Product) => {
         if (product) {
