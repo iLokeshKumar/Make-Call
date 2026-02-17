@@ -1,6 +1,4 @@
-from datetime import datetime, timedelta
-from typing import Optional, List
-from jose import JWTError, jwt
+import jwt
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -12,6 +10,9 @@ import pyotp
 import qrcode
 import base64
 from io import BytesIO
+from optparse import Option
+from typing import Optional, List
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -66,7 +67,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: Session
         if username is None:
             raise credentials_exception
         token_data = TokenData(username=username)
-    except JWTError:
+    except jwt.PyJWTError:
         raise credentials_exception
         
     user = session.exec(select(User).where(User.username == token_data.username)).first()

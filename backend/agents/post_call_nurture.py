@@ -3,12 +3,10 @@
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from sqlmodel import Session, select, text
-from database import engine, Interaction, Lead
+from backend.database import engine, Interaction, Lead
 import json
 
-# ============================================
 # POST-CALL SUMMARIZER AGENT
-# ============================================
 
 class CallSummarizer:
     """
@@ -94,9 +92,7 @@ class CallSummarizer:
             print(f"❌ [SUMMARIZER] Failed to save summary: {e}")
             return False
 
-# ============================================
 # CRM UPDATER AGENT
-# ============================================
 
 class CRMUpdater:
     """
@@ -171,9 +167,7 @@ class CRMUpdater:
             print(f"❌ [CRM_UPDATER] Failed to log interaction: {e}")
             return False
 
-# ============================================
 # EMAIL WRITER AGENT
-# ============================================
 
 class EmailWriter:
     """
@@ -311,9 +305,7 @@ class EmailWriter:
             print(f"❌ [EMAIL_WRITER] Failed to send email: {e}")
             return False
 
-# ============================================
 # COMPLETE POST-CALL WORKFLOW
-# ============================================
 
 async def execute_post_call_nurture(
     lead_id: int,

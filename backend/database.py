@@ -4,7 +4,10 @@ from typing import Optional, List, Generator
 from datetime import datetime, timezone
 from dotenv import load_dotenv
 
-load_dotenv()
+# Find .env in the same directory as this file
+current_dir = os.path.dirname(os.path.abspath(__file__))
+env_path = os.path.join(current_dir, ".env")
+load_dotenv(env_path)
 
 # Fallback to SQLite if DATABASE_URL is not set
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./crm.db")
@@ -78,6 +81,8 @@ class Appointment(AuditMixin, table=True):
     appointment_time: datetime
     status: str = Field(default="Scheduled") # Scheduled, Completed, Cancelled
     notes: Optional[str] = None
+    meeting_link: Optional[str] = None
+    calendar_event_id: Optional[str] = None
 
 class Outcome(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
@@ -112,30 +117,35 @@ def init_db():
     with Session(engine) as session:
         # Seed System Settings if empty
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first():
-            default_instruction = """
-You are Rio, a high-performance AI sales assistant for Yexis Electronics.
-Your goal is to be EFFICIENT, CRISP, and TO THE POINT.
+            default_instruction = """You are Rio, a professional AI sales assistant for Yexis Electronics (Chennai).
+Your goal is to identify leads, answer product queries, and book demos.
 
-**Core Rules:**
-1. **MAXIMUM 1-2 SENTENCES per response.** No exceptions.
-2. **NO FLUFF.** Do not say "I hope you are doing well" or "That is a great question."
-3. **DIRECT ANSWERS.** If asked for price, say "The price is ₹X." Do not add sales pitch unless asked.
-4. **Speak Fast & Clear.**
-5. **Languages:** Detect language and reply in the SAME language immediately.
+CORE CAPABILITIES & TOOLS:
+- Use `get_or_create_lead` to identify the caller (Name, Phone, Email).
+- Use `lookup_product` for any price or stock queries about Samsung TVs, S24, or HVAC.
+- Use `book_meeting` to schedule demos on the calendar.
+- Use `send_followup_email` to send information to leads.
+- Use `handoff_to_human` if things get too complex for AI.
 
-**About Yexis:**
-- Distributor for Samsung (Mobiles, Displays, Computing) and Commercial HVAC.
-- Location: Chennai.
-
-**Objective:**
-- Answer queries about stock/price instantly (using your tools).
-- Book quotes/meetings efficiently.
-            """.strip()
+RULES:
+1. Be professional and helpful.
+2. If the user gives you their email or phone, make sure to update their lead info using `get_or_create_lead`.
+3. Don't hallucinate tools; use exactly what you have bound."""
             session.add(SystemSettings(key="system_instruction", value=default_instruction))
+
+        # Seed AI Verbosity if empty (1: Ultra-Concise, 2: Balanced, 3: Detailed)
+        if not session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first():
+            session.add(SystemSettings(key="ai_verbosity", value="2"))
         
         # Seed Voice Engine if empty
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first():
-            session.add(SystemSettings(key="voice_engine", value="gemini"))
+        if not session.exec(select(SystemSettings).where(SystemSettings.key == "llm_provider")).first():
+            session.add(SystemSettings(key="llm_provider", value="mistral"))
+        
+        if not session.exec(select(SystemSettings).where(SystemSettings.key == "llm_model")).first():
+            session.add(SystemSettings(key="llm_model", value="mistral-small-latest"))
+
+        if not session.exec(select(SystemSettings).where(SystemSettings.key == "tts_model")).first():
+            session.add(SystemSettings(key="tts_model", value="aura-asteria-en"))
 
         # Seed Telephony Engine if empty
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "telephony_engine")).first():

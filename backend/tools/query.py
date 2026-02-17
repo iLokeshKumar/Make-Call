@@ -1,7 +1,7 @@
 """Query Tool - Agentic SQL + Lead Status queries"""
 
 from sqlmodel import Session, select, text
-from database import engine, Lead, Interaction, Product
+from backend.database import engine, Lead, Interaction, Product
 
 def check_lead_status(lead_id: int) -> dict:
     """

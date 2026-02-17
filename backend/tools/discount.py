@@ -1,5 +1,3 @@
-"""Discount Tool - Validate and apply discounts with guardrails"""
-
 def validate_discount(requested_discount_percent: float, max_allowed: float = 10.0) -> dict:
     """
     Validate if discount is within approved guardrails (DETERMINISTIC).
@@ -31,6 +29,9 @@ def validate_discount(requested_discount_percent: float, max_allowed: float = 10
             "message": f"✗ Discount of {requested_discount_percent}% exceeds limit. Requires manager approval. Auto-approved max: {max_allowed}%"
         }
 
+from langchain_core.tools import tool
+
+@tool
 def apply_discount(original_price: float, discount_percent: float, max_allowed: float = 10.0) -> dict:
     """
     Apply discount to price after guardrail validation (DETERMINISTIC).

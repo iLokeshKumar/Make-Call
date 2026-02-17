@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from google.oauth2 import service_account
-from google.auth.oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as UserCredentials
 import pickle

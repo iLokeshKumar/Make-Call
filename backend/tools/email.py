@@ -1,11 +1,12 @@
-"""Email Tool - Send follow-up emails with personalization"""
-
 import os
 from datetime import datetime
-from email_service import send_smtp_email, get_styled_html
+from backend.email_service import send_smtp_email, get_styled_html
 from sqlmodel import Session, select
-from database import engine, Lead
+from backend.database import engine, Lead
 
+from langchain_core.tools import tool
+
+@tool
 def send_followup_email(lead_id: int, template: str = "default", custom_data: dict = None) -> dict:
     """
     Send personalized follow-up email after call (DETERMINISTIC).
@@ -157,6 +158,7 @@ def generate_discount_offer_template(data: dict) -> tuple:
     
     return subject, html
 
+@tool
 def send_personalized_email(lead_id: int, subject: str, html_body: str) -> dict:
     """
     Send completely custom email (DETERMINISTIC).
