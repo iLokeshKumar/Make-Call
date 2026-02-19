@@ -1,4 +1,5 @@
 import os
+import random
 import json
 import asyncio
 import base64
@@ -134,7 +135,11 @@ async def login_for_access_token(
             headers={"WWW-Authenticate": "Bearer"},
         )
     
+    print(f"DEBUG: Login attempt for user: {user.username}")
+    print(f"DEBUG: User Status - Email Verified: {user.email_verified}, MFA Enabled: {user.mfa_enabled}")
+    
     if not user.email_verified:
+         print("DEBUG: Login failed - EMAIL_UNVERIFIED")
          raise HTTPException(
              status_code=status.HTTP_403_FORBIDDEN,
              detail="EMAIL_UNVERIFIED"
@@ -142,10 +147,15 @@ async def login_for_access_token(
     
     # MFA Logic
     if user.mfa_enabled:
+        print(f"DEBUG: MFA is enabled for {user.username}. MFA Token provided: {bool(mfa_token)}")
         if not mfa_token:
+             print("DEBUG: Login failed - MFA_REQUIRED")
              return JSONResponse(status_code=403, content={"detail": "MFA_REQUIRED"})
         if not verify_mfa_token(user.mfa_secret, mfa_token):
+             print("DEBUG: Login failed - Invalid MFA token")
              raise HTTPException(status_code=401, detail="Invalid MFA token")
+    
+    print(f"DEBUG: Login successful for {user.username}")
 
     access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     access_token = create_access_token(
@@ -182,9 +192,103 @@ async def enable_mfa(verify: MFAVerify, current_user: User = Depends(get_current
         current_user.mfa_enabled = True
         session.add(current_user)
         session.commit()
+
+        # Send Confirmation Email
+        subject = "Rio CRM: Two-Factor Authentication Enabled"
+        email_body = f"Hello {current_user.username},\n\nTwo-Factor Authentication (2FA) has been successfully enabled on your account. Your account is now more secure."
+        styled_html = get_styled_html(
+            "MFA Enabled Successfully",
+            "Your account is now protected with 2FA.<br><br>You will be required to enter a code from your authenticator app every time you log in.",
+            current_user.username
+        )
+        send_smtp_email(current_user.email, subject, email_body, styled_html)
+
         return {"message": "MFA enabled successfully"}
-    else:
-        raise HTTPException(status_code=400, detail="Invalid token")
+
+@app.post("/auth/mfa/request-disable")
+async def request_mfa_disable(
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    """Generates and emails an OTP to disable MFA."""
+    if not current_user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="MFA is not enabled")
+    
+    otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    current_user.mfa_disable_otp = otp
+    session.add(current_user)
+    session.commit()
+
+    # Send OTP via Email
+    subject = "Rio CRM: OTP to disable Two-Factor Authentication"
+    email_body = f"Hello {current_user.username},\n\nYour OTP to disable Two-Factor Authentication is: {otp}\n\nIf you did not request this, please change your password immediately."
+    styled_html = get_styled_html(
+        "MFA Disable OTP",
+        f"You have requested to disable 2FA on your account. Your verification code is:<br><br><span style='font-size: 24px; font-weight: bold; color: #7c3aed; letter-spacing: 5px;'>{otp}</span><br><br>If you did not request this, please ignore this email.",
+        current_user.username
+    )
+    
+    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    
+    return {"message": "OTP sent to your registered email"}
+
+class MFADisableRequest(SQLModel):
+    token: str
+
+@app.post("/auth/mfa/disable")
+async def verify_mfa_disable(
+    request: MFADisableRequest,
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    """Verifies the email OTP and disables MFA."""
+    if not current_user.mfa_enabled:
+        raise HTTPException(status_code=400, detail="MFA is not enabled")
+    
+    if not current_user.mfa_disable_otp or request.token != current_user.mfa_disable_otp:
+        raise HTTPException(status_code=400, detail="Invalid or expired OTP")
+    
+    current_user.mfa_enabled = False
+    current_user.mfa_secret = None
+    current_user.mfa_disable_otp = None
+    session.add(current_user)
+    session.commit()
+
+    # Send Confirmation Email
+    subject = "Rio CRM: Two-Factor Authentication Disabled"
+    email_body = f"Hello {current_user.username},\n\nTwo-Factor Authentication (2FA) has been successfully disabled on your account as per your request."
+    styled_html = get_styled_html(
+        "MFA Disabled Successfully",
+        "Two-Factor Authentication has been removed from your account.<br><br>If you did not request this, please secure your account immediately.",
+        current_user.username
+    )
+    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    
+    return {"message": "MFA disabled successfully"}
+@app.delete("/auth/me")
+async def delete_my_account(
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    """Securely delete the currently authenticated user's account and send a notification."""
+    user_email = current_user.email
+    user_name = current_user.username
+    user_role = current_user.role
+
+    # Send Confirmation Email
+    subject = "Your Rio CRM Account has been Deleted"
+    email_body = f"Hello {user_name},\n\nYour account (Role: {user_role}) has been successfully deleted from Rio CRM as per your request.\n\nIf this was a mistake, please contact support immediately."
+    styled_html = get_styled_html(
+        subject, 
+        f"Your account with the role <strong>{user_role}</strong> has been successfully removed from our system.<br><br>We're sorry to see you go!", 
+        user_name
+    )
+    
+    send_smtp_email(user_email, subject, email_body, styled_html)
+
+    session.delete(current_user)
+    session.commit()
+    return {"message": "Account successfully deleted and confirmation email sent"}
 
 @app.post("/register", response_model=User)
 async def register_user(user: UserCreate, session: Session = Depends(get_session)):
@@ -455,6 +559,8 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "CwhOLp6mAE7h9asvUURR")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
+CARTESIA_API_KEY = os.getenv("Cartesia_API_Key")
+SARVAM_API_KEY = os.getenv("Sarvam_API_Key")
 
 # EnableX Configuration
 ENABLEX_APP_ID = os.getenv("EnableX_App_ID")
@@ -1243,8 +1349,8 @@ async def handle_enablex_media_stream(websocket: WebSocket, session: Session = D
     print(f"EnableX connected to media-stream WS | Voice ID: {voice_id} | Interaction: {interaction_id} | Verbosity: {verbosity}")
     
     communicator = EnableXCommunicator(websocket)
-    if active_engine == "mistral":
-        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
+    if active_engine.startswith("mistral"):
+        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine)
     else:
         await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
 
@@ -1339,16 +1445,16 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
             print(f"Error loading context: {e}")
 
     communicator = TwilioCommunicator(websocket)
-    if active_engine == "mistral":
-        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
+    if active_engine.startswith("mistral"):
+        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine)
     else:
         await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
 
-async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
-    """Orchestrates Deepgram (STT), Mistral (LLM with MCP tools), and ElevenLabs (TTS)."""
+async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type="mistral"):
+    """Orchestrates STT, Mistral (LLM with MCP tools), and TTS based on engine_type."""
     
     
-    logger.info(f"🤖 [LLM] Selected: MISTRAL Large")
+    logger.info(f"🤖 [LLM] Selected: {engine_type.upper()}")
     logger.info(f"🤖 [LLM] Interaction ID: {interaction_id}")
     
     # Use unified MCP tools for Mistral
@@ -1379,79 +1485,145 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
     ]
 
     async def speak(text):
-        """Streaming TTS from ElevenLabs to Twilio. Cancellable for barge-in."""
+        """Streaming TTS from selected provider to Twilio. Cancellable for barge-in."""
         nonlocal is_rio_speaking, current_tts_task
         if not text or not text.strip():
             return
-        # Voice Performance Tuning: Strip Markdown & Truncate (aggressively)
+            
         clean_text = clean_voice_text(text, max_chars=MAX_VOICE_CHARS)
-
-        url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
-        logger.info(f"🔊 [ElevenLabs] TTS starting (len={len(clean_text)}): {clean_text[:60]}...")
-        print(f"Connecting to ElevenLabs TTS (PCM 16k) using Voice: {ELEVENLABS_VOICE_ID}... Text len: {len(clean_text)}")
         is_rio_speaking = True
+        
         try:
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(url) as el_ws:
-                    logger.info(f"🔊 [ElevenLabs] WebSocket connected")
-                    print("ElevenLabs WebSocket Connected.")
-
-                    # Send API preamble and the text
-                    await el_ws.send_json({
-                        "text": " ",
-                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
-                        "xi_api_key": ELEVENLABS_API_KEY
-                    })
-
-                    # Send text
-                    print(f"Sending text to ElevenLabs: {clean_text[:30]}...")
-                    await el_ws.send_json({"text": clean_text, "try_trigger_generation": True})
-                    await el_ws.send_json({"text": ""}) # EOS
-
-                    async for message in el_ws:
-                        # Allow cancellation to interrupt the stream
-                        try:
+            if engine_type == "mistral-cartesia":
+                # CARTESIA TTS (SONIC-3)
+                url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}"
+                headers = {"Cartesia-Version": "2024-06-10"}
+                logger.info(f"🔊 [Cartesia] TTS starting: {clean_text[:60]}...")
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(url, headers=headers) as c_ws:
+                        # Send Preamble / Settings
+                        # For Cartesia WS, we send the generation request
+                        payload = {
+                            "model_id": "sonic-english", # sonic-3 is for experimental versions
+                            "transcript": clean_text,
+                            "voice": {
+                                "mode": "id",
+                                "id": "1259b7e3-cb8a-43df-9446-30971a46b8b0"
+                            },
+                            "output_format": {
+                                "container": "raw",
+                                "encoding": "mulaw",
+                                "sample_rate": 8000
+                            },
+                            "generation_config": {
+                                "speed": "normal",
+                                "volume": "normal"
+                            },
+                            "context_id": interaction_id or str(uuid.uuid4())
+                        }
+                        await c_ws.send_json(payload)
+                        
+                        async for message in c_ws:
                             if message.type == aiohttp.WSMsgType.TEXT:
                                 data = json.loads(message.data)
-
                                 if data.get("audio"):
                                     pcm_16k = base64.b64decode(data["audio"])
                                     pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
                                     ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                    payload = base64.b64encode(ulaw_8k).decode("utf-8")
-                                    if payload:
-                                        await communicator.send_media(payload)
-
-                                if data.get("isFinal"):
-                                    print("ElevenLabs isFinal received.")
+                                    payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
+                                    await communicator.send_media(payload_b64)
+                                if data.get("done"):
                                     break
-
-                                if "error" in data or "message" in data:
-                                    print(f"ElevenLabs API Message: {data}")
-
-                            elif message.type == aiohttp.WSMsgType.CLOSED:
+                            elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                                 break
-                            elif message.type == aiohttp.WSMsgType.ERROR:
+                                
+            elif engine_type == "mistral-sarvam":
+                # SARVAM TTS (BULBUL-V3)
+                url = "https://api.sarvam.ai/text-to-speech"
+                headers = {"api-subscription-key": SARVAM_API_KEY}
+                payload = {
+                    "inputs": [clean_text],
+                    "target_language_code": "en-IN", # Default to English for Sarvam, or detect
+                    "speaker": "meera", # Default speaker
+                    "pitch": 0,
+                    "pace": 1.0,
+                    "loudness": 1.5,
+                    "speech_sample_rate": 8000,
+                    "enable_preprocessing": True,
+                    "model": "bulbul:v1"
+                }
+                logger.info(f"🔊 [Sarvam] TTS starting: {clean_text[:60]}...")
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload) as resp:
+                        if resp.status == 200:
+                            data = await resp.json()
+                            audio_b64 = data.get("audios", [None])[0]
+                            if audio_b64:
+                                # Sarvam returns base64. 
+                                # If 8k pcm, convert to mulaw
+                                pcm_8k = base64.b64decode(audio_b64)
+                                ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                                payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
+                                await communicator.send_media(payload_b64)
+
+            elif engine_type == "mistral-deepgram":
+                # Deepgram TTS (Aura)
+                tts_url = f"wss://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000"
+                headers = {
+                    "Authorization": f"Token {DEEPGRAM_API_KEY}",
+                }
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(tts_url, headers=headers) as dg_ws:
+                        # Deepgram Aura handshake: Send initial text block
+                        await dg_ws.send_json({"type": "Speak", "text": clean_text})
+                        # Signal that we are done sending text
+                        await dg_ws.send_json({"type": "Flush"})
+                        
+                        async for message in dg_ws:
+                            if message.type == aiohttp.WSMsgType.BINARY:
+                                # Deepgram sends raw mulaw 8k (no decoding/conversion needed)
+                                payload_b64 = base64.b64encode(message.data).decode("utf-8")
+                                await communicator.send_media(payload_b64)
+                            elif message.type == aiohttp.WSMsgType.TEXT:
+                                data = json.loads(message.data)
+                                if data.get("type") == "Flushed":
+                                    break
+                            elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                                 break
 
-                        except asyncio.CancelledError:
-                            # Interrupt received via task cancellation (barge-in)
-                            print("ElevenLabs TTS stream cancelled (barge-in).")
-                            try:
-                                await el_ws.close()
-                            except Exception:
-                                pass
-                            raise
-        except asyncio.CancelledError:
-            # Bubble up cancellation so caller can handle it
-            raise
-        except WebSocketDisconnect:
-            print("Twilio WebSocket disconnected (Client hung up).")
-        except Exception as e:
-            if "ConnectionClosed" in str(e):
-                print("Connection closed during TTS playback.")
+            
             else:
-                print(f"ElevenLabs Exception in speak(): {e}")
+                # DEFAULT: ELEVENLABS
+                url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
+                logger.info(f"🔊 [ElevenLabs] TTS starting: {clean_text[:60]}...")
+                async with aiohttp.ClientSession() as session:
+                    async with session.ws_connect(url) as el_ws:
+                        await el_ws.send_json({
+                            "text": " ",
+                            "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
+                            "xi_api_key": ELEVENLABS_API_KEY
+                        })
+                        await el_ws.send_json({"text": clean_text, "try_trigger_generation": True})
+                        await el_ws.send_json({"text": ""})
+                        
+                        async for message in el_ws:
+                            if message.type == aiohttp.WSMsgType.TEXT:
+                                data = json.loads(message.data)
+                                if data.get("audio"):
+                                    pcm_16k = base64.b64decode(data["audio"])
+                                    pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
+                                    ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                                    payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
+                                    await communicator.send_media(payload_b64)
+                                if data.get("isFinal"):
+                                    break
+                            elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
+                                break
+        except asyncio.CancelledError:
+            logger.info("TTS playback cancelled.")
+            raise
+        except Exception as e:
+            logger.error(f"TTS Error ({engine_type}): {e}")
         finally:
             is_rio_speaking = False
             current_tts_task = None
@@ -1545,105 +1717,117 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             import traceback
             traceback.print_exc()
 
-    # Deepgram Callback Bridge
-    loop = asyncio.get_event_loop()
-
-    def on_message(self, result, **kwargs):
-        try:
-            sentence = result.channel.alternatives[0].transcript
-            if sentence.strip() and result.is_final:
-                print(f"User (Deepgram): {sentence}")
-                transcript_accumulator.append(f"User: {sentence}")
-                save_transcript(interaction_id, transcript_accumulator)
-                loop.create_task(process_mistral(sentence))
-        except Exception as e:
-            print(f"Deepgram Parse Error: {e}")
-    # --- DEEPGRAM RAW WEBSOCKET IMPLEMENTATION ---
-    # Bypassing the SDK completely to avoid version conflicts
+    # --- STT IMPLEMENTATION ---
+    stt_url = ""
+    stt_headers = {}
     
-    # WebSocket URL for Deepgram (Mulaw 8kHz matches Twilio)
-    dg_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000"
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}"
-    }
+    if engine_type == "mistral-cartesia":
+        stt_url = f"wss://api.cartesia.ai/stt/websocket?api_key={CARTESIA_API_KEY}"
+        stt_headers = {
+            "Cartesia-Version": "2024-06-10"
+        }
+    elif engine_type == "mistral-sarvam":
+        # Use query params for key as well to avoid handshake rejection
+        stt_url = f"wss://api.sarvam.ai/speech-to-text-translate/ws?model=saaras:v3&sample_rate=16000&language_code=hi-IN&mode=transcribe&api-subscription-key={SARVAM_API_KEY}"
+        stt_headers = {
+            "api-subscription-key": SARVAM_API_KEY,
+            "Origin": "https://api.sarvam.ai"
+        }
+    else:
+        # Default: DEEPGRAM
+        stt_url = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000"
+        stt_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
 
     async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(dg_url, headers=headers) as dg_ws:
+        async with session.ws_connect(stt_url, headers=stt_headers) as stt_ws:
             
+            # Initialization for certain providers
+            if engine_type == "mistral-cartesia":
+                await stt_ws.send_json({
+                    "model": "ink-whisper-2025-06-04",
+                    "language": "en",
+                    "encoding": "pcm_s16le",
+                    "sample_rate": 16000
+                })
+            # Sarvam parameters are in the URL query string
+
             async def sender():
                 nonlocal interaction_id
+                downstream_state = None
                 try:
                     async for data in communicator.receive():
                         if data["event"] == "start":
                             if isinstance(communicator, TwilioCommunicator):
                                 communicator.stream_sid = data["start"]["streamSid"]
                                 if not interaction_id: interaction_id = data["start"].get("customParameters", {}).get("interaction_id")
-                            print(f"Deepgram Sender: Stream Started | Interaction: {interaction_id}")
+                            logger.info(f"STT Sender: Stream Started | Interaction: {interaction_id}")
                         elif data["event"] == "media":
                             media_payload = data["media"]["payload"]
                             raw_audio = base64.b64decode(media_payload)
-                            await dg_ws.send_bytes(raw_audio)
+                            
+                            if engine_type == "mistral-cartesia":
+                                # Convert mulaw 8k to pcm 16k for Cartesia
+                                pcm_8k = audioop.ulaw2lin(raw_audio, 2)
+                                pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
+                                await stt_ws.send_bytes(pcm_16k)
+                            elif engine_type == "mistral-sarvam":
+                                # Sarvam expects JSON with base64 PCM 16k
+                                pcm_8k = audioop.ulaw2lin(raw_audio, 2)
+                                pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
+                                b64_audio = base64.b64encode(pcm_16k).decode("utf-8")
+                                await stt_ws.send_json({"type": "audio", "data": b64_audio})
+                            else:
+                                # Deepgram (configured for 8k) takes mulaw or raw
+                                await stt_ws.send_bytes(raw_audio)
                         elif data["event"] == "stop":
-                            await dg_ws.send_bytes(b"") # Close signal
                             break
                 except Exception as e:
-                    print(f"Telephony Receiver Error: {e}")
+                    logger.error(f"STT Sender Error: {e}")
                 finally:
-                    await dg_ws.close()
+                    await stt_ws.close()
 
             async def receiver():
                 try:
-                    async for msg in dg_ws:
+                    async for msg in stt_ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             res = json.loads(msg.data)
-                            if "channel" in res:
-                                alt = res["channel"]["alternatives"][0]
+                            transcript = ""
+                            is_final = False
+
+                            if engine_type == "mistral-cartesia":
+                                transcript = res.get("transcript", "")
                                 is_final = res.get("is_final", False)
+                            elif engine_type == "mistral-sarvam":
+                                # Sarvam returns 'transcript' field for final results
+                                transcript = res.get("transcript", "")
+                                # In Saaras:v3, if type is 'transcript' or it's a final update
+                                is_final = bool(transcript.strip()) and (res.get("type") == "transcript" or res.get("is_final", False))
+                            else:
+                                # Deepgram
+                                if "channel" in res:
+                                    alt = res["channel"]["alternatives"][0]
+                                    transcript = alt.get("transcript", "")
+                                    is_final = res.get("is_final", False)
+
+                            if transcript and is_final:
+                                logger.info(f"🎤 [STT] FINAL: {transcript}")
                                 
-                                if alt["transcript"]:
-                                    if is_final:
-                                        logger.info(f"🎤 [Deepgram] FINAL: {alt['transcript']}")
-                                    else:
-                                        logger.debug(f"🎤 [Deepgram] interim: {alt['transcript']}")
+                                # BARGE-IN DETECTION
+                                if is_rio_speaking:
+                                    logger.info("🛑 Barge-in! Interrupting Rio.")
+                                    await communicator.clear_audio_buffer()
+                                    if current_tts_task and not current_tts_task.done():
+                                        current_tts_task.cancel()
+                                    if current_mistral_task and not current_mistral_task.done():
+                                        current_mistral_task.cancel()
                                 
-                                if alt["transcript"] and is_final:
-                                    transcript = alt["transcript"]
-                                    
-                                    # ✅ BARGE-IN DETECTION: Check if Rio is speaking
-                                    if is_rio_speaking:
-                                        logger.info("🛑 Barge-in detected! User interrupted Rio's response")
-                                        logger.info("   → Stopping TTS and clearing audio buffer...")
-                                        await communicator.clear_audio_buffer()
-                                    
-                                    print(f"User (Deepgram Raw): {transcript}")
-                                    transcript_accumulator.append(f"User: {transcript}")
-                                    save_transcript(interaction_id, transcript_accumulator)
-                                    # Barge-in detection: if Rio is speaking, interrupt
-                                    try:
-                                        if is_rio_speaking:
-                                            logger.info("🛑 Barge-in detected! User interrupted Rio's response")
-                                            # Cancel ongoing TTS
-                                            if current_tts_task and not current_tts_task.done():
-                                                current_tts_task.cancel()
-                                            # Cancel ongoing Mistral generation
-                                            if current_mistral_task and not current_mistral_task.done():
-                                                current_mistral_task.cancel()
-                                            # Clear any queued audio to avoid overlap
-                                            try:
-                                                await communicator.clear_audio_buffer()
-                                            except Exception:
-                                                logger.debug("communicator.clear_audio_buffer() not available or failed")
-                                    except NameError:
-                                        # If flags are not defined for some reason, ignore
-                                        pass
-                                    await process_mistral(transcript)
-                        elif msg.type == aiohttp.WSMsgType.CLOSED:
-                            break
-                        elif msg.type == aiohttp.WSMsgType.ERROR:
-                            print(f"Deepgram WS Error")
+                                transcript_accumulator.append(f"User: {transcript}")
+                                save_transcript(interaction_id, transcript_accumulator)
+                                await process_mistral(transcript)
+                        elif msg.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                             break
                 except Exception as e:
-                    print(f"Deepgram Receiver Error: {e}")
+                    logger.error(f"STT Receiver Error: {e}")
 
             await asyncio.gather(sender(), receiver())
     

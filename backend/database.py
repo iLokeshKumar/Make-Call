@@ -104,6 +104,7 @@ class User(AuditMixin, table=True):
     is_active: bool = Field(default=True)
     email_verified: bool = Field(default=False)
     verification_token: Optional[str] = None
+    mfa_disable_otp: Optional[str] = None
 
 class UserCreate(SQLModel):
     username: str

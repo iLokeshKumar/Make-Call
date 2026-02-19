@@ -12,6 +12,9 @@ export default function MFASetup() {
     const [success, setSuccess] = useState(false);
     const [loading, setLoading] = useState(false);
 
+    const [disabling, setDisabling] = useState(false);
+    const [disableOtp, setDisableOtp] = useState("");
+
     const startSetup = async () => {
         setLoading(true);
         setError("");
@@ -60,11 +63,132 @@ export default function MFASetup() {
         }
     };
 
-    if (user?.mfa_enabled) {
+    const requestDisable = async () => {
+        setLoading(true);
+        setError("");
+        try {
+            const res = await fetch("http://localhost:6060/auth/mfa/request-disable", {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                setDisabling(true);
+            } else {
+                const err = await res.json();
+                setError(err.detail || "Failed to request MFA disable");
+            }
+        } catch (err) {
+            setError("Network error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    const confirmDisable = async () => {
+        setLoading(true);
+        setError("");
+        try {
+            const res = await fetch("http://localhost:6060/auth/mfa/disable", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({ token: disableOtp }),
+            });
+            if (res.ok) {
+                setDisabling(false);
+                setSuccess(true);
+                await refreshUser();
+            } else {
+                const err = await res.json();
+                setError(err.detail || "Invalid OTP code");
+            }
+        } catch (err) {
+            setError("Network error");
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    if (user?.mfa_enabled && !disabling) {
         return (
-            <div className="flex items-center space-x-2 text-green-600 dark:text-green-400 font-bold p-4 bg-green-50 dark:bg-green-900/20 rounded-xl border border-green-200 dark:border-green-800">
-                <CheckCircle2 className="h-5 w-5" />
-                <span>Two-Factor Authentication is Enabled</span>
+            <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 mt-6">
+                <div className="flex items-center justify-between">
+                    <div className="flex items-center space-x-3">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-green-500 shadow-md">
+                            <Shield className="h-5 w-5 text-white" />
+                        </div>
+                        <div>
+                            <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">Security</h3>
+                            <p className="text-sm text-green-600 dark:text-green-400 font-bold">Two-Factor Authentication is Enabled</p>
+                        </div>
+                    </div>
+                    <button
+                        onClick={requestDisable}
+                        disabled={loading}
+                        className="px-4 py-2 bg-red-100 hover:bg-red-200 text-red-600 dark:bg-red-900/20 dark:hover:bg-red-900/30 dark:text-red-400 rounded-xl font-bold transition-all text-sm disabled:opacity-50"
+                    >
+                        {loading ? "..." : "Disable 2FA"}
+                    </button>
+                </div>
+                {error && (
+                    <div className="flex items-center space-x-2 text-red-500 text-sm mt-4">
+                        <AlertCircle className="h-4 w-4" />
+                        <span>{error}</span>
+                    </div>
+                )}
+            </div>
+        );
+    }
+
+    if (user?.mfa_enabled && disabling) {
+        return (
+            <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 mt-6">
+                <div className="flex items-center space-x-3 mb-6">
+                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-500">
+                        <Shield className="h-5 w-5 text-white" />
+                    </div>
+                    <div>
+                        <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">Disable 2FA</h3>
+                        <p className="text-sm text-slate-500 dark:text-slate-400">Verify your identity via email OTP</p>
+                    </div>
+                </div>
+
+                <div className="space-y-4">
+                    <p className="text-sm text-slate-600 dark:text-slate-400">
+                        We have sent a 6-digit verification code to <strong>{user.email}</strong>. Please enter it below to confirm disabling 2FA.
+                    </p>
+                    <div className="flex space-x-4">
+                        <input
+                            type="text"
+                            maxLength={6}
+                            value={disableOtp}
+                            onChange={(e) => setDisableOtp(e.target.value)}
+                            placeholder="000000"
+                            className="flex-1 bg-white/60 dark:bg-slate-800/60 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-2 text-center text-2xl tracking-[0.5em] font-mono focus:ring-2 focus:ring-red-500"
+                        />
+                        <button
+                            onClick={confirmDisable}
+                            disabled={loading || disableOtp.length !== 6}
+                            className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-xl font-bold transition-all disabled:opacity-50"
+                        >
+                            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : "Confirm Disable"}
+                        </button>
+                    </div>
+                    <button
+                        onClick={() => setDisabling(false)}
+                        className="text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300"
+                    >
+                        Cancel
+                    </button>
+                    {error && (
+                        <div className="flex items-center space-x-2 text-red-500 text-sm mt-2">
+                            <AlertCircle className="h-4 w-4" />
+                            <span>{error}</span>
+                        </div>
+                    )}
+                </div>
             </div>
         );
     }

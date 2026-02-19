@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
 import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles, UserPlus, Plus, Mail, StickyNote } from "lucide-react";
 
 interface Lead {
@@ -16,6 +17,7 @@ interface Lead {
 
 export default function LeadsPage() {
     const [leads, setLeads] = useState<Lead[]>([]);
+    const { token } = useAuth();
     const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(false);
     const [file, setFile] = useState<File | null>(null);
@@ -28,7 +30,11 @@ export default function LeadsPage() {
 
     const fetchLeads = async () => {
         try {
-            const res = await fetch(`${API_BASE}/leads`);
+            const res = await fetch(`${API_BASE}/leads`, {
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                }
+            });
             const data = await res.json();
             setLeads(data);
         } catch (error) {
@@ -60,6 +66,9 @@ export default function LeadsPage() {
         try {
             const res = await fetch(`${API_BASE}/leads/upload`, {
                 method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                },
                 body: formData,
             });
             const data = await res.json();
@@ -81,7 +90,12 @@ export default function LeadsPage() {
 
     const handleCall = async (phone: string, id: number) => {
         try {
-            await fetch(`${API_BASE}/make-call?to=${encodeURIComponent(phone)}&lead_id=${id}`, { method: 'POST' });
+            await fetch(`${API_BASE}/make-call?to=${encodeURIComponent(phone)}&lead_id=${id}`, {
+                method: 'POST',
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                }
+            });
             alert(`Initiating call to ${phone}...`);
         } catch (e) {
             alert("Failed to initiate call");
@@ -96,7 +110,12 @@ export default function LeadsPage() {
     const handleDeleteLead = async (id: number) => {
         if (!confirm("Are you sure you want to delete this lead?")) return;
         try {
-            const res = await fetch(`${API_BASE}/leads/${id}`, { method: "DELETE" });
+            const res = await fetch(`${API_BASE}/leads/${id}`, {
+                method: "DELETE",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                }
+            });
             if (res.ok) {
                 fetchLeads();
             } else {
@@ -245,7 +264,10 @@ export default function LeadsPage() {
                                     try {
                                         const res = await fetch(`${API_BASE}/leads/fetch-apollo`, {
                                             method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                                'Authorization': `Bearer ${token}`
+                                            },
                                             body: JSON.stringify({ keywords })
                                         });
                                         const data = await res.json();
@@ -335,7 +357,12 @@ export default function LeadsPage() {
                                                 <button
                                                     onClick={async () => {
                                                         try {
-                                                            const res = await fetch(`${API_BASE}/leads/${lead.id}/enrich`, { method: 'POST' });
+                                                            const res = await fetch(`${API_BASE}/leads/${lead.id}/enrich`, {
+                                                                method: 'POST',
+                                                                headers: {
+                                                                    "Authorization": `Bearer ${token}`
+                                                                }
+                                                            });
                                                             if (res.ok) {
                                                                 alert("Successfully Enriched");
                                                                 fetchLeads();
@@ -474,7 +501,10 @@ export default function LeadsPage() {
                                     try {
                                         const res = await fetch(`${API_BASE}/leads`, {
                                             method: 'POST',
-                                            headers: { 'Content-Type': 'application/json' },
+                                            headers: {
+                                                'Content-Type': 'application/json',
+                                                'Authorization': `Bearer ${token}`
+                                            },
                                             body: JSON.stringify({ ...manualLead, source: "Manual" })
                                         });
                                         if (res.ok) {

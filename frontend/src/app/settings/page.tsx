@@ -28,7 +28,9 @@ export default function SettingsPage() {
     useEffect(() => {
         const fetchSettings = async () => {
             try {
-                const res = await fetch(`${API_BASE}/settings`);
+                const res = await fetch(`${API_BASE}/settings`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
                 const data = await res.json();
                 setSystemInstruction(data.system_instruction);
                 setVoiceEngine(data.voice_engine || "gemini");
@@ -42,6 +44,34 @@ export default function SettingsPage() {
         };
         fetchSettings();
     }, []);
+
+    const handleDeleteAccount = async () => {
+        if (!window.confirm("ARE YOU SURE? This will permanently delete your account and you will be logged out immediately. This action cannot be undone.")) {
+            return;
+        }
+
+        try {
+            const res = await fetch(`${API_BASE}/auth/me`, {
+                method: "DELETE",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                },
+            });
+
+            if (res.ok) {
+                alert("Account deleted successfully.");
+                // Clear local storage and redirect
+                localStorage.removeItem("access_token");
+                window.location.href = "/register";
+            } else {
+                const errorData = await res.json();
+                alert(`Error: ${errorData.detail || "Could not delete account"}`);
+            }
+        } catch (error) {
+            console.error("Error deleting account:", error);
+            alert("A network error occurred.");
+        }
+    };
 
     const handleSave = async () => {
         setSaving(true);
@@ -244,8 +274,62 @@ export default function SettingsPage() {
                                             <Monitor className="h-5 w-5" />
                                         </div>
                                         <div className="text-left">
-                                            <p className="font-bold text-sm">Mistral Pipeline</p>
-                                            <p className="text-xs text-slate-500">Deepgram + ElevenLabs</p>
+                                            <p className="font-bold text-sm">Mistral + ElevenLabs + Deepgram</p>
+                                            <p className="text-xs text-slate-500">Multimodal</p>
+                                        </div>
+                                    </button>
+
+                                    <button
+                                        onClick={() => setVoiceEngine("mistral-cartesia")}
+                                        className={`
+                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
+                                            ${voiceEngine === "mistral-cartesia"
+                                                ? 'border-emerald-600 bg-emerald-600/5 dark:bg-emerald-600/10'
+                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
+                                        `}
+                                    >
+                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-cartesia" ? 'bg-emerald-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                            <Zap className="h-5 w-5" />
+                                        </div>
+                                        <div className="text-left">
+                                            <p className="font-bold text-sm">Mistral + Cartesia</p>
+                                            <p className="text-xs text-slate-500">Sonic S2S (Ultra-Fast)</p>
+                                        </div>
+                                    </button>
+
+                                    <button
+                                        onClick={() => setVoiceEngine("mistral-sarvam")}
+                                        className={`
+                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
+                                            ${voiceEngine === "mistral-sarvam"
+                                                ? 'border-orange-600 bg-orange-600/5 dark:bg-orange-600/10'
+                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
+                                        `}
+                                    >
+                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-sarvam" ? 'bg-orange-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                            <Brain className="h-5 w-5" />
+                                        </div>
+                                        <div className="text-left">
+                                            <p className="font-bold text-sm">Mistral + Sarvam</p>
+                                            <p className="text-xs text-slate-500">India Specialized</p>
+                                        </div>
+                                    </button>
+
+                                    <button
+                                        onClick={() => setVoiceEngine("mistral-deepgram")}
+                                        className={`
+                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
+                                            ${voiceEngine === "mistral-deepgram"
+                                                ? 'border-yellow-600 bg-yellow-600/5 dark:bg-yellow-600/10'
+                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
+                                        `}
+                                    >
+                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-deepgram" ? 'bg-yellow-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                            <Brain className="h-5 w-5" />
+                                        </div>
+                                        <div className="text-left">
+                                            <p className="font-bold text-sm">Mistral + Deepgram</p>
+                                            <p className="text-xs text-slate-500">Nova-2 + Aura-Asteria</p>
                                         </div>
                                     </button>
                                 </div>
@@ -368,6 +452,32 @@ export default function SettingsPage() {
                         </button>
                     </div>
                 )}
+
+                {/* Account Deletion Area */}
+                <div className="rounded-2xl border border-red-200 dark:border-red-900/30 bg-red-50/50 dark:bg-red-900/10 p-6 mt-12">
+                    <div className="flex items-center space-x-3 mb-4">
+                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-500">
+                            <Shield className="h-5 w-5 text-white" />
+                        </div>
+                        <div>
+                            <h3 className="text-xl font-bold text-red-600 dark:text-red-400">Danger Zone</h3>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">Irreversible account actions</p>
+                        </div>
+                    </div>
+
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-xl bg-white/50 dark:bg-slate-900/50 border border-red-100 dark:border-red-900/20">
+                        <div>
+                            <p className="font-bold text-slate-900 dark:text-slate-100">Delete Account</p>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">Permanently remove your account and all associated data.</p>
+                        </div>
+                        <button
+                            onClick={handleDeleteAccount}
+                            className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-xl font-bold transition-all shadow-lg shadow-red-500/30 hover:shadow-red-500/50 whitespace-nowrap"
+                        >
+                            Delete My Account
+                        </button>
+                    </div>
+                </div>
             </div>
         </div>
     );

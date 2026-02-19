@@ -150,12 +150,16 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
         Tool result as dict
     """
     
+    # Hallucination mapping: Mistral sometimes calls 'lookup_product' instead of 'get_product_info'
+    if tool_name == "lookup_product":
+        tool_name = "get_product_info"
+        
     logger.info(f"[execute_mcp_tool] Routing {tool_name} with args: {arguments}")
     
     try:
         if tool_name == "check_icp_qualification":
             # Delegate to MCP tool
-            result = check_icp_qualification(
+            result = check_icp_qualification.fn(
                 company_size=arguments.get("company_size"),
                 industry=arguments.get("industry"),
                 employees=arguments.get("employee_count", 0)
@@ -165,7 +169,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
         
         elif tool_name == "get_product_info":
             # Delegate to MCP tool
-            result = get_product_info(
+            result = get_product_info.fn(
                 product_name=arguments.get("product_name")
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
@@ -173,7 +177,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
         
         elif tool_name == "check_guardrails":
             # Delegate to MCP tool
-            result = check_guardrails(
+            result = check_guardrails.fn(
                 requested_discount_percent=arguments.get("requested_discount_percent", 0)
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
@@ -181,7 +185,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
         
         elif tool_name == "book_meeting":
             # Delegate to MCP tool (which handles DB + email + logging internally)
-            result = book_meeting(
+            result = book_meeting.fn(
                 lead_id=arguments.get("lead_id"),
                 proposed_time=arguments.get("proposed_time"),
                 meeting_type=arguments.get("meeting_type", "demo")

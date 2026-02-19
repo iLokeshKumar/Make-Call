@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
 import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare } from "lucide-react";
 import clsx from "clsx";
 
@@ -14,6 +15,7 @@ interface Interaction {
 
 export default function CallsPage() {
     const [calls, setCalls] = useState<Interaction[]>([]);
+    const { token } = useAuth();
     const [loading, setLoading] = useState(true);
     const [expandedCall, setExpandedCall] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -21,7 +23,9 @@ export default function CallsPage() {
     useEffect(() => {
         const fetchCalls = async () => {
             try {
-                const res = await fetch("http://localhost:6060/interactions");
+                const res = await fetch("http://localhost:6060/interactions", {
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
                 if (!res.ok) throw new Error(`Server returned ${res.status}`);
                 const data = await res.json();
                 // Sort by timestamp descending

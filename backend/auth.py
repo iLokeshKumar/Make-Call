@@ -61,22 +61,34 @@ async def get_current_user(token: str = Depends(oauth2_scheme), session: Session
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+    print(f"DEBUG: Validating Token - Secret: {SECRET_KEY[-4:]}, Algo: {ALGORITHM}")
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username: str = payload.get("sub")
         if username is None:
+            print("DEBUG: Token validation failed - No 'sub' found")
             raise credentials_exception
         token_data = TokenData(username=username)
-    except jwt.PyJWTError:
+    except jwt.ExpiredSignatureError:
+        print("DEBUG: Token validation failed - Expired Signature")
+        raise credentials_exception
+    except jwt.InvalidTokenError as e:
+        print(f"DEBUG: Token validation failed - Invalid Token: {str(e)}")
+        raise credentials_exception
+    except jwt.PyJWTError as e:
+        print(f"DEBUG: Token validation failed - PyJWT Error: {str(e)}")
         raise credentials_exception
         
     user = session.exec(select(User).where(User.username == token_data.username)).first()
     if user is None:
+        print(f"DEBUG: Token validation failed - User '{token_data.username}' not found in DB")
         raise credentials_exception
+    print(f"DEBUG: Token validated for user: {user.username} (Role: {user.role})")
     return user
 
 async def get_current_active_user(current_user: User = Depends(get_current_user)):
     if not current_user.is_active:
+        print(f"DEBUG: Active check failed for user: {current_user.username}")
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
@@ -86,6 +98,7 @@ class RoleChecker:
 
     def __call__(self, user: User = Depends(get_current_active_user)):
         if user.role not in self.allowed_roles:
+            print(f"DEBUG: Role check failed. User role: {user.role}, Allowed: {self.allowed_roles}")
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Operation not permitted for your role"

@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { Phone, Users, CheckCircle, AlertCircle, TrendingUp, Activity } from "lucide-react";
 import { useRouter } from "next/navigation";
+import { useAuth } from "@/context/AuthContext";
 import clsx from "clsx";
 
 export default function Home() {
@@ -15,20 +16,25 @@ export default function Home() {
   });
 
   const [activities, setActivities] = useState<any[]>([]);
+  const { token } = useAuth();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function fetchData() {
       try {
         // Fetch Stats
-        const statsRes = await fetch("http://localhost:6060/dashboard/stats");
+        const statsRes = await fetch("http://localhost:6060/dashboard/stats", {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
         if (statsRes.ok) {
           const data = await statsRes.json();
           setStatsData(data);
         }
 
         // Fetch Recent Leads for Activity
-        const leadsRes = await fetch("http://localhost:6060/leads");
+        const leadsRes = await fetch("http://localhost:6060/leads", {
+          headers: { "Authorization": `Bearer ${token}` }
+        });
         if (leadsRes.ok) {
           const leads = await leadsRes.json();
           // Map latest 5 leads to activity format
