@@ -435,5 +435,46 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                 "email_sent": False
             }
 
+@mcp.tool()
+def get_call_latency_summary(interaction_id: int) -> str:
+    """Retrieves a detailed latency breakdown for a specific call/interaction to identify bottlenecks."""
+    try:
+        with SessionLocal() as session:
+            result = session.execute(
+                text("SELECT stt_ms, llm_ms, tts_ms, stt_provider, llm_model, tts_provider FROM latencylog WHERE interaction_id = :lid"),
+                {"lid": interaction_id}
+            )
+            logs = [dict(row._mapping) for row in result]
+            if not logs:
+                return f"No latency data found for interaction {interaction_id}."
+            
+            total_stt = sum(l["stt_ms"] for l in logs)
+            total_llm = sum(l["llm_ms"] for l in logs)
+            total_tts = sum(l["tts_ms"] for l in logs)
+            count = len(logs)
+            
+            # Get unique providers/models for this call
+            stt_provs = ", ".join(set(filter(None, [l.get("stt_provider") for l in logs])))
+            llm_models = ", ".join(set(filter(None, [l.get("llm_model") for l in logs])))
+            tts_provs = ", ".join(set(filter(None, [l.get("tts_provider") for l in logs])))
+            
+            summary = [
+                f"📊 Detailed Latency Summary for Call {interaction_id} ({count} turns):",
+                f"- **STT Provider(s)**: {stt_provs}",
+                f"- **LLM Model(s)**: {llm_models}",
+                f"- **TTS Provider(s)**: {tts_provs}",
+                "",
+                f"- Avg STT (Listening): {total_stt/count:.1f}ms",
+                f"- Avg LLM (Thinking): {total_llm/count:.1f}ms",
+                f"- Avg TTS (Speaking First-Byte): {total_tts/count:.1f}ms",
+                f"- **Avg Turn Response Time**: {(total_stt+total_llm+total_tts)/count:.1f}ms",
+                "\nRecommendations:",
+                "1. If LLM is >1500ms, consider using a faster model (e.g., mistral-small)." if total_llm/count > 1500 else "LLM performance is good.",
+                "2. If TTS is >800ms, use Cartesia as it has the lowest latency." if total_tts/count > 800 else "TTS performance is good."
+            ]
+            return "\n".join(summary)
+    except Exception as e:
+        return f"Error retrieving latency summary: {e}"
+
 if __name__ == "__main__":
     mcp.run()

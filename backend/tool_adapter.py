@@ -31,7 +31,8 @@ from mcp_server import (
     check_icp_qualification,
     get_product_info,
     check_guardrails,
-    book_meeting
+    book_meeting,
+    get_call_latency_summary
 )
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,23 @@ def get_mistral_tools():
                     "required": ["lead_id", "proposed_time", "meeting_type"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_call_latency_summary",
+                "description": "Retrieve detailed latency metrics for a call to identify bottlenecks in STT, LLM, or TTS.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "interaction_id": {
+                            "type": "integer",
+                            "description": "The database ID of the interaction/call."
+                        }
+                    },
+                    "required": ["interaction_id"]
+                }
+            }
         }
     ]
 
@@ -182,9 +200,8 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
-        
         elif tool_name == "book_meeting":
-            # Delegate to MCP tool (which handles DB + email + logging internally)
+            # Delegate to MCP tool
             result = book_meeting.fn(
                 lead_id=arguments.get("lead_id"),
                 proposed_time=arguments.get("proposed_time"),
@@ -193,10 +210,17 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
         
+        elif tool_name == "get_call_latency_summary":
+            # Delegate to MCP tool
+            result = get_call_latency_summary.fn(
+                interaction_id=arguments.get("interaction_id")
+            )
+            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
+            return result
+        
         else:
             error = {
-                "error": f"Unknown tool: {tool_name}",
-                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting"]
+                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary"]
             }
             logger.error(f"[execute_mcp_tool] Unknown tool error: {error}")
             return error

@@ -13,8 +13,10 @@ import logging
 import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict, Any
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, WebSocket, Request, HTTPException, Depends, WebSocketDisconnect, UploadFile, File, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
 from twilio.twiml.voice_response import VoiceResponse, Connect
 from twilio.twiml.messaging_response import MessagingResponse
@@ -24,8 +26,6 @@ import requests
 from google import genai
 from google.genai import types
 from mistralai import Mistral as MistralClient
-
-# ENHANCED LOGGING SETUP
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -56,7 +56,7 @@ except ImportError:
 import aiohttp
 from database import (
     init_db, get_session, Lead, LeadCreate, engine, Interaction, 
-    Product, SystemSettings, Appointment, Outcome, User, UserCreate
+    Product, SystemSettings, Appointment, Outcome, User, UserCreate, LatencyLog
 )
 from sqlmodel import Session, select, func, text, col, SQLModel
 from rag_service import search_knowledge_base
@@ -71,15 +71,50 @@ from auth import (
     get_mfa_provisioning_uri, generate_mfa_qr_base64
 )
 
+from sarvamai import SarvamAI
+from sarvamai.play import save
+
+from cartesia import Cartesia
+
 # Initialize DB on startup
-init_db()
+# init_db()  # Moved to lifespan below
 
-from fastapi.middleware.cors import CORSMiddleware
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: Initialize DB and Settings
+    init_db()
+    with Session(engine) as session:
+        try:
+            # Check if Rio's system instruction already exists
+            existing = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
+            if not existing:
+                # Initialize with Rio's persona
+                db_setting = SystemSettings(key="system_instruction", value=RIO_PERSONA_PROMPT)
+                session.add(db_setting)
+                session.commit()
+                logger.info("✓ Rio's system prompt initialized in database")
+            else:
+                logger.info("✓ Rio's system prompt already exists in database")
+        except Exception as e:
+            logger.error(f"⚠️ Startup initialization error: {e}")
+    
+    yield
+    # Shutdown logic goes here if needed
 
-# RIO PERSONA & SYSTEM PROMPT (2026 RACE Framework)
+app = FastAPI(lifespan=lifespan)
 
-RIO_PERSONA_PROMPT = """
-You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
+# CORS Middleware Setup
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# RIO PERSONA & SYSTEM PROMPT
+
+RIO_PERSONA_PROMPT = """You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
 
 **ROLE**: Senior Sales Consultant
 - Your tone is professional, empathetic, and knowledgeable.
@@ -119,7 +154,7 @@ You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you
 - Do NOT book a demo without explicit prospect agreement.
 """
 
-app = FastAPI()
+
 
 @app.post("/token", response_model=Token)
 async def login_for_access_token(
@@ -559,8 +594,8 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "CwhOLp6mAE7h9asvUURR")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
-CARTESIA_API_KEY = os.getenv("Cartesia_API_Key")
-SARVAM_API_KEY = os.getenv("Sarvam_API_Key")
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_Key")
+SARVAM_API_KEY = os.getenv("SARVAM_API_Key")
 
 # EnableX Configuration
 ENABLEX_APP_ID = os.getenv("EnableX_App_ID")
@@ -1124,26 +1159,6 @@ async def delete_product(product_id: int, session: Session = Depends(get_session
     session.commit()
     return {"message": "Product deleted"}
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize Rio's persona prompt in the database on startup."""
-    from sqlmodel import Session
-    session = Session(engine)
-    try:
-        # Check if Rio's system instruction already exists
-        existing = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
-        if not existing:
-            # Initialize with Rio's persona
-            db_setting = SystemSettings(key="system_instruction", value=RIO_PERSONA_PROMPT)
-            session.add(db_setting)
-            session.commit()
-            print("✓ Rio's system prompt initialized in database")
-        else:
-            print("✓ Rio's system prompt already exists in database")
-    except Exception as e:
-        print(f"⚠️ Startup initialization error: {e}")
-    finally:
-        session.close()
 
 @app.get("/settings")
 async def get_settings(session: Session = Depends(get_session)):
@@ -1192,7 +1207,10 @@ class TwilioCommunicator(TelephonyCommunicator):
             yield {"event": "stop"}
     async def send_media(self, b64_audio):
         if self.stream_sid:
+            # logger.debug(f"⏫ [Twilio] Sending media: {len(b64_audio)} bytes")
             await self.websocket.send_json({"event": "media", "streamSid": self.stream_sid, "media": {"payload": b64_audio}})
+        else:
+            logger.warning("⚠️ [Twilio] Attempted to send media but stream_sid is missing!")
     
     async def clear_audio_buffer(self):
         if self.stream_sid:
@@ -1393,6 +1411,33 @@ async def run_tool(name, args, transcript_accumulator, interaction_id):
     save_transcript(interaction_id, transcript_accumulator)
     return result
 
+def save_latency(interaction_id, engine_name, stt, llm, tts, 
+                 stt_provider=None, stt_model=None, 
+                 llm_provider=None, llm_model=None, 
+                 tts_provider=None, tts_model=None):
+    """Saves turn-level latency metrics with provider/model details."""
+    try:
+        with Session(engine) as session:
+            log = LatencyLog(
+                interaction_id=interaction_id,
+                engine=engine_name,
+                stt_ms=round(stt * 1000, 2),
+                llm_ms=round(llm * 1000, 2),
+                tts_ms=round(tts * 1000, 2),
+                total_ms=round((stt + llm + tts) * 1000, 2),
+                stt_provider=stt_provider,
+                stt_model=stt_model,
+                llm_provider=llm_provider,
+                llm_model=llm_model,
+                tts_provider=tts_provider,
+                tts_model=tts_model
+            )
+            session.add(log)
+            session.commit()
+            logger.info(f"⏱️ [Latency] STT({stt_provider}): {log.stt_ms}ms | LLM({llm_model}): {log.llm_ms}ms | TTS({tts_provider}): {log.tts_ms}ms")
+    except Exception as e:
+        logger.error(f"Error saving latency log: {e}")
+
 def save_transcript(interaction_id, transcript_accumulator):
     """Saves transcript to DB."""
     if interaction_id:
@@ -1463,7 +1508,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
 
     # Safety and brevity controls (aggressive)
     MAX_VOICE_CHARS = int(os.getenv("MAX_VOICE_CHARS", "140"))
-    MISTRAL_MAX_TOKENS = int(os.getenv("MISTRAL_MAX_TOKENS", "120"))
+    MISTRAL_MAX_TOKENS = int(os.getenv("MISTRAL_MAX_TOKENS", "512"))
     MISTRAL_TEMPERATURE = float(os.getenv("MISTRAL_TEMPERATURE", "0.2"))
     MAX_TTS_SECONDS = int(os.getenv("MAX_TTS_SECONDS", "12"))
 
@@ -1471,6 +1516,33 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
     is_rio_speaking = False
     current_tts_task = None
     current_mistral_task = None
+
+    # Performance Tracking
+    # stt_start is updated when the previous speaker finishes
+    stt_start_time = time.time() 
+    tts_first_byte_time = 0.0
+    
+    # Provider/Model metadata for logging
+    stt_provider_name = "Deepgram"
+    stt_model_name = "nova-2"
+    tts_provider_name = "ElevenLabs"
+    tts_model_name = "eleven_turbo_v2_5"
+    
+    if engine_type == "mistral-cartesia":
+        stt_provider_name = "Cartesia"
+        stt_model_name = "ink-whisper"
+        tts_provider_name = "Cartesia"
+        tts_model_name = "sonic-3"
+    elif engine_type == "mistral-sarvam":
+        stt_provider_name = "Sarvam"
+        stt_model_name = "saaras:v3"
+        tts_provider_name = "Sarvam"
+        tts_model_name = "bulbul:v1"
+    elif engine_type == "mistral-deepgram":
+        stt_provider_name = "Deepgram"
+        stt_model_name = "nova-2"
+        tts_provider_name = "Deepgram"
+        tts_model_name = "aura-asteria-en"
 
     # Encourage minimal/concise replies via system prompt (very aggressive)
     brevity_instruction = (
@@ -1486,25 +1558,26 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
 
     async def speak(text):
         """Streaming TTS from selected provider to Twilio. Cancellable for barge-in."""
-        nonlocal is_rio_speaking, current_tts_task
+        nonlocal is_rio_speaking, current_tts_task, tts_first_byte_time
         if not text or not text.strip():
             return
             
         clean_text = clean_voice_text(text, max_chars=MAX_VOICE_CHARS)
         is_rio_speaking = True
+        tts_start_time = time.time()
         
         try:
             if engine_type == "mistral-cartesia":
                 # CARTESIA TTS (SONIC-3)
                 url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}"
-                headers = {"Cartesia-Version": "2024-06-10"}
+                headers = {"Cartesia-Version": "2025-04-16"}
                 logger.info(f"🔊 [Cartesia] TTS starting: {clean_text[:60]}...")
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(url, headers=headers) as c_ws:
                         # Send Preamble / Settings
                         # For Cartesia WS, we send the generation request
                         payload = {
-                            "model_id": "sonic-english", # sonic-3 is for experimental versions
+                            "model_id": "sonic-3", 
                             "transcript": clean_text,
                             "voice": {
                                 "mode": "id",
@@ -1512,12 +1585,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             },
                             "output_format": {
                                 "container": "raw",
-                                "encoding": "mulaw",
+                                "encoding": "pcm_mulaw",
                                 "sample_rate": 8000
-                            },
-                            "generation_config": {
-                                "speed": "normal",
-                                "volume": "normal"
                             },
                             "context_id": interaction_id or str(uuid.uuid4())
                         }
@@ -1527,10 +1596,12 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             if message.type == aiohttp.WSMsgType.TEXT:
                                 data = json.loads(message.data)
                                 if data.get("audio"):
-                                    pcm_16k = base64.b64decode(data["audio"])
-                                    pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
-                                    ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                    payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
+                                    if tts_first_byte_time == 0:
+                                        tts_first_byte_time = time.time() - tts_start_time
+                                    # Cartesia returns raw 8k mulaw as requested in output_format
+                                    # No need for resampling or conversion
+                                    audio_bytes = base64.b64decode(data["audio"])
+                                    payload_b64 = base64.b64encode(audio_bytes).decode("utf-8")
                                     await communicator.send_media(payload_b64)
                                 if data.get("done"):
                                     break
@@ -1559,6 +1630,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             data = await resp.json()
                             audio_b64 = data.get("audios", [None])[0]
                             if audio_b64:
+                                if tts_first_byte_time == 0:
+                                    tts_first_byte_time = time.time() - tts_start_time
                                 # Sarvam returns base64. 
                                 # If 8k pcm, convert to mulaw
                                 pcm_8k = base64.b64decode(audio_b64)
@@ -1581,6 +1654,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                         
                         async for message in dg_ws:
                             if message.type == aiohttp.WSMsgType.BINARY:
+                                if tts_first_byte_time == 0:
+                                    tts_first_byte_time = time.time() - tts_start_time
                                 # Deepgram sends raw mulaw 8k (no decoding/conversion needed)
                                 payload_b64 = base64.b64encode(message.data).decode("utf-8")
                                 await communicator.send_media(payload_b64)
@@ -1594,10 +1669,16 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             
             else:
                 # DEFAULT: ELEVENLABS
+                if not ELEVENLABS_API_KEY:
+                    logger.error("❌ ElevenLabs API Key missing!")
+                    return
+
                 url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
                 logger.info(f"🔊 [ElevenLabs] TTS starting: {clean_text[:60]}...")
                 async with aiohttp.ClientSession() as session:
-                    async with session.ws_connect(url) as el_ws:
+                    headers = {"xi-api-key": ELEVENLABS_API_KEY}
+                    async with session.ws_connect(url, headers=headers) as el_ws:
+                        # Initial request must contain xi_api_key as per error message
                         await el_ws.send_json({
                             "text": " ",
                             "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
@@ -1610,26 +1691,36 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             if message.type == aiohttp.WSMsgType.TEXT:
                                 data = json.loads(message.data)
                                 if data.get("audio"):
+                                    if tts_first_byte_time == 0:
+                                        tts_first_byte_time = time.time() - tts_start_time
                                     pcm_16k = base64.b64decode(data["audio"])
                                     pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
                                     ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
                                     payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
                                     await communicator.send_media(payload_b64)
+                                elif data.get("message"):
+                                    logger.error(f"❌ ElevenLabs Error Message: {data['message']}")
                                 if data.get("isFinal"):
                                     break
                             elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
+                                logger.warning(f"⚠️ ElevenLabs WS {message.type}")
                                 break
         except asyncio.CancelledError:
             logger.info("TTS playback cancelled.")
             raise
         except Exception as e:
             logger.error(f"TTS Error ({engine_type}): {e}")
+            import traceback
+            traceback.print_exc()
         finally:
             is_rio_speaking = False
             current_tts_task = None
+            # Update STT start time for next turn
+            nonlocal stt_start_time
+            stt_start_time = time.time()
 
-    async def process_mistral(user_input):
-        nonlocal current_mistral_task, current_tts_task
+    async def process_mistral(user_input, stt_latency):
+        nonlocal current_mistral_task, current_tts_task, tts_first_byte_time
         print(f"Processing Mistral Input: {user_input}")
         messages.append({"role": "user", "content": user_input})
         try:
@@ -1663,9 +1754,13 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                 messages.append(choice)
 
                 for tc in choice.tool_calls:
-                    args = json.loads(tc.function.arguments)
-                    print(f"Tool Triggered: {tc.function.name}({args})")
-                    result = await run_tool(tc.function.name, args, transcript_accumulator, interaction_id)
+                    try:
+                        args = json.loads(tc.function.arguments)
+                        print(f"Tool Triggered: {tc.function.name}({args})")
+                        result = await run_tool(tc.function.name, args, transcript_accumulator, interaction_id)
+                    except json.JSONDecodeError as jde:
+                        logger.error(f"❌ Mistral returned invalid JSON for tool {tc.function.name}: {tc.function.arguments}")
+                        result = {"error": "Invalid tool arguments format. Please try again with clear parameters."}
                     messages.append({
                         "role": "tool",
                         "name": tc.function.name,
@@ -1707,6 +1802,20 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                     logger.info("TTS cancelled due to barge-in/interrupt.")
                 finally:
                     current_tts_task = None
+                    # Log all metrics for this turn
+                    save_latency(
+                        interaction_id=interaction_id,
+                        engine_name=engine_type,
+                        stt=stt_latency,
+                        llm=elapsed,
+                        tts=tts_first_byte_time,
+                        stt_provider=stt_provider_name,
+                        stt_model=stt_model_name,
+                        llm_provider="mistral",
+                        llm_model="mistral-small-latest",
+                        tts_provider=tts_provider_name,
+                        tts_model=tts_model_name
+                    )
             else:
                 print("Mistral returned empty content.")
         except asyncio.CancelledError:
@@ -1724,7 +1833,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
     if engine_type == "mistral-cartesia":
         stt_url = f"wss://api.cartesia.ai/stt/websocket?api_key={CARTESIA_API_KEY}"
         stt_headers = {
-            "Cartesia-Version": "2024-06-10"
+            "Cartesia-Version": "2025-04-16"
         }
     elif engine_type == "mistral-sarvam":
         # Use query params for key as well to avoid handshake rejection
@@ -1744,7 +1853,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             # Initialization for certain providers
             if engine_type == "mistral-cartesia":
                 await stt_ws.send_json({
-                    "model": "ink-whisper-2025-06-04",
+                    "model": "ink-whisper",
                     "language": "en",
                     "encoding": "pcm_s16le",
                     "sample_rate": 16000
@@ -1823,7 +1932,12 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 
                                 transcript_accumulator.append(f"User: {transcript}")
                                 save_transcript(interaction_id, transcript_accumulator)
-                                await process_mistral(transcript)
+                                
+                                # Calculate STT Latency
+                                stt_latency = time.time() - stt_start_time
+                                tts_first_byte_time = 0 # reset for new turn
+                                
+                                await process_mistral(transcript, stt_latency)
                         elif msg.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                             break
                 except Exception as e:

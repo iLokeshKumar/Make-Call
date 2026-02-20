@@ -93,6 +93,24 @@ class Outcome(AuditMixin, table=True):
     probability: float = Field(default=0.0) # 0.0 to 1.0
     notes: Optional[str] = None
 
+class LatencyLog(AuditMixin, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    interaction_id: Optional[int] = Field(default=None, index=True)
+    engine: str
+    stt_ms: float = Field(default=0.0)
+    llm_ms: float = Field(default=0.0)
+    tts_ms: float = Field(default=0.0)
+    total_ms: float = Field(default=0.0)
+    
+    stt_provider: Optional[str] = None
+    stt_model: Optional[str] = None
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    tts_provider: Optional[str] = None
+    tts_model: Optional[str] = None
+    
+    notes: Optional[str] = None
+
 class User(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True)
