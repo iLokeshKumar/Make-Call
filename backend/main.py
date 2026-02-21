@@ -26,6 +26,8 @@ import requests
 from google import genai
 from google.genai import types
 from mistralai import Mistral as MistralClient
+from cartesia import Cartesia, AsyncCartesia
+from sarvamai import SarvamAI, AsyncSarvamAI
 
 logging.basicConfig(
     level=logging.DEBUG,
@@ -594,8 +596,14 @@ ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "CwhOLp6mAE7h9asvUURR")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
-CARTESIA_API_KEY = os.getenv("CARTESIA_API_Key")
-SARVAM_API_KEY = os.getenv("SARVAM_API_Key")
+CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
+SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+
+# SDK Clients
+cartesia_client = Cartesia(api_key=CARTESIA_API_KEY)
+async_cartesia_client = AsyncCartesia(api_key=CARTESIA_API_KEY)
+sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
+async_sarvam_client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
 
 # EnableX Configuration
 ENABLEX_APP_ID = os.getenv("EnableX_App_ID")
@@ -814,7 +822,13 @@ BLOCKED_NUMBERS = {"911", "112", "999"}
 
 
 if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and PHONE_NUMBER_FROM and GEMINI_API_KEY):
-    print("Error: Missing environment variables in .env")
+    logger.error("❌ Error: Missing essential environment variables in .env")
+
+# Validate Twilio SID Prefix
+if TWILIO_ACCOUNT_SID and not TWILIO_ACCOUNT_SID.startswith("AC"):
+    logger.warning(f"⚠️ TWILIO_ACCOUNT_SID '{TWILIO_ACCOUNT_SID}' does not start with 'AC'. "
+                   "If this is an API Key (starting with 'SK'), Twilio calls will fail. "
+                   "Please use your Master Account SID from https://console.twilio.com/")
 
 client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 # AI Clients
@@ -906,8 +920,16 @@ async def make_call(to: str, lead_id: int = None):
             )
             return {"message": "Twilio Call initiated", "call_sid": call.sid}
     except Exception as e:
-        print(f"Error making call: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        logger.error(f"Error making call: {error_msg}")
+        
+        # Specific detection for Twilio 401/Credential issues
+        if "Authenticate" in error_msg or "20003" in error_msg:
+            detail = "Twilio Authentication Failed (401). Please ensure your TWILIO_ACCOUNT_SID starts with 'AC' and is NOT an API Key SID (SK...)."
+            logger.error(f"❌ {detail}")
+            raise HTTPException(status_code=401, detail=detail)
+            
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.post("/enablex-event")
 async def enablex_event(request: Request, lead_id: int = None):
@@ -1417,9 +1439,18 @@ def save_latency(interaction_id, engine_name, stt, llm, tts,
                  tts_provider=None, tts_model=None):
     """Saves turn-level latency metrics with provider/model details."""
     try:
+        # Convert to int if it's a numeric string, otherwise skip DB save
+        try:
+            interaction_id_int = int(interaction_id) if interaction_id else None
+        except (ValueError, TypeError):
+            # If it's a string like "session_xxx", we don't save to DB but we still log to console
+            logger.debug(f"Skipping DB latency log for non-integer interaction_id: {interaction_id}")
+            logger.info(f"⏱️ [Latency] STT({stt_provider}): {stt}s | LLM({llm_model or 'Mistral'}): {llm:.2f}s | TTS({tts_provider}): {tts}s")
+            return
+
         with Session(engine) as session:
             log = LatencyLog(
-                interaction_id=interaction_id,
+                interaction_id=interaction_id_int,
                 engine=engine_name,
                 stt_ms=round(stt * 1000, 2),
                 llm_ms=round(llm * 1000, 2),
@@ -1442,8 +1473,15 @@ def save_transcript(interaction_id, transcript_accumulator):
     """Saves transcript to DB."""
     if interaction_id:
         try:
+            # Handle non-integer interaction_id (like fallback strings)
+            try:
+                interaction_id_int = int(interaction_id)
+            except (ValueError, TypeError):
+                logger.debug(f"Skipping DB transcript save for non-integer interaction_id: {interaction_id}")
+                return
+
             with Session(engine) as db_session:
-                db_i = db_session.get(Interaction, int(interaction_id))
+                db_i = db_session.get(Interaction, interaction_id_int)
                 if db_i:
                     transcript_text = "\n".join(transcript_accumulator)
                     db_i.transcript = transcript_text
@@ -1464,6 +1502,10 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     
 
     interaction_id = websocket.query_params.get("interaction_id")
+    # If missing, we use a string for logging, but the DB helpers above will handle/skip it.
+    if not interaction_id or interaction_id == "None":
+        interaction_id = f"session_{uuid.uuid4().hex[:8]}"
+        logger.info(f"Assigning fallback Interaction ID for this call: {interaction_id}")
     transcript_accumulator = []
     
     settings = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
@@ -1568,76 +1610,64 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         
         try:
             if engine_type == "mistral-cartesia":
-                # CARTESIA TTS (SONIC-3)
-                url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}"
-                headers = {"Cartesia-Version": "2025-04-16"}
-                logger.info(f"🔊 [Cartesia] TTS starting: {clean_text[:60]}...")
-                async with aiohttp.ClientSession() as session:
-                    async with session.ws_connect(url, headers=headers) as c_ws:
-                        # Send Preamble / Settings
-                        # For Cartesia WS, we send the generation request
-                        payload = {
-                            "model_id": "sonic-3", 
-                            "transcript": clean_text,
-                            "voice": {
+                # CARTESIA TTS (SONIC-2024-11) via Async SDK
+                logger.info(f"🔊 [Cartesia SDK] TTS starting: {clean_text[:60]}...")
+                try:
+                    async with async_cartesia_client.tts.websocket() as c_ws:
+                        async for output in c_ws.send(
+                            model_id="sonic-2024-11",
+                            transcript=clean_text,
+                            voice={
                                 "mode": "id",
-                                "id": "1259b7e3-cb8a-43df-9446-30971a46b8b0"
+                                "id": "a0e99841-438c-4a64-b679-ae501e7d6091"
                             },
-                            "output_format": {
+                            output_format={
                                 "container": "raw",
                                 "encoding": "pcm_mulaw",
                                 "sample_rate": 8000
                             },
-                            "context_id": interaction_id or str(uuid.uuid4())
-                        }
-                        await c_ws.send_json(payload)
-                        
-                        async for message in c_ws:
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                data = json.loads(message.data)
-                                if data.get("audio"):
-                                    if tts_first_byte_time == 0:
-                                        tts_first_byte_time = time.time() - tts_start_time
-                                    # Cartesia returns raw 8k mulaw as requested in output_format
-                                    # No need for resampling or conversion
-                                    audio_bytes = base64.b64decode(data["audio"])
-                                    payload_b64 = base64.b64encode(audio_bytes).decode("utf-8")
-                                    await communicator.send_media(payload_b64)
-                                if data.get("done"):
-                                    break
-                            elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
-                                break
-                                
-            elif engine_type == "mistral-sarvam":
-                # SARVAM TTS (BULBUL-V3)
-                url = "https://api.sarvam.ai/text-to-speech"
-                headers = {"api-subscription-key": SARVAM_API_KEY}
-                payload = {
-                    "inputs": [clean_text],
-                    "target_language_code": "en-IN", # Default to English for Sarvam, or detect
-                    "speaker": "meera", # Default speaker
-                    "pitch": 0,
-                    "pace": 1.0,
-                    "loudness": 1.5,
-                    "speech_sample_rate": 8000,
-                    "enable_preprocessing": True,
-                    "model": "bulbul:v1"
-                }
-                logger.info(f"🔊 [Sarvam] TTS starting: {clean_text[:60]}...")
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            audio_b64 = data.get("audios", [None])[0]
-                            if audio_b64:
-                                if tts_first_byte_time == 0:
-                                    tts_first_byte_time = time.time() - tts_start_time
-                                # Sarvam returns base64. 
-                                # If 8k pcm, convert to mulaw
-                                pcm_8k = base64.b64decode(audio_b64)
-                                ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
+                            language="en"
+                        ):
+                            if tts_first_byte_time == 0:
+                                tts_first_byte_time = time.time() - tts_start_time
+                            
+                            audio_chunk = output.get("audio")
+                            if audio_chunk:
+                                payload_b64 = base64.b64encode(audio_chunk).decode("utf-8")
                                 await communicator.send_media(payload_b64)
+                    logger.info(f"✅ [Cartesia TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
+                except Exception as e:
+                    logger.error(f"❌ Cartesia TTS Error: {e}")
+                    import traceback
+                    traceback.print_exc()
+
+            elif engine_type == "mistral-sarvam":
+                # SARVAM TTS (BULBUL-V1) via Async SDK
+                logger.info(f"🔊 [Sarvam SDK] TTS starting: {clean_text[:60]}...")
+                try:
+                    async for chunk in async_sarvam_client.text_to_speech.generate_stream(
+                        text=clean_text,
+                        target_language_code="hi-IN",
+                        speaker="meera",
+                        pitch=0,
+                        pace=1.0,
+                        loudness=1.5,
+                        speech_sample_rate=8000,
+                        enable_preprocessing=True,
+                        model="bulbul:v1"
+                    ):
+                        if tts_first_byte_time == 0:
+                            tts_first_byte_time = time.time() - tts_start_time
+                        
+                        if chunk:
+                            mulaw_audio = audioop.lin2ulaw(chunk, 2)
+                            payload_b64 = base64.b64encode(mulaw_audio).decode("utf-8")
+                            await communicator.send_media(payload_b64)
+                    logger.info(f"✅ [Sarvam TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
+                except Exception as e:
+                    logger.error(f"❌ Sarvam TTS Error: {e}")
+                    import traceback
+                    traceback.print_exc()
 
             elif engine_type == "mistral-deepgram":
                 # Deepgram TTS (Aura)
@@ -1827,123 +1857,170 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             traceback.print_exc()
 
     # --- STT IMPLEMENTATION ---
-    stt_url = ""
-    stt_headers = {}
     
     if engine_type == "mistral-cartesia":
-        stt_url = f"wss://api.cartesia.ai/stt/websocket?api_key={CARTESIA_API_KEY}"
-        stt_headers = {
-            "Cartesia-Version": "2025-04-16"
-        }
+        # CARTESIA STT (INK-WHISPER) via Async SDK
+        logger.info("🎙️ [Cartesia SDK] STT starting...")
+        
+        async def audio_generator():
+            nonlocal interaction_id
+            try:
+                async for data in communicator.receive():
+                    if data["event"] == "media":
+                        mulaw_audio = base64.b64decode(data["media"]["payload"])
+                        yield mulaw_audio
+                    elif data["event"] == "start":
+                        if isinstance(communicator, TwilioCommunicator):
+                            communicator.stream_sid = data["start"]["streamSid"]
+                    elif data["event"] == "stop":
+                        break
+            except Exception as e:
+                logger.error(f"❌ Cartesia Audio Generator Error: {e}")
+
+        try:
+            async for result in async_cartesia_client.stt.transcribe(
+                model="ink-whisper",
+                file=audio_generator(),
+                encoding="pcm_mulaw",
+                sample_rate=8000,
+                language="en"
+            ):
+                transcript = result.get("transcript", "")
+                is_final = result.get("is_final", False)
+                
+                if transcript:
+                    logger.debug(f"🎤 [Cartesia STT] Interim: {transcript}")
+                
+                if transcript and is_final:
+                    logger.info(f"🎤 [Cartesia STT] FINAL: {transcript}")
+                    
+                    if is_rio_speaking:
+                        logger.info("🛑 Barge-in detected! Interrupting Rio.")
+                        await communicator.clear_audio_buffer()
+                        if current_tts_task and not current_tts_task.done():
+                            current_tts_task.cancel()
+                        if current_mistral_task and not current_mistral_task.done():
+                            current_mistral_task.cancel()
+                    
+                    latency = time.time() - stt_start_time
+                    transcript_accumulator.append(f"User: {transcript}")
+                    save_transcript(interaction_id, transcript_accumulator)
+                    asyncio.create_task(process_mistral(transcript, latency))
+                    stt_start_time = time.time()
+        except Exception as e:
+            logger.error(f"❌ Cartesia STT Error: {e}")
+            import traceback
+            traceback.print_exc()
     elif engine_type == "mistral-sarvam":
-        # Use query params for key as well to avoid handshake rejection
-        stt_url = f"wss://api.sarvam.ai/speech-to-text-translate/ws?model=saaras:v3&sample_rate=16000&language_code=hi-IN&mode=transcribe&api-subscription-key={SARVAM_API_KEY}"
-        stt_headers = {
-            "api-subscription-key": SARVAM_API_KEY,
-            "Origin": "https://api.sarvam.ai"
-        }
-    else:
-        # Default: DEEPGRAM
-        stt_url = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000"
-        stt_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
-
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(stt_url, headers=stt_headers) as stt_ws:
-            
-            # Initialization for certain providers
-            if engine_type == "mistral-cartesia":
-                await stt_ws.send_json({
-                    "model": "ink-whisper",
-                    "language": "en",
-                    "encoding": "pcm_s16le",
-                    "sample_rate": 16000
-                })
-            # Sarvam parameters are in the URL query string
-
-            async def sender():
-                nonlocal interaction_id
-                downstream_state = None
-                try:
-                    async for data in communicator.receive():
-                        if data["event"] == "start":
-                            if isinstance(communicator, TwilioCommunicator):
-                                communicator.stream_sid = data["start"]["streamSid"]
-                                if not interaction_id: interaction_id = data["start"].get("customParameters", {}).get("interaction_id")
-                            logger.info(f"STT Sender: Stream Started | Interaction: {interaction_id}")
-                        elif data["event"] == "media":
-                            media_payload = data["media"]["payload"]
-                            raw_audio = base64.b64decode(media_payload)
-                            
-                            if engine_type == "mistral-cartesia":
-                                # Convert mulaw 8k to pcm 16k for Cartesia
-                                pcm_8k = audioop.ulaw2lin(raw_audio, 2)
-                                pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
-                                await stt_ws.send_bytes(pcm_16k)
-                            elif engine_type == "mistral-sarvam":
-                                # Sarvam expects JSON with base64 PCM 16k
-                                pcm_8k = audioop.ulaw2lin(raw_audio, 2)
-                                pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
-                                b64_audio = base64.b64encode(pcm_16k).decode("utf-8")
-                                await stt_ws.send_json({"type": "audio", "data": b64_audio})
-                            else:
-                                # Deepgram (configured for 8k) takes mulaw or raw
-                                await stt_ws.send_bytes(raw_audio)
-                        elif data["event"] == "stop":
-                            break
-                except Exception as e:
-                    logger.error(f"STT Sender Error: {e}")
-                finally:
-                    await stt_ws.close()
-
-            async def receiver():
-                try:
-                    async for msg in stt_ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            res = json.loads(msg.data)
+        # SARVAM STT (SAARAS:V3) via Async SDK - Simplified
+        logger.info("🎙️ [Sarvam SDK] STT starting...")
+        
+        try:
+            async with async_sarvam_client.speech_to_text_streaming.connect(
+                model="saaras:v3",
+                language_code="hi-IN",
+                mode="transcribe",
+                sample_rate=8000,
+                input_audio_codec="pcm_mulaw"
+            ) as stt_ws:
+                
+                async def sender():
+                    try:
+                        async for data in communicator.receive():
+                            if data["event"] == "media":
+                                mulaw_audio = base64.b64decode(data["media"]["payload"])
+                                await stt_ws.send_audio(mulaw_audio)
+                            elif data["event"] == "start":
+                                if isinstance(communicator, TwilioCommunicator):
+                                    communicator.stream_sid = data["start"]["streamSid"]
+                            elif data["event"] == "stop":
+                                break
+                    except Exception as e:
+                        logger.error(f"❌ Sarvam STT Sender Error: {e}")
+                
+                async def receiver():
+                    nonlocal stt_start_time
+                    try:
+                        async for result in stt_ws:
                             transcript = ""
                             is_final = False
-
-                            if engine_type == "mistral-cartesia":
-                                transcript = res.get("transcript", "")
-                                is_final = res.get("is_final", False)
-                            elif engine_type == "mistral-sarvam":
-                                # Sarvam returns 'transcript' field for final results
-                                transcript = res.get("transcript", "")
-                                # In Saaras:v3, if type is 'transcript' or it's a final update
-                                is_final = bool(transcript.strip()) and (res.get("type") == "transcript" or res.get("is_final", False))
+                            
+                            if isinstance(result, dict):
+                                transcript = result.get("transcript", "")
+                                is_final = result.get("is_final", False)
                             else:
-                                # Deepgram
-                                if "channel" in res:
-                                    alt = res["channel"]["alternatives"][0]
-                                    transcript = alt.get("transcript", "")
-                                    is_final = res.get("is_final", False)
-
+                                transcript = getattr(result, "transcript", "")
+                                is_final = getattr(result, "is_final", False)
+                            
+                            if transcript:
+                                logger.debug(f"🎤 [Sarvam STT] Interim: {transcript}")
+                            
                             if transcript and is_final:
-                                logger.info(f"🎤 [STT] FINAL: {transcript}")
+                                logger.info(f"🎤 [Sarvam STT] FINAL: {transcript}")
                                 
-                                # BARGE-IN DETECTION
                                 if is_rio_speaking:
-                                    logger.info("🛑 Barge-in! Interrupting Rio.")
+                                    logger.info("🛑 Barge-in detected! Interrupting Rio.")
                                     await communicator.clear_audio_buffer()
                                     if current_tts_task and not current_tts_task.done():
                                         current_tts_task.cancel()
                                     if current_mistral_task and not current_mistral_task.done():
                                         current_mistral_task.cancel()
                                 
+                                latency = time.time() - stt_start_time
                                 transcript_accumulator.append(f"User: {transcript}")
                                 save_transcript(interaction_id, transcript_accumulator)
-                                
-                                # Calculate STT Latency
-                                stt_latency = time.time() - stt_start_time
-                                tts_first_byte_time = 0 # reset for new turn
-                                
-                                await process_mistral(transcript, stt_latency)
-                        elif msg.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
-                            break
-                except Exception as e:
-                    logger.error(f"STT Receiver Error: {e}")
+                                asyncio.create_task(process_mistral(transcript, latency))
+                                stt_start_time = time.time()
+                    except Exception as e:
+                        logger.error(f"❌ Sarvam STT Receiver Error: {e}")
+                
+                await asyncio.gather(sender(), receiver())
+        except Exception as e:
+            logger.error(f"❌ Sarvam STT Connection Error: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        # Default: DEEPGRAM (aiohttp)
+        stt_url = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000"
+        stt_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        async with aiohttp.ClientSession() as session:
+            async with session.ws_connect(stt_url, headers=stt_headers) as stt_ws:
+                async def sender():
+                    nonlocal interaction_id
+                    try:
+                        async for data in communicator.receive():
+                            if data["event"] == "media":
+                                await stt_ws.send_bytes(base64.b64decode(data["media"]["payload"]))
+                            elif data["event"] == "stop": break
+                            elif data["event"] == "start":
+                                if isinstance(communicator, TwilioCommunicator):
+                                    communicator.stream_sid = data["start"]["streamSid"]
+                    except Exception as e: logger.error(f"STT Sender (Deepgram) Error: {e}")
 
-            await asyncio.gather(sender(), receiver())
+                async def receiver():
+                    nonlocal stt_start_time
+                    try:
+                        async for msg in stt_ws:
+                            if msg.type == aiohttp.WSMsgType.TEXT:
+                                res = json.loads(msg.data)
+                                if "channel" in res:
+                                    alt = res["channel"]["alternatives"][0]
+                                    transcript = alt.get("transcript", "")
+                                    if transcript and res.get("is_final"):
+                                        logger.info(f"🎤 [Deepgram STT] FINAL: {transcript}")
+                                        if is_rio_speaking:
+                                            await communicator.clear_audio_buffer()
+                                            if current_tts_task and not current_tts_task.done(): current_tts_task.cancel()
+                                            if current_mistral_task and not current_mistral_task.done(): current_mistral_task.cancel()
+                                        
+                                        latency = time.time() - stt_start_time
+                                        transcript_accumulator.append(f"User: {transcript}")
+                                        save_transcript(interaction_id, transcript_accumulator)
+                                        asyncio.create_task(process_mistral(transcript, latency))
+                                        stt_start_time = time.time()
+                    except Exception as e: logger.error(f"STT Receiver (Deepgram) Error: {e}")
+
+                await asyncio.gather(sender(), receiver())
     
     print("Mistral pipeline closed.")
 

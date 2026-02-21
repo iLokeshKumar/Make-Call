@@ -2,7 +2,6 @@ from enum import Enum
 from typing import Any, Dict
 import os
 
-
 class LLMProvider(Enum):
     """Supported LLM providers"""
     GEMINI = "gemini"
@@ -12,10 +11,9 @@ class LLMProvider(Enum):
     OPENAI = "openai"
     LLAMA = "llama"
 
-
 class LLMClient:
     """Universal LLM client interface"""
-    
+
     def __init__(self, provider: LLMProvider, api_key: str = None, **kwargs):
         self.provider = provider
         self.api_key = api_key or self._get_api_key()
@@ -127,7 +125,6 @@ def get_qwen_tools() -> list:
         # ... add other tools
     ]
 
-
 def get_claude_tools() -> list:
     """Convert MCP tools to Claude format"""
     return [
@@ -146,7 +143,6 @@ def get_claude_tools() -> list:
         },
         # ... add other tools
     ]
-
 
 def get_openai_tools() -> list:
     """Convert MCP tools to OpenAI format"""
@@ -169,7 +165,6 @@ def get_openai_tools() -> list:
         },
         # ... add other tools
     ]
-
 
 def get_llama_tools() -> list:
     """Convert MCP tools to LLaMA format (if supported)"""
