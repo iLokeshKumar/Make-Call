@@ -3,6 +3,7 @@ import random
 import json
 import asyncio
 import base64
+import urllib.parse
 import sys
 import uuid
 import audioop
@@ -113,8 +114,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# RIO PERSONA & SYSTEM PROMPT
 
 RIO_PERSONA_PROMPT = """You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
 
@@ -598,6 +597,12 @@ DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
 SARVAM_API_KEY = os.getenv("SARVAM_API_KEY")
+EXOTEL_API_KEY = os.getenv("EXOTEL_API_KEY")
+EXOTEL_API_TOKEN = os.getenv("EXOTEL_API_TOKEN")
+EXOTEL_ACCOUNT_SID = os.getenv("EXOTEL_ACCOUNT_SID")
+EXOPHONE = os.getenv("EXOPHONE")
+EXOTEL_SUBDOMAIN_OVERRIDE = os.getenv("EXOTEL_SUBDOMAIN")
+EXOTEL_PORTAL_URL = os.getenv("EXOTEL_PORTAL_URL", "https://my.exotel.com")
 
 # SDK Clients
 cartesia_client = Cartesia(api_key=CARTESIA_API_KEY)
@@ -847,6 +852,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Global Request Logging Middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Logs all incoming HTTP requests for deep tracing."""
+    path = request.url.path
+    if path.startswith("/static") or path.endswith(".ico"):
+        return await call_next(request)
+        
+    client_ip = request.client.host if request.client else "unknown"
+    method = request.method
+    query = str(request.query_params)
+    
+    logger.info(f"🌐 [HTTP] {method} {path} | From: {client_ip} | Query: {query}")
+    
+    response = await call_next(request)
+    
+    logger.info(f"🔙 [HTTP] Response: {response.status_code} for {path}")
+    return response
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return "<h1>Twilio + Gemini Voice Agent</h1><p>Server is running.</p>"
@@ -877,9 +901,9 @@ async def make_call(to: str, lead_id: int = None):
                 "Authorization": f"Basic {enablex_auth}",
                 "Content-Type": "application/json"
             }
-            webhook_url = f"https://{DOMAIN}/enablex-event"
+            webhook_url = f"https://{DOMAIN}/enablex-event?ngrok-skip-browser-warning=1"
             if lead_id:
-                 webhook_url += f"?lead_id={lead_id}"
+                 webhook_url += f"&lead_id={lead_id}"
 
             payload = {
                 "name": "Rio-Assistant-Call",
@@ -891,6 +915,7 @@ async def make_call(to: str, lead_id: int = None):
             async with aiohttp.ClientSession() as http_session:
                 async with http_session.post("https://api.enablex.io/voice/v1/call", headers=headers, json=payload) as resp:
                     result = await resp.json()
+                    logger.info(f"🔍 [EnableX Response] Status: {resp.status}, Body: {result}")
                     if resp.status not in [200, 201]:
                         raise Exception(f"EnableX API Error: {result}")
                     # Create interaction record for Lead tracking
@@ -907,7 +932,7 @@ async def make_call(to: str, lead_id: int = None):
                         interaction_id = interaction.id
 
                     return {"message": "EnableX Call initiated", "voice_id": result.get("voice_id"), "interaction_id": interaction_id}
-        else:
+        elif active_telephony == "twilio":
             # Twilio Outbound
             webhook_url = f"https://{DOMAIN}/incoming-call"
             if lead_id:
@@ -919,6 +944,88 @@ async def make_call(to: str, lead_id: int = None):
                 url=webhook_url
             )
             return {"message": "Twilio Call initiated", "call_sid": call.sid}
+        elif active_telephony == "exotel":
+            # Exotel API URL
+            exotel_subdomain = EXOTEL_SUBDOMAIN_OVERRIDE
+            if not exotel_subdomain:
+                exotel_subdomain = "api.exotel.com" if "adomita" in EXOTEL_ACCOUNT_SID else "api.in.exotel.com"
+            
+            url = f"https://{exotel_subdomain}/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
+            
+            # Exotel prefers E.164 without '+' or with '0' depending on cluster.
+            # For Singapore cluster, E.164 with '+' is often required.
+            customer_number = to if to.startswith("+") else ("+" + to if len(to) > 10 else "+91" + to)
+            exophone_number = EXOPHONE if EXOPHONE.startswith("+") else ("+" + EXOPHONE)
+            
+            logger.info(f"🚀 [Exotel] Calling customer {customer_number} from Exophone {exophone_number} via {exotel_subdomain}")
+            
+            auth = aiohttp.BasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
+            
+            interaction_id = ""
+            if lead_id:
+                try:
+                    with Session(engine) as db_session:
+                        interaction = Interaction(
+                            lead_id=lead_id,
+                            type="call",
+                            content="Outbound Call (Exotel)",
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        db_session.add(interaction)
+                        db_session.commit()
+                        db_session.refresh(interaction)
+                        interaction_id = str(interaction.id)
+                except Exception as db_err:
+                    logger.error(f"❌ [DB Error] Failed to create interaction: {db_err}")
+
+            # Reverting to HTTPS as most modern carriers require it for callbacks
+            # Simplified URL: Exotel might block URLs with busy query params
+            # Switching to a clean path-based URL + ngrok bypass query
+            exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id}?ngrok-skip-browser-warning=1"
+            
+            # Exotel connect parameters
+            data = {
+                "From": customer_number,      # Customer to call
+                "CallerId": exophone_number,  # Your Exophone
+                "CallType": "trans",          # Transactional
+                "Url": exoml_url,             # Point to our server
+                "TimeLimit": "3600",          # 1 hour max
+                "TimeOut": "30",              # Ring timeout
+                "StatusCallback": f"https://{DOMAIN}/exotel-event?ngrok-skip-browser-warning=1"
+                # Removed StatusCallbackEvents as it triggered 400 error in connect.json
+            }
+            
+            logger.debug(f"🔍 [Exotel Request] URL: {url}")
+            logger.debug(f"🔍 [Exotel Request] Data: {data}")
+            
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.post(url, auth=auth, data=data) as resp:
+                    result = await resp.json()
+                    logger.info(f"🔍 [Exotel Response] Status: {resp.status}, Body: {result}")
+                    
+                    if resp.status not in [200, 201]:
+                        # Handle specific Exotel error codes
+                        rest_exception = result.get("RestException", {})
+                        error_code = rest_exception.get("Code")
+                        error_message = rest_exception.get("Message", "Unknown error")
+                        
+                        if error_code == 34010:
+                            logger.error("❌ [Exotel Auth Error] 34010: API Credentials do not match Account SID or Domain.")
+                            logger.error(f"   Domain: {exotel_subdomain}, SID: {EXOTEL_ACCOUNT_SID}")
+                        elif error_code == 34001:
+                            logger.error("❌ [Exotel Param Error] 34001: Bad or missing parameters.")
+                            logger.error(f"   From={customer_number}, CallerId={exophone_number}")
+                            logger.error(f"   Url={applet_url[:100]}...")
+                            logger.error(f"   Tip: Check if Exophone {exophone_number} is verified in Exotel dashboard")
+                        
+                        raise Exception(f"Exotel API Error [{error_code}]: {error_message}")
+                    
+                    call_sid = result.get("Call", {}).get("Sid")
+                    logger.info(f"✅ [Exotel] Call initiated successfully. SID: {call_sid}")
+                    logger.info(f"   Customer: {customer_number}, Exophone: {exophone_number}")
+                    return {"message": "Exotel Call initiated", "call_sid": call_sid}
+        else:
+            raise Exception(f"Unknown telephony engine: {active_telephony}")
     except Exception as e:
         error_msg = str(e)
         logger.error(f"Error making call: {error_msg}")
@@ -930,6 +1037,36 @@ async def make_call(to: str, lead_id: int = None):
             raise HTTPException(status_code=401, detail=detail)
             
         raise HTTPException(status_code=500, detail=error_msg)
+
+@app.get("/exoml-start/{interaction_id}")
+@app.post("/exoml-start/{interaction_id}")
+@app.get("/exoml-start")
+@app.post("/exoml-start")
+async def exoml_start(request: Request, interaction_id: str = "default"):
+    """Returns ExoML to connect Exotel call to WebSocket."""
+    ua = request.headers.get('user-agent', 'unknown')
+    client_ip = request.client.host if request.client else 'unknown'
+    method = request.method
+    
+    logger.info(f"🛰️ [ExoML] FETCH ATTEMPT | {method} | From: {client_ip} | ID: {interaction_id}")
+    
+    # Check if interaction_id is passed as query param if not in path
+    if interaction_id == "default":
+        interaction_id = request.query_params.get("interaction_id", "default")
+        
+    ws_url = f"wss://{DOMAIN}/exotel-media-stream?sample-rate=16000&interaction_id={interaction_id}&ngrok-skip-browser-warning=1"
+    
+    logger.debug(f"🛰️ [ExoML] Serving WebSocket URL: {ws_url}")
+    # Using text/xml as some proxies are picky
+    exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+    <Connect>
+        <Stream url="{ws_url}" />
+    </Connect>
+</Response>"""
+    from fastapi import Response as FastApiResponse
+    headers = {"ngrok-skip-browser-warning": "69420"}
+    return FastApiResponse(content=exoml, media_type="text/xml", headers=headers)
 
 @app.post("/enablex-event")
 async def enablex_event(request: Request, lead_id: int = None):
@@ -945,6 +1082,7 @@ async def enablex_event(request: Request, lead_id: int = None):
 
     if event_type == "connected":
         # Initiation of media stream
+        await asyncio.sleep(1) # Brief delay to ensure call state sync
         enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
         headers = {
             "Authorization": f"Basic {enablex_auth}",
@@ -952,17 +1090,99 @@ async def enablex_event(request: Request, lead_id: int = None):
         }
         
         # Clean domain for WebSocket (remove https://)
-        ws_domain = DOMAIN.replace("https://", "").replace("http://", "")
-        stream_payload = {
-            "wss_host": f"wss://{ws_domain}/enablex-media-stream?voice_id={voice_id}&lead_id={lead_id}",
-            "play_on_connect": True
-        }
+        ws_domain = DOMAIN.replace("https://", "").replace("http://", "").rstrip("/")
+        if ws_domain:
+            # Some accounts use 'url', some use 'wss_host'. We send both for robustness.
+            ws_url = f"wss://{ws_domain}/enablex-media-stream?voice_id={voice_id}&lead_id={lead_id}"
+            # Adding ngrok bypass to WebSocket URL just in case, though standard WS often bypasses
+            ws_url += "&ngrok-skip-browser-warning=1"
+            
+            stream_payload_url = {
+                "url": ws_url,
+                "stream_type": "both",
+                "play_on_connect": True
+            }
+            stream_payload_wss = {
+                "wss_host": ws_url,
+                "stream_type": "both",
+                "play_on_connect": True
+            }
+        
+        logger.info(f"🚀 [EnableX] Attempting Media Stream initiation (Matrix Probe)...")
         async with aiohttp.ClientSession() as session:
-            # EnableX uses PUT for starting a stream
-            async with session.put(f"https://api.enablex.io/voice/v1/call/{voice_id}/stream", headers=headers, json=stream_payload) as resp:
-                print(f"🚀 EnableX Stream Request sent (PUT). Status: {resp.status}")
+            # We will try the "Action" matrix and the direct "Streaming" matrix
+            # Combining url and wss_host variations for maximum compatibility
+            endpoints = [
+                ("POST", f"https://api.enablex.io/voice/v1/call/{voice_id}/action", {"action": "streaming", "url": ws_url, "stream_type": "both", "play_on_connect": True}),
+                ("POST", f"https://api.enablex.io/voice/v1/call/{voice_id}/action", {"action": "streaming", "wss_host": ws_url, "stream_type": "both", "play_on_connect": True}),
+                ("POST", f"https://api.enablex.io/voice/v1/calls/{voice_id}/action", {"action": "streaming", "url": ws_url, "stream_type": "both", "play_on_connect": True}),
+                ("POST", f"https://api.enablex.io/voice/v1/call/{voice_id}/streaming", stream_payload_url),
+                ("POST", f"https://api.enablex.io/voice/v1/call/{voice_id}/streaming", stream_payload_wss),
+                ("POST", f"https://api.enablex.io/voice/v1/calls/{voice_id}/streaming", stream_payload_url),
+                ("POST", f"https://api.enablex.io/voice/v1/call/{voice_id}/stream", stream_payload_url),
+                ("PUT", f"https://api.enablex.io/voice/v1/call/{voice_id}/stream", stream_payload_url),
+            ]
+            
+            for method, url, payload in endpoints:
+                try:
+                    logger.debug(f"🚀 [EnableX] Probing: {method} {url}")
+                    async with session.request(method, url, headers=headers, json=payload) as resp:
+                        txt = await resp.text()
+                        if resp.status in [200, 201, 202, 204]:
+                            try:
+                                body = json.loads(txt)
+                                res_code = body.get("result") if body.get("result") is not None else body.get("statusCode")
+                                if res_code in [0, 200, 201, 202]:
+                                    logger.info(f"✅ [EnableX] Stream started successfully via {method} {url}!")
+                                    return
+                                else:
+                                    logger.warning(f"   Probe {method} {url} -> Failed with Body: {body}")
+                            except:
+                                logger.info(f"✅ [EnableX] Stream likely started (Non-JSON {resp.status} to {url})")
+                                return
+                        elif resp.status == 404:
+                            # logger.debug(f"   404 for {url}")
+                            continue
+                        else:
+                            # Log the exact body for 405 or other errors to find clues
+                            logger.warning(f"   Probe {method} {url} -> Status {resp.status} | Body: {txt[:200]}")
+                except Exception as probe_err:
+                    logger.error(f"❌ [EnableX] Probe error for {url}: {probe_err}")
+                    continue
                 
     return {"status": "ok"}
+
+@app.exception_handler(404)
+async def custom_404_handler(request: Request, exc: HTTPException):
+    """Logs 404 errors with full context for debugging."""
+    path = request.url.path
+    client_ip = request.client.host if request.client else "unknown"
+    method = request.method
+    logger.warning(f"🚫 [404 ERROR] {method} {path} | From: {client_ip} | Query: {request.query_params}")
+    return JSONResponse(
+        status_code=404,
+        content={"message": "Path not found", "path": path},
+    )
+
+@app.get("/exotel-event")
+@app.post("/exotel-event")
+async def exotel_event(request: Request):
+    """Handles Exotel call lifecycle events."""
+    # Exotel sends data as Form parameters (POST) or Query params (GET)
+    # We combine both for full visibility
+    try:
+        data = dict(request.query_params)
+        if request.method == "POST":
+            form_data = await request.form()
+            data.update(dict(form_data))
+        
+        status = data.get('Status')
+        call_sid = data.get('CallSid')
+        logger.info(f"🛰️ [Exotel Event] Status: {status}, CallSid: {call_sid}, InteractionID: {data.get('interaction_id')}")
+        logger.debug(f"🛰️ [Exotel Event] Combined Data: {data}")
+    except Exception as e:
+        logger.error(f"❌ [Exotel Event] Error parsing data: {e}")
+    return "OK"
 
 @app.post("/incoming-call")
 async def incoming_call(request: Request, lead_id: int = None):
@@ -1252,6 +1472,9 @@ class EnableXCommunicator(TelephonyCommunicator):
                     data = json.loads(message)
                     # Map to Twilio-like events for minimal pipeline change
                     if "data" in data:
+                        if not hasattr(self, "_first_media"):
+                            logger.info(f"🎙️ [EnableX WS] Audio flow STARTED. First chunk: {len(data['data'])} chars")
+                            self._first_media = True
                         yield {"event": "media", "media": {"payload": data["data"]}}
                     elif data.get("event") == "stop" or data.get("state") == "disconnected":
                         yield {"event": "stop"}
@@ -1263,10 +1486,9 @@ class EnableXCommunicator(TelephonyCommunicator):
             print(f"❌ EnableX WS Receive Error: {e}")
             yield {"event": "stop"}
     async def send_media(self, b64_audio):
-        # EnableX expects raw binary or JSON with data
-        # Verification: EnableX Voice Server Media Stream API docs
+        # EnableX expects JSON with 'data' as base64 or raw binary
         payload = {"event": "media", "data": b64_audio}
-        print(f"⏫ EnableX WS Sending Media: {len(b64_audio)} chars")
+        logger.debug(f"⏫ [EnableX WS] Sending Media: {len(b64_audio)} chars")
         await self.websocket.send_json(payload)
 
     async def clear_audio_buffer(self):
@@ -1275,6 +1497,42 @@ class EnableXCommunicator(TelephonyCommunicator):
         # For now, we send a stop/clear event if supported.
         payload = {"event": "clear"} 
         print(f"🚫 EnableX WS Clearing Buffer")
+        await self.websocket.send_json(payload)
+
+class ExotelCommunicator(TelephonyCommunicator):
+    def __init__(self, websocket):
+        self.websocket = websocket
+        self.stream_sid = None
+    async def receive(self):
+        try:
+            async for message in self.websocket.iter_text():
+                try:
+                    data = json.loads(message)
+                    if data.get("event") == "media":
+                        # Exotel media logging is too chatty, but let's log once
+                        pass
+                    else:
+                        logger.debug(f"⏬ [Exotel WS] Received: {message[:200]}")
+                    yield data
+                except json.JSONDecodeError:
+                    logger.error(f"❌ [Exotel WS] Received non-JSON message: {message[:100]}")
+        except Exception as e:
+            logger.error(f"❌ [Exotel WS] Receive Error: {e}")
+            yield {"event": "stop"}
+    async def send_media(self, b64_audio):
+        # Exotel expects PCM 16k audio in 'payload'
+        payload = {
+            "event": "media",
+            "media": {
+                "payload": b64_audio
+            }
+        }
+        logger.debug(f"⏫ [Exotel WS] Sending Media: {len(b64_audio)} chars")
+        await self.websocket.send_json(payload)
+
+    async def clear_audio_buffer(self):
+        # Exotel 'clear' event to stop current playback
+        payload = {"event": "clear"}
         await self.websocket.send_json(payload)
 
 async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
@@ -1307,8 +1565,19 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
                     elif data["event"] == "media":
                         media_payload = data["media"]["payload"]
                         chunk = base64.b64decode(media_payload)
-                        pcm_8k = audioop.ulaw2lin(chunk, 2)
-                        pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
+                        
+                        if isinstance(communicator, ExotelCommunicator):
+                            # Exotel sends PCM 16k
+                            pcm_16k = chunk
+                        elif isinstance(communicator, EnableXCommunicator):
+                            # EnableX sends mulaw 8k (verify if it can do 16k)
+                            pcm_8k = audioop.ulaw2lin(chunk, 2)
+                            pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
+                        else:
+                            # Twilio sends mulaw 8k
+                            pcm_8k = audioop.ulaw2lin(chunk, 2)
+                            pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
+                        
                         await gemini_session.send(input={"data": pcm_16k, "mime_type": "audio/pcm"}, end_of_turn=False)
                     elif data["event"] == "stop":
                         break
@@ -1336,9 +1605,22 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
                                     
                                     if getattr(part, 'inline_data', None):
                                         audio_data = part.inline_data.data 
-                                        pcm_8k, upstream_state = audioop.ratecv(audio_data, 2, 1, 24000, 8000, upstream_state)
-                                        mulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                        b64_audio = base64.b64encode(mulaw_8k).decode("utf-8")
+                                        
+                                        if isinstance(communicator, ExotelCommunicator):
+                                            # Gemini is 24k, Exotel is 16k PCM
+                                            pcm_16k, upstream_state = audioop.ratecv(audio_data, 2, 1, 24000, 16000, upstream_state)
+                                            b64_audio = base64.b64encode(pcm_16k).decode("utf-8")
+                                        elif isinstance(communicator, EnableXCommunicator):
+                                            # EnableX is 8k mulaw
+                                            pcm_8k, upstream_state = audioop.ratecv(audio_data, 2, 1, 24000, 8000, upstream_state)
+                                            mulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                                            b64_audio = base64.b64encode(mulaw_8k).decode("utf-8")
+                                        else:
+                                            # Twilio is 8k mulaw
+                                            pcm_8k, upstream_state = audioop.ratecv(audio_data, 2, 1, 24000, 8000, upstream_state)
+                                            mulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                                            b64_audio = base64.b64encode(mulaw_8k).decode("utf-8")
+                                            
                                         await communicator.send_media(b64_audio)
                                     
                                     if getattr(part, 'text', None):
@@ -1346,6 +1628,14 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
                                         save_transcript(interaction_id, transcript_accumulator)
                 except Exception as e:
                     print(f"Telephony Send Error: {e}")
+
+            # Trigger initial greeting for outbound calls
+            greeting = "Hello, I me Rio from Adomita Technologies. How can I help you today?"
+            logger.info(f"🤖 [Gemini] Sending initial greeting: {greeting}")
+            await gemini_session.send(input={"text": greeting})
+            transcript_accumulator.append(f"Rio: {greeting}")
+            save_transcript(interaction_id, transcript_accumulator)
+            logger.info("🤖 [Gemini] Greeting sent. Starting telephony tasks.")
 
             await asyncio.gather(receive_from_telephony(), send_to_telephony())
     except Exception as e:
@@ -1363,7 +1653,9 @@ def apply_verbosity_rules(instruction: str, verbosity: str) -> str:
 @app.websocket("/enablex-media-stream")
 async def handle_enablex_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
     """Handles EnableX WebSocket media stream."""
+    logger.info("🔥 [WS] EnableX connection requested...")
     await websocket.accept()
+    logger.info("✅ [WS] EnableX connection accepted.")
     voice_id = websocket.query_params.get("voice_id")
     lead_id = websocket.query_params.get("lead_id")
     
@@ -1389,6 +1681,33 @@ async def handle_enablex_media_stream(websocket: WebSocket, session: Session = D
     print(f"EnableX connected to media-stream WS | Voice ID: {voice_id} | Interaction: {interaction_id} | Verbosity: {verbosity}")
     
     communicator = EnableXCommunicator(websocket)
+    if active_engine.startswith("mistral"):
+        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine)
+    else:
+        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
+
+@app.websocket("/exotel-media-stream")
+async def handle_exotel_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
+    """Handles Exotel WebSocket media stream (PCM 16kHz)."""
+    logger.info("🔥 [WS] Exotel connection requested...")
+    await websocket.accept()
+    logger.info("✅ [WS] Exotel connection accepted.")
+    interaction_id = websocket.query_params.get("interaction_id")
+    if not interaction_id or interaction_id == "None":
+        interaction_id = f"session_ex_{uuid.uuid4().hex[:8]}"
+        logger.info(f"Assigning fallback Interaction ID for Exotel call: {interaction_id}")
+    
+    transcript_accumulator = []
+    settings = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
+    dynamic_instruction = settings.value if settings else "You are a helpful assistant."
+    engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
+    active_engine = engine_setting.value if engine_setting else "gemini"
+    verbosity_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
+    verbosity = verbosity_setting.value if verbosity_setting else "2"
+    dynamic_instruction = apply_verbosity_rules(dynamic_instruction, verbosity)
+    
+    logger.info(f"📞 Exotel connected (Engine: {active_engine.upper()}) | Interaction ID: {interaction_id}")
+    communicator = ExotelCommunicator(websocket)
     if active_engine.startswith("mistral"):
         await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine)
     else:
@@ -1598,6 +1917,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         {"role": "system", "content": dynamic_instruction}
     ]
 
+    logger.info(f"🤖 [Mistral] Pipeline initialized. Engine: {engine_type} | Instruction length: {len(dynamic_instruction)}")
+
     async def speak(text):
         """Streaming TTS from selected provider to Twilio. Cancellable for barge-in."""
         nonlocal is_rio_speaking, current_tts_task, tts_first_byte_time
@@ -1612,6 +1933,13 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             if engine_type == "mistral-cartesia":
                 # CARTESIA TTS (SONIC-2024-11) via Async SDK
                 logger.info(f"🔊 [Cartesia SDK] TTS starting: {clean_text[:60]}...")
+                
+                # Format based on telephony
+                if isinstance(communicator, ExotelCommunicator):
+                    enc, rate = "pcm", 16000
+                else:
+                    enc, rate = "pcm_mulaw", 8000
+
                 try:
                     async with async_cartesia_client.tts.websocket() as c_ws:
                         async for output in c_ws.send(
@@ -1623,8 +1951,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             },
                             output_format={
                                 "container": "raw",
-                                "encoding": "pcm_mulaw",
-                                "sample_rate": 8000
+                                "encoding": enc,
+                                "sample_rate": rate
                             },
                             language="en"
                         ):
@@ -1644,6 +1972,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             elif engine_type == "mistral-sarvam":
                 # SARVAM TTS (BULBUL-V1) via Async SDK
                 logger.info(f"🔊 [Sarvam SDK] TTS starting: {clean_text[:60]}...")
+                rate = 16000 if isinstance(communicator, ExotelCommunicator) else 8000
                 try:
                     async for chunk in async_sarvam_client.text_to_speech.generate_stream(
                         text=clean_text,
@@ -1652,7 +1981,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                         pitch=0,
                         pace=1.0,
                         loudness=1.5,
-                        speech_sample_rate=8000,
+                        speech_sample_rate=rate,
                         enable_preprocessing=True,
                         model="bulbul:v1"
                     ):
@@ -1660,8 +1989,11 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             tts_first_byte_time = time.time() - tts_start_time
                         
                         if chunk:
-                            mulaw_audio = audioop.lin2ulaw(chunk, 2)
-                            payload_b64 = base64.b64encode(mulaw_audio).decode("utf-8")
+                            if isinstance(communicator, ExotelCommunicator):
+                                payload_b64 = base64.b64encode(chunk).decode("utf-8")
+                            else:
+                                mulaw_audio = audioop.lin2ulaw(chunk, 2)
+                                payload_b64 = base64.b64encode(mulaw_audio).decode("utf-8")
                             await communicator.send_media(payload_b64)
                     logger.info(f"✅ [Sarvam TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
                 except Exception as e:
@@ -1671,7 +2003,12 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
 
             elif engine_type == "mistral-deepgram":
                 # Deepgram TTS (Aura)
-                tts_url = f"wss://api.deepgram.com/v1/speak?model=aura-asteria-en&encoding=mulaw&sample_rate=8000"
+                if isinstance(communicator, ExotelCommunicator):
+                    enc_params = "encoding=linear16&sample_rate=16000"
+                else:
+                    enc_params = "encoding=mulaw&sample_rate=8000"
+
+                tts_url = f"wss://api.deepgram.com/v1/speak?model=aura-asteria-en&{enc_params}"
                 headers = {
                     "Authorization": f"Token {DEEPGRAM_API_KEY}",
                 }
@@ -1686,7 +2023,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                             if message.type == aiohttp.WSMsgType.BINARY:
                                 if tts_first_byte_time == 0:
                                     tts_first_byte_time = time.time() - tts_start_time
-                                # Deepgram sends raw mulaw 8k (no decoding/conversion needed)
+                                # Deepgram sends requested format
                                 payload_b64 = base64.b64encode(message.data).decode("utf-8")
                                 await communicator.send_media(payload_b64)
                             elif message.type == aiohttp.WSMsgType.TEXT:
@@ -1724,10 +2061,20 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                     if tts_first_byte_time == 0:
                                         tts_first_byte_time = time.time() - tts_start_time
                                     pcm_16k = base64.b64decode(data["audio"])
-                                    pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
-                                    ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                    payload_b64 = base64.b64encode(ulaw_8k).decode("utf-8")
-                                    await communicator.send_media(payload_b64)
+                                    
+                                    if isinstance(communicator, ExotelCommunicator):
+                                        b64_audio = base64.b64encode(pcm_16k).decode("utf-8")
+                                    elif isinstance(communicator, EnableXCommunicator):
+                                        # EnableX is 8k mulaw
+                                        pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
+                                        ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                                        b64_audio = base64.b64encode(ulaw_8k).decode("utf-8")
+                                    else:
+                                        pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
+                                        ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                                        b64_audio = base64.b64encode(ulaw_8k).decode("utf-8")
+                                        
+                                    await communicator.send_media(b64_audio)
                                 elif data.get("message"):
                                     logger.error(f"❌ ElevenLabs Error Message: {data['message']}")
                                 if data.get("isFinal"):
@@ -1867,8 +2214,8 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             try:
                 async for data in communicator.receive():
                     if data["event"] == "media":
-                        mulaw_audio = base64.b64decode(data["media"]["payload"])
-                        yield mulaw_audio
+                        payload = base64.b64decode(data["media"]["payload"])
+                        yield payload
                     elif data["event"] == "start":
                         if isinstance(communicator, TwilioCommunicator):
                             communicator.stream_sid = data["start"]["streamSid"]
@@ -1877,12 +2224,24 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             except Exception as e:
                 logger.error(f"❌ Cartesia Audio Generator Error: {e}")
 
+        # Format based on telephony
+        if isinstance(communicator, ExotelCommunicator):
+            enc, rate = "pcm", 16000
+        else:
+            enc, rate = "pcm_mulaw", 8000
+
         try:
+            # Start with a greeting for outbound calls
+            greeting = "Hello, I'm Rio from Adomita. I see you're interested in our services. How can I help you today?"
+            asyncio.create_task(speak(greeting))
+            transcript_accumulator.append(f"Rio: {greeting}")
+            save_transcript(interaction_id, transcript_accumulator)
+            
             async for result in async_cartesia_client.stt.transcribe(
                 model="ink-whisper",
                 file=audio_generator(),
-                encoding="pcm_mulaw",
-                sample_rate=8000,
+                encoding=enc,
+                sample_rate=rate,
                 language="en"
             ):
                 transcript = result.get("transcript", "")
@@ -1915,21 +2274,26 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         # SARVAM STT (SAARAS:V3) via Async SDK - Simplified
         logger.info("🎙️ [Sarvam SDK] STT starting...")
         
+        if isinstance(communicator, ExotelCommunicator):
+            rate, codec = 16000, "pcm"
+        else:
+            rate, codec = 8000, "pcm_mulaw"
+
         try:
             async with async_sarvam_client.speech_to_text_streaming.connect(
                 model="saaras:v3",
                 language_code="hi-IN",
                 mode="transcribe",
-                sample_rate=8000,
-                input_audio_codec="pcm_mulaw"
+                sample_rate=rate,
+                input_audio_codec=codec
             ) as stt_ws:
                 
                 async def sender():
                     try:
                         async for data in communicator.receive():
                             if data["event"] == "media":
-                                mulaw_audio = base64.b64decode(data["media"]["payload"])
-                                await stt_ws.send_audio(mulaw_audio)
+                                payload = base64.b64decode(data["media"]["payload"])
+                                await stt_ws.send_audio(payload)
                             elif data["event"] == "start":
                                 if isinstance(communicator, TwilioCommunicator):
                                     communicator.stream_sid = data["start"]["streamSid"]
@@ -1981,7 +2345,12 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             traceback.print_exc()
     else:
         # Default: DEEPGRAM (aiohttp)
-        stt_url = "wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000"
+        if isinstance(communicator, ExotelCommunicator):
+            enc_params = "encoding=linear16&sample_rate=16000"
+        else:
+            enc_params = "encoding=mulaw&sample_rate=8000"
+
+        stt_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&{enc_params}"
         stt_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(stt_url, headers=stt_headers) as stt_ws:
@@ -2019,6 +2388,14 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                         asyncio.create_task(process_mistral(transcript, latency))
                                         stt_start_time = time.time()
                     except Exception as e: logger.error(f"STT Receiver (Deepgram) Error: {e}")
+
+                logger.info(f"🚀 [Mistral] Starting Deepgram STT for {engine_type}...")
+                
+                # Start with a greeting for outbound calls
+                greeting = "Hello, I'm Rio from Adomita Technologies. How can I help you today?"
+                asyncio.create_task(speak(greeting))
+                transcript_accumulator.append(f"Rio: {greeting}")
+                save_transcript(interaction_id, transcript_accumulator)
 
                 await asyncio.gather(sender(), receiver())
     

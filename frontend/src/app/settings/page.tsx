@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Save, Brain, Bell, Shield, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2 } from "lucide-react";
+import { Save, Brain, Bell, Shield, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import MFASetup from "@/components/MFASetup";
 import { useAuth } from "@/context/AuthContext";
@@ -188,7 +188,7 @@ export default function SettingsPage() {
                             </div>
                         </div>
 
-                        <div className="grid grid-cols-2 gap-4">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                             <button
                                 onClick={() => setTelephonyEngine("twilio")}
                                 className={`
@@ -221,6 +221,23 @@ export default function SettingsPage() {
                                 <div className="text-left">
                                     <p className="font-bold text-sm">EnableX</p>
                                     <p className="text-xs text-slate-500">India Optimized</p>
+                                </div>
+                            </button>
+                            <button
+                                onClick={() => setTelephonyEngine("exotel")}
+                                className={`
+                                    flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
+                                    ${telephonyEngine === "exotel"
+                                        ? 'border-orange-500 bg-orange-500/5 dark:bg-orange-500/10'
+                                        : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
+                                `}
+                            >
+                                <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${telephonyEngine === "exotel" ? 'bg-orange-500 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                    <PhoneForwarded className="h-5 w-5" />
+                                </div>
+                                <div className="text-left">
+                                    <p className="font-bold text-sm">Exotel</p>
+                                    <p className="text-xs text-slate-500">India Optimized PCM</p>
                                 </div>
                             </button>
                         </div>
@@ -431,6 +448,16 @@ export default function SettingsPage() {
                                     </span>
                                 </div>
                                 <p className="text-sm text-slate-600 dark:text-slate-400">Multimodal Assistant</p>
+                            </div>
+
+                            <div className="rounded-xl bg-gradient-to-br from-orange-500/10 to-yellow-500/10 p-4 border border-orange-200/50 dark:border-orange-500/30 font-medium">
+                                <div className="flex items-center justify-between mb-2">
+                                    <p className="text-slate-900 dark:text-slate-100 italic">Exotel</p>
+                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
+                                        ● Active
+                                    </span>
+                                </div>
+                                <p className="text-sm text-slate-600 dark:text-slate-400">High Quality PCM</p>
                             </div>
                         </div>
                     </div>
