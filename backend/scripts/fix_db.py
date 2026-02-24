@@ -2,7 +2,8 @@ import os
 from dotenv import load_dotenv
 load_dotenv("backend/.env")
 from sqlmodel import Session, select
-from backend.database import engine, SystemSettings
+from database import engine
+from models.models import SystemSettings
 
 def fix_settings():
     with Session(engine) as session:

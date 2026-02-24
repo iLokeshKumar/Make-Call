@@ -1,8 +1,9 @@
 import os
 from datetime import datetime
-from backend.email_service import send_smtp_email, get_styled_html
+from email_service import send_smtp_email, get_styled_html
 from sqlmodel import Session, select
-from backend.database import engine, Lead
+from database import engine
+from models.models import Lead
 
 from langchain_core.tools import tool
 

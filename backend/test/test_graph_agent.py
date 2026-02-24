@@ -1,10 +1,9 @@
 import sys
 import os
 
-# Add project root to path
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../")))
 
-from backend.agents.graph_agent import app
+from agents.graph_agent import app
 from langchain_core.messages import HumanMessage
 
 def run_test():

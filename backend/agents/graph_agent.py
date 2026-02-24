@@ -25,11 +25,12 @@ from langchain_core.tools import tool
 from langgraph.prebuilt import ToolNode, tools_condition
 from langgraph.checkpoint.memory import MemorySaver
 from sqlmodel import Session, select
-from backend.database import engine, Product, SystemSettings, Lead
-from backend.tools.booking import book_meeting, cancel_meeting
-from backend.tools.email import send_followup_email, send_personalized_email
-from backend.tools.discount import apply_discount
-from backend.tools.query import semantic_query, check_lead_status
+from database import engine
+from models.models import Product, SystemSettings, Lead
+from tools.booking import book_meeting, cancel_meeting
+from tools.email import send_followup_email, send_personalized_email
+from tools.discount import apply_discount
+from tools.query import semantic_query, check_lead_status
 
 # AI Engine Factory
 def get_dynamic_llm(session: Session):

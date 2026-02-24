@@ -1,12 +1,8 @@
-#!/usr/bin/env python3
-"""
-Simple Exotel Test Script
-Tests if your Exophone is verified and working
-"""
-
 import requests
 import base64
 import os
+import asyncio
+import websockets
 from dotenv import load_dotenv
 
 load_dotenv("backend/.env")

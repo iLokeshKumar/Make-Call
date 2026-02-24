@@ -3,7 +3,9 @@
 from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone
 from sqlmodel import Session, select, text
-from backend.database import engine, Interaction, Lead
+from database import engine
+from models.models import Interaction, Lead
+
 import json
 
 # POST-CALL SUMMARIZER AGENT

@@ -1,11 +1,12 @@
 import os
 from datetime import datetime
 from sqlmodel import Session, select, text
-from backend.database import engine, Appointment, Lead
+from database import engine
+from models.models import Appointment, Lead
 
 from langchain_core.tools import tool
 
-from backend.google_calendar_service import create_google_meet_for_booking
+from google_calendar_service import create_google_meet_for_booking
 
 @tool
 def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", notes: str = "") -> dict:
