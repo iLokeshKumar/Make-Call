@@ -4,6 +4,9 @@ from fastmcp import FastMCP
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
+from sqlmodel import select
+from models.models import Lead, Interaction, Product, Appointment, LatencyLog
+from rag_service import search_products, sync_products_to_chroma
 
 load_dotenv()
 
@@ -65,6 +68,36 @@ def get_appointments():
         result = session.execute(text("SELECT a.appointment_time, l.name as lead_name, a.status FROM appointment a JOIN lead l ON a.lead_id = l.id"))
         appts = [dict(row._mapping) for row in result]
         return appts
+
+@mcp.tool()
+def get_or_create_lead(name: str, phone: str, email: str = None) -> dict:
+    """
+    Looks up a lead by phone number or creates a new one if not found. 
+    Use this towards the end of a conversation (e.g., when close to booking or finishing) 
+    to identify the user. Avoid calling this at the very start of the call.
+    """
+    logger.info(f"[get_or_create_lead] Searching for phone: {phone}")
+    with SessionLocal() as session:
+        # Use ORM select for better compatibility with AuditMixin
+        statement = select(Lead).where(Lead.phone == phone)
+        lead = session.execute(statement).scalar_one_or_none()
+        
+        if not lead:
+            logger.info(f"[get_or_create_lead] Creating new lead: {name}")
+            lead = Lead(name=name, phone=phone, email=email, status="New")
+            session.add(lead)
+            session.commit()
+            session.refresh(lead)
+            return {"lead_id": lead.id, "name": lead.name, "status": "New", "message": "New lead created successfully."}
+        
+        logger.info(f"[get_or_create_lead] Existing lead found: {lead.name} (ID: {lead.id})")
+        return {
+            "lead_id": lead.id,
+            "name": lead.name,
+            "phone": lead.phone,
+            "email": lead.email,
+            "message": "Existing lead identified."
+        }
 
 @mcp.tool()
 def smart_search(query: str):
@@ -133,43 +166,54 @@ def check_icp_qualification(company_size: str, industry: str, employees: int = 0
 @mcp.tool()
 def get_product_info(product_name: str) -> dict:
     """
-    Get exact product information from inventory.
-    This tool prevents AI hallucination about prices.
+    Get product information using semantic search.
+    Treats missing products as "temporarily unavailable".
     
-    Returns: {"name": str, "price": float, "stock": int, "min_authorized_price": float, "lead_time_days": int}
+    Returns: {"name": str, "price": str, "stock": int, "note": str, "status": str}
     """
+    logger.info(f"[get_product_info] Semantic search for: {product_name}")
+    
+    # Perform semantic search in ChromaDB
+    semantic_results = search_products(product_name, n_results=1)
+    
+    if not semantic_results:
+        return {
+            "error": "Product not found in current catalog",
+            "status": "Unavailable",
+            "message": "This item is currently out of stock or not in our active catalog. Please continue the call."
+        }
+    
+    best_match_name = semantic_results[0]["name"]
+    logger.info(f"[get_product_info] Best semantic match: {best_match_name}")
+    
+    # Retrieve full details from Postgres for the best match
     with SessionLocal() as session:
-        result = session.execute(
-            text("SELECT name, price, stock, note FROM product WHERE LOWER(name) ILIKE :pname LIMIT 1"),
-            {"pname": f"%{product_name}%"}
-        )
-        product = result.first()
+        statement = select(Product).where(Product.name == best_match_name)
+        product = session.execute(statement).scalar_one_or_none()
         
         if not product:
-            return {"error": f"Product '{product_name}' not found in catalog"}
-        
-        product_dict = dict(product._mapping)
-        
-        # Parse note for metadata (e.g., "lead_time: 5 days")
-        lead_time = 3  # default
-        min_price = product_dict["price"] * 0.9  # default 10% minimum discount
-        
-        if product_dict.get("note"):
-            # Example: "lead_time: 7 days | min_discount: 15%"
-            if "lead_time:" in product_dict["note"]:
-                import re
-                match = re.search(r"lead_time:\s*(\d+)", product_dict["note"])
-                if match:
-                    lead_time = int(match.group(1))
+            return {
+                "error": "Product metadata mismatch",
+                "status": "Unavailable",
+                "message": "We found a match but couldn't retrieve details. Treated as unavailable."
+            }
         
         return {
-            "name": product_dict["name"],
-            "price": float(product_dict["price"]),
-            "stock": product_dict["stock"],
-            "min_authorized_price": float(min_price),
-            "lead_time_days": lead_time,
-            "in_stock": product_dict["stock"] > 0
+            "name": product.name,
+            "price": product.price,
+            "stock": product.stock,
+            "note": product.note or "No additional notes",
+            "status": "Available" if product.stock > 0 else "Out of Stock",
+            "in_stock": product.stock > 0
         }
+
+@mcp.tool()
+def sync_product_catalog() -> dict:
+    """Manual trigger to sync Postgres products with ChromaDB semantic index."""
+    with SessionLocal() as session:
+        products = session.execute(select(Product)).scalars().all()
+        sync_products_to_chroma(products)
+        return {"status": "success", "synced_count": len(products)}
 
 @mcp.tool()
 def check_guardrails(requested_discount_percent: float, requested_price: float = None) -> dict:

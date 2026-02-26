@@ -3,23 +3,28 @@ import base64
 import logging
 import time
 import json
+import aiohttp
+import audioop
 from typing import List, Dict, Any, Optional
 
 from services.llm_service import LLMService
 from services.tts_service import TTSService
 from services.stt_service import STTService
 from utils.audio import clean_voice_text
-from utils.config import async_cartesia_client, mistral_client
-from tool_adapter import get_mistral_tools
+from utils.config import mistral_client
+from tool_adapter import get_mistral_tools, execute_mcp_tool
+from sqlmodel import Session
+from models.models import Interaction, LatencyLog
 
 logger = logging.getLogger(__name__)
 
 class VoicePipeline:
-    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str]):
+    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
         self.transcript_accumulator = transcript_accumulator
+        self.session = session
         
         self.llm_service = LLMService(system_prompt)
         self.tts_service = TTSService()
@@ -29,45 +34,83 @@ class VoicePipeline:
         self.current_tts_task = None
         self.current_llm_task = None
         self.is_rio_speaking = False
+        self.tts_first_byte_time = 0.0
+        self.last_tts_start_time = 0.0
 
     async def run(self, engine_type: str = "mistral-cartesia"):
         """
         Main loop for the voice interaction.
         """
         try:
-            # 1. Start Speaker Loop
+            # 1. Start Speaker Loop (Wait for sentences)
             speaker_task = asyncio.create_task(self._speaker_loop(engine_type))
+
+            # 2. Wait for the 'start' event from the telephony provider
+            # This ensures we have a stream_sid before we try to speak anything.
+            logger.info("⏳ Waiting for telephony stream to start...")
+            receiver = self.communicator.receive()
             
-            # 2. Initial Greeting
+            # We consume from the receiver until we get the start SID
+            async for data in receiver:
+                event = data.get("event")
+                if event == "start":
+                    self.communicator.stream_sid = data["start"]["streamSid"]
+                    logger.info(f"🚀 [Twilio] Stream started. Sid: {self.communicator.stream_sid}")
+                    break
+            
+            if not self.communicator.stream_sid:
+                logger.error("❌ Telephony 'start' event not received. Exiting.")
+                return
+
+            # 3. Initial Greeting (Now safe to send)
             greeting = "Hello, I'm Rio from Yexis Electronics! How can I help you today?"
             await self.sentence_queue.put(greeting)
             self.transcript_accumulator.append(f"Rio: {greeting}")
+            self.save_transcript()
             
-            # 3. Audio Config based on communicator/telephony
-            # (Logic moved from main.py)
-            encoding, rate = "pcm_mulaw", 8000 # Default for Twilio
-            # if isinstance(self.communicator, Exotel): ...
+            # 4. Audio Config
+            # Twilio sends 8kHz mulaw, but we transcode to 16kHz PCM for better STT quality.
+            # We pass these as strings ("pcm_s16le", "16000") to match the user's preferred protocol.
+            encoding, rate = "pcm_s16le", "24000"
             
-            # 4. STT Loop
+            # 5. STT Loop (Continuing from the same receiver)
             stt_start_time = time.time()
-            async for result in self.stt_service.transcribe(self._audio_generator(), engine_type, encoding, rate):
+            last_final_transcript = ""
+            current_turn_transcript = ""
+            
+            async for result in self.stt_service.transcribe(self._audio_generator(receiver), engine_type, encoding, rate):
                 transcript = result.get("transcript", "")
                 is_final = result.get("is_final", False)
+                res_type = result.get("type", "transcript")
                 
-                if transcript and is_final:
-                    logger.info(f"🎤 [STT] FINAL: {transcript}")
-                    latency = time.time() - stt_start_time
-                    self.transcript_accumulator.append(f"User: {transcript}")
+                if transcript:
+                    current_turn_transcript = transcript
+                
+                # Trigger LLM on final transcript OR eager End-of-Turn signal
+                if is_final or res_type == "end_of_turn":
+                    if not current_turn_transcript or current_turn_transcript == last_final_transcript:
+                        continue
                     
-                    # Handle Barge-in
+                    last_final_transcript = current_turn_transcript
+                    logger.info(f"🎤 [STT] {'🎯 EOT' if res_type == 'end_of_turn' else '✅ FINAL'}: {current_turn_transcript}")
+                    
+                    latency = time.time() - stt_start_time
+                    self.transcript_accumulator.append(f"User: {current_turn_transcript}")
+                    
                     if self.is_rio_speaking or not self.sentence_queue.empty():
-                        await self._handle_barge_in()
+                        await self._handle_barge_in(reason=current_turn_transcript)
 
-                    # Process response in a separate task so STT can continue
-                    self.current_llm_task = asyncio.create_task(self._process_llm_response(transcript, latency, engine_type))
+                    # --- FIX: Cancel ANY existing LLM task before starting a new one ---
+                    if self.current_llm_task and not self.current_llm_task.done():
+                        self.current_llm_task.cancel()
+                        logger.info("♻️ Cancelled previous LLM task for new turn.")
+
+                    self.current_llm_task = asyncio.create_task(self._process_llm_response(current_turn_transcript, latency, engine_type))
                     stt_start_time = time.time()
+                    current_turn_transcript = "" # Reset for next turn
+                    stt_start_time = time.time()
+                    current_turn_transcript = "" # Reset for next turn
 
-            # Signal exit
             await self.sentence_queue.put(None)
             await speaker_task
 
@@ -76,29 +119,89 @@ class VoicePipeline:
 
     async def _speaker_loop(self, engine_type: str):
         """Continuously pulls sentences from the queue and speaks them."""
-        # In Cartesia SDK 3.0.0, websocket_connect() takes NO config args.
-        # All config (model_id, voice, output_format) goes into send(event_dict).
-        async with async_cartesia_client.tts.websocket_connect() as c_ws:
-            while True:
-                sentence = await self.sentence_queue.get()
-                if sentence is None:
-                    break
+        async with aiohttp.ClientSession() as session:
+            # Persistent WebSockets for specific providers
+            dg_ws = None
+            el_ws = None
+            c_ws = None
+            
+            try:
+                # 1. Setup persistent connections if needed
+                if engine_type == "mistral-deepgram":
+                    from utils.config import DEEPGRAM_API_KEY, DEEPGRAM_VOICE
+                    dg_url = f"wss://api.deepgram.com/v1/speak?model={DEEPGRAM_VOICE}&encoding=mulaw&sample_rate=8000"
+                    dg_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+                    dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
+                    logger.info("🎯 Deepgram TTS Persistent WebSocket Connected")
                 
-                self.is_rio_speaking = True
-                self.current_tts_task = asyncio.create_task(
-                    self.tts_service.speak(sentence, engine_type, self.communicator, cartesia_ws=c_ws)
-                )
-                try:
-                    await self.current_tts_task
-                except asyncio.CancelledError:
-                    logger.info("TTS Task Cancelled (Barge-in).")
-                finally:
-                    self.is_rio_speaking = False
-                    self.sentence_queue.task_done()
+                elif engine_type == "mistral-elevenlabs":
+                    from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+                    el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
+                    el_headers = {"xi-api-key": ELEVENLABS_API_KEY}
+                    el_ws = await session.ws_connect(el_url, headers=el_headers)
+                    logger.info("🎯 ElevenLabs TTS Persistent WebSocket Connected")
+                
+                # Setup Cartesia Persistent Connection if using it
+                if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                    from utils.config import CARTESIA_API_KEY
+                    c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
+                    c_ws = await session.ws_connect(c_url)
+                    logger.info("🎯 Cartesia TTS Persistent WebSocket Connected (aiohttp)")
 
-    async def _handle_barge_in(self):
+                # 2. Main Speaker Loop
+                while True:
+                    sentence = await self.sentence_queue.get()
+                    if sentence is None:
+                        break
+                    
+                    if not self.communicator.stream_sid:
+                        logger.warning("⚠️ Speaker loop waiting for stream_sid...")
+                        await asyncio.sleep(0.5)
+
+                    # --- ADDING: Persistent WebSocket Health Check & Reconnect ---
+                    if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                        if not c_ws or c_ws.closed:
+                            from utils.config import CARTESIA_API_KEY
+                            # Using the latest cartesia_version as suggested by the user
+                            c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
+                            c_ws = await session.ws_connect(c_url)
+                            logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
+
+                    logger.info(f"🗣️ [Speaker Loop] Starting TTS for: '{sentence}'")
+                    # Generate a unique context_id per sentence for better multiplexing
+                    turn_context_id = f"ctx_{self.interaction_id}_{int(time.time()*1000)}"
+                    
+                    self.is_rio_speaking = True
+                    self.last_tts_start_time = time.time()
+                    self.current_tts_task = asyncio.create_task(
+                        self.tts_service.speak(
+                            text=sentence, 
+                            engine_type=engine_type, 
+                            communicator=self.communicator, 
+                            cartesia_ws=c_ws,
+                            aiohttp_session=session,
+                            deepgram_ws=dg_ws,
+                            elevenlabs_ws=el_ws,
+                            context_id=turn_context_id
+                        )
+                    )
+                    try:
+                        await self.current_tts_task
+                    except asyncio.CancelledError:
+                        logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                    finally:
+                        self.is_rio_speaking = False
+                        self.sentence_queue.task_done()
+            
+            finally:
+                # Cleanup persistent WebSockets
+                if dg_ws: await dg_ws.close()
+                if el_ws: await el_ws.close()
+                if c_ws: await c_ws.close()
+
+    async def _handle_barge_in(self, reason: str = "Unknown"):
         """Interrupts current AI activities."""
-        logger.info("🛑 Barge-in! Interrupting AI.")
+        logger.info(f"🛑 Barge-in! Interrupting AI. Reason: '{reason}'")
         await self.communicator.clear_audio_buffer()
         
         # Clear sentence queue
@@ -111,8 +214,49 @@ class VoicePipeline:
         if self.current_llm_task and not self.current_llm_task.done():
             self.current_llm_task.cancel()
 
+    def save_latency(self, engine_name, stt, llm, tts):
+        """Saves turn-level latency metrics to DB."""
+        try:
+            # Handle non-integer interaction_id
+            try:
+                interaction_id_int = int(self.interaction_id)
+            except (ValueError, TypeError):
+                logger.debug(f"Skipping DB latency log for non-integer interaction_id: {self.interaction_id}")
+                logger.info(f"⏱️ [Latency] STT: {stt:.2f}s | LLM: {llm:.2f}s | TTS: {tts:.2f}s")
+                return
+
+            log = LatencyLog(
+                interaction_id=interaction_id_int,
+                engine=engine_name,
+                stt_ms=round(stt * 1000, 2),
+                llm_ms=round(llm * 1000, 2),
+                tts_ms=round(tts * 1000, 2),
+                total_ms=round((stt + llm + tts) * 1000, 2)
+            )
+            self.session.add(log)
+            self.session.commit()
+            logger.info(f"⏱️ [Latency Saved] Total: {log.total_ms}ms")
+        except Exception as e:
+            logger.error(f"Error saving latency: {e}")
+
+    def save_transcript(self):
+        """Saves transcript to Interaction table."""
+        try:
+            try:
+                interaction_id_int = int(self.interaction_id)
+            except (ValueError, TypeError): return
+
+            db_i = self.session.get(Interaction, interaction_id_int)
+            if db_i:
+                db_i.transcript = "\n".join(self.transcript_accumulator)
+                self.session.add(db_i)
+                self.session.commit()
+        except Exception as e:
+            logger.error(f"Error saving transcript: {e}")
+
     async def _process_llm_response(self, user_input, stt_latency, engine_type):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
+        llm_start_time = time.time()
         self.llm_service.add_user_message(user_input)
         
         mistral_tools = get_mistral_tools()
@@ -122,43 +266,73 @@ class VoicePipeline:
         
         async for chunk in self.llm_service.stream_mistral(tools=mistral_tools):
             if chunk["type"] == "sentence":
+                logger.info(f"📤 [Mistral -> Queue] Sentence: '{chunk['content']}'")
                 await self.sentence_queue.put(chunk["content"])
             elif chunk["type"] == "finished":
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
+                llm_end_time = time.time()
+                llm_latency = llm_end_time - llm_start_time
                 
                 if full_reply:
                     self.llm_service.add_assistant_message(full_reply)
+                    self.transcript_accumulator.append(f"Rio: {full_reply}")
+                    self.save_transcript()
+                    self.save_latency(engine_type, stt_latency, llm_latency, self.tts_service.last_tts_latency)
                 
                 if tool_calls:
-                    # Execute tools
                     self.llm_service.add_assistant_message(full_reply, tool_calls=tool_calls)
                     
                     for tc in tool_calls:
                         tool_name = tc.function.name
                         tool_args = json.loads(tc.function.arguments)
-                        
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
                         
-                        # Use the unified execute_mcp_tool
-                        from ..tool_adapter import execute_mcp_tool
-                        result = await execute_mcp_tool(tool_name, tool_args)
+                        try:
+                            result = await execute_mcp_tool(tool_name, tool_args)
+                        except Exception as e:
+                            logger.error(f"❌ Tool Execution Error: {e}")
+                            result = {"error": str(e)}
                         
                         self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
                     
-                    # Recurse for final response after tool results
                     logger.info("🔄 Tool results ready. Recursing for final LLM response.")
                     await self._process_llm_response("Tool results ready.", 0, engine_type)
 
-    async def _audio_generator(self):
-        """Helper to yield audio chunks from the communicator."""
-        async for data in self.communicator.receive():
+    #async def _audio_generator(self, receiver):
+    #    """Helper to yield audio chunks from the communicator."""
+    #    async for data in receiver:
+    #        event = data.get("event")
+    #        if event == "media":
+    #            yield base64.b64decode(data["media"]["payload"])
+    #        elif event == "stop":
+    #            logger.info("🛑 [Twilio] Stream stopped.")
+    #            break
+
+    #async def _audio_generator(self, receiver):
+    #    chunk_count = 0
+    #    async for data in receiver:
+    #        event = data.get("event")
+    #        if event == "media":
+    #            chunk_count += 1
+    #            if chunk_count == 1:
+    #                logger.info("🎤 First audio chunk received from Twilio")
+    #            yield base64.b64decode(data["media"]["payload"])
+    #        elif event == "stop":
+    #            logger.info("🛑 [Twilio] Stream stopped.")
+    #            break
+    #    logger.info(f"🎤 Audio generator finished. Total chunks: {chunk_count}")
+
+    async def _audio_generator(self, receiver):
+        chunk_count = 0
+        async for data in receiver:
             event = data.get("event")
-            if event == "start":
-                self.communicator.stream_sid = data["start"]["streamSid"]
-                logger.info(f"🚀 [Twilio] Stream started. Sid: {self.communicator.stream_sid}")
-            elif event == "media":
-                yield base64.b64decode(data["media"]["payload"])
+            if event == "media":
+                mulaw_data = base64.b64decode(data["media"]["payload"])
+                # Convert mulaw to PCM s16le
+                pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+                # Upsample from 8000 to 24000 Hz
+                pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, 8000, 24000, None)
+                yield pcm_data
             elif event == "stop":
-                logger.info("🛑 [Twilio] Stream stopped.")
                 break

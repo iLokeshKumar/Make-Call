@@ -10,8 +10,9 @@ from sqlmodel import Session, select
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from database import init_db, get_session, engine
-from models.models import SystemSettings, Interaction, Lead
+from models.models import SystemSettings, Interaction, Lead, Product
 from utils.logger import setup_logger
+from rag_service import sync_products_to_chroma
 from utils.config import PORT
 from routes import auth, crm, telephony
 from communicators import TwilioCommunicator, ExotelCommunicator, EnableXCommunicator
@@ -25,6 +26,12 @@ async def lifespan(app: FastAPI):
     # Startup logic
     init_db()
     logger.info("✓ Database initialized")
+    
+    # Sync products on startup
+    with Session(engine) as session:
+        products = session.exec(select(Product)).all()
+        sync_products_to_chroma(products)
+    
     yield
 
 app = FastAPI(lifespan=lifespan)
@@ -59,23 +66,26 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         logger.info(f"Assigning fallback Interaction ID: {interaction_id}")
     
     # Load dynamic context
-    settings = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
-    system_prompt = settings.value if settings else "You are a helpful assistant."
+    settings_list = session.exec(select(SystemSettings)).all()
+    all_settings = {s.key: s.value for s in settings_list}
+    
+    system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
+    voice_engine = all_settings.get("voice_engine", "mistral-cartesia")
     
     # 1. Instantiate Communicator (Defaulting to Twilio for /media-stream)
     communicator = TwilioCommunicator(websocket)
     
     # 2. Setup Voice Pipeline
     transcript_accumulator = []
-    pipeline = VoicePipeline(communicator, interaction_id, system_prompt, transcript_accumulator)
+    pipeline = VoicePipeline(communicator, interaction_id, system_prompt, transcript_accumulator, session)
     
     # 3. Handle specific telephony stream sid if present
     # pipeline.setup_sid(...) 
 
-    logger.info(f"📞 Twilio connection established | Interaction: {interaction_id}")
+    logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Engine: {voice_engine}")
     
     try:
-        await pipeline.run()
+        await pipeline.run(engine_type=voice_engine)
     except Exception as e:
         logger.error(f"❌ Pipeline Error: {e}")
     finally:

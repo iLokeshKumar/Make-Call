@@ -32,7 +32,9 @@ from mcp_server import (
     get_product_info,
     check_guardrails,
     book_meeting,
-    get_call_latency_summary
+    get_call_latency_summary,
+    get_or_create_lead,
+    sync_product_catalog
 )
 
 logger = logging.getLogger(__name__)
@@ -76,13 +78,13 @@ def get_mistral_tools():
             "type": "function",
             "function": {
                 "name": "get_product_info",
-                "description": "Fetch accurate product information from database. Never guess pricing - always use this tool when asked about products.",
+                "description": "Fetch accurate product information using semantic search. This tool finds the closest match in the catalog. If a product is not found, treat it as 'temporarily unavailable' and continue the call naturally.",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "product_name": {
                             "type": "string",
-                            "description": "Name of the product (e.g., 'Voice Assistant', 'CRM Integration', 'Analytics')"
+                            "description": "Name or description of the product (e.g., 'Samsung 55 TV', 'Commercial Display')"
                         }
                     },
                     "required": ["product_name"]
@@ -145,6 +147,31 @@ def get_mistral_tools():
                         }
                     },
                     "required": ["interaction_id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_or_create_lead",
+                "description": "Identify a lead by phone or create a new record. Use this towards the end of a conversation (e.g., when close to booking or finishing) to identify the user. Avoid calling this at the very start of the call.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Name of the person (e.g., 'John Doe')"
+                        },
+                        "phone": {
+                            "type": "string",
+                            "description": "Phone number (e.g., '+1234567890')"
+                        },
+                        "email": {
+                            "type": "string",
+                            "description": "Email address (optional)"
+                        }
+                    },
+                    "required": ["name", "phone"]
                 }
             }
         }
@@ -218,9 +245,25 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
         
+        elif tool_name == "get_or_create_lead":
+            # Delegate to MCP tool
+            result = get_or_create_lead.fn(
+                name=arguments.get("name"),
+                phone=arguments.get("phone"),
+                email=arguments.get("email")
+            )
+            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
+            return result
+        
+        elif tool_name == "sync_product_catalog":
+            # Delegate to MCP tool
+            result = sync_product_catalog.fn()
+            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
+            return result
+        
         else:
             error = {
-                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary"]
+                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog"]
             }
             logger.error(f"[execute_mcp_tool] Unknown tool error: {error}")
             return error
