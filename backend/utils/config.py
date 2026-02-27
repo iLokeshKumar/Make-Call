@@ -1,7 +1,5 @@
 import os
 from dotenv import load_dotenv
-from cartesia import Cartesia, AsyncCartesia
-from sarvamai import SarvamAI, AsyncSarvamAI
 from mistralai import Mistral as MistralClient
 from twilio.rest import Client as TwilioClient
 
@@ -25,6 +23,7 @@ ENABLEX_FROM_NUMBER = os.getenv("ENABLEX_FROM_NUMBER")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
+DEEPGRAM_VOICE = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 
 CARTESIA_API_KEY = os.getenv("CARTESIA_API_KEY")
@@ -44,7 +43,4 @@ PORT = int(os.getenv("PORT", 6060))
 # SDK Clients
 twilio_client = TwilioClient(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
 mistral_client = MistralClient(api_key=MISTRAL_API_KEY)
-cartesia_client = Cartesia(api_key=CARTESIA_API_KEY)
-async_cartesia_client = AsyncCartesia(api_key=CARTESIA_API_KEY)
-sarvam_client = SarvamAI(api_subscription_key=SARVAM_API_KEY)
-async_sarvam_client = AsyncSarvamAI(api_subscription_key=SARVAM_API_KEY)
+# Cartesia and Sarvam are handled via direct aiohttp to avoid SDK version conflicts

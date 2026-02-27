@@ -41,7 +41,8 @@ async def handle_media_stream(websocket: WebSocket):
 
     # DG Agent URL (Production V1)
     # Using PCMU (mulaw) to match Twilio's native format (8kHz)
-    dg_url = "wss://agent.deepgram.com/v1/agent/converse?model=nova-2&voice=aura-asteria-en&encoding=mulaw&sample_rate=8000"
+    voice = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")
+    dg_url = f"wss://agent.deepgram.com/v1/agent/converse?model=nova-2&voice={voice}&encoding=mulaw&sample_rate=8000"
     headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
 
     async with aiohttp.ClientSession() as session:

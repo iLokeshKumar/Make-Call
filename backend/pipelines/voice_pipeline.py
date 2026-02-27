@@ -71,7 +71,7 @@ class VoicePipeline:
             # 4. Audio Config
             # Twilio sends 8kHz mulaw, but we transcode to 16kHz PCM for better STT quality.
             # We pass these as strings ("pcm_s16le", "16000") to match the user's preferred protocol.
-            encoding, rate = "pcm_s16le", "24000"
+            encoding, rate = "pcm_mulaw", "8000"
             
             # 5. STT Loop (Continuing from the same receiver)
             stt_start_time = time.time()
@@ -309,30 +309,30 @@ class VoicePipeline:
     #            logger.info("🛑 [Twilio] Stream stopped.")
     #            break
 
-    #async def _audio_generator(self, receiver):
-    #    chunk_count = 0
-    #    async for data in receiver:
-    #        event = data.get("event")
-    #        if event == "media":
-    #            chunk_count += 1
-    #            if chunk_count == 1:
-    #                logger.info("🎤 First audio chunk received from Twilio")
-    #            yield base64.b64decode(data["media"]["payload"])
-    #        elif event == "stop":
-    #            logger.info("🛑 [Twilio] Stream stopped.")
-    #            break
-    #    logger.info(f"🎤 Audio generator finished. Total chunks: {chunk_count}")
-
     async def _audio_generator(self, receiver):
         chunk_count = 0
         async for data in receiver:
             event = data.get("event")
             if event == "media":
-                mulaw_data = base64.b64decode(data["media"]["payload"])
-                # Convert mulaw to PCM s16le
-                pcm_data = audioop.ulaw2lin(mulaw_data, 2)
-                # Upsample from 8000 to 24000 Hz
-                pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, 8000, 24000, None)
-                yield pcm_data
+                chunk_count += 1
+                if chunk_count == 1:
+                    logger.info("🎤 First audio chunk received from Twilio")
+                yield base64.b64decode(data["media"]["payload"])
             elif event == "stop":
+                logger.info("🛑 [Twilio] Stream stopped.")
                 break
+        logger.info(f"🎤 Audio generator finished. Total chunks: {chunk_count}")
+
+    #async def _audio_generator(self, receiver):
+    #    chunk_count = 0
+    #    async for data in receiver:
+    #        event = data.get("event")
+    #        if event == "media":
+    #            mulaw_data = base64.b64decode(data["media"]["payload"])
+    #            # Convert mulaw to PCM s16le
+    #            pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+    #            # Upsample from 8000 to 24000 Hz
+    #            pcm_data, _ = audioop.ratecv(pcm_data, 2, 1, 8000, 24000, None)
+    #            yield pcm_data
+    #        elif event == "stop":
+    #            break

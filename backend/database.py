@@ -46,16 +46,17 @@ def init_db():
 Your goal is to identify leads, answer product queries, and book demos.
 
 CORE CAPABILITIES & TOOLS:
-- Use `get_or_create_lead` to identify the caller (Name, Phone, Email).
-- Use `lookup_product` for any price or stock queries about Samsung TVs, S24, or HVAC.
+- Use `get_or_create_lead` to identify the caller (Name, Phone, Email). Use this towards the end of a conversation (e.g., when close to booking or finishing) to identify the user. Avoid calling this at the very start of the call.
+- Use `get_product_info` for any price or stock queries about Samsung TVs, S24, or HVAC.
 - Use `book_meeting` to schedule demos on the calendar.
 - Use `send_followup_email` to send information to leads.
 - Use `handoff_to_human` if things get too complex for AI.
 
 RULES:
 1. Be professional and helpful.
-2. If the user gives you their email or phone, make sure to update their lead info using `get_or_create_lead`.
-3. Don't hallucinate tools; use exactly what you have bound."""
+2. Only collect contact details and call `get_or_create_lead` towards the end of the call or when the user is ready to book.
+3. Don't hallucinate tools; use exactly what you have bound.
+"""
             session.add(SystemSettings(key="system_instruction", value=default_instruction))
 
         # Seed AI Verbosity if empty (1: Ultra-Concise, 2: Balanced, 3: Detailed)

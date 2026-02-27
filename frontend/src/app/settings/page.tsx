@@ -278,6 +278,7 @@ export default function SettingsPage() {
                                             <p className="text-xs text-slate-500">Native Multimodal</p>
                                         </div>
                                     </button>
+
                                     <button
                                         onClick={() => setVoiceEngine("mistral")}
                                         className={`
@@ -349,12 +350,28 @@ export default function SettingsPage() {
                                             <p className="text-xs text-slate-500">Nova-2 + Aura-Asteria</p>
                                         </div>
                                     </button>
+
+                                    <button
+                                        onClick={() => setVoiceEngine("mistral-deepgram-cartesia")}
+                                        className={`flex items-center space-x-3 p-4 rounded-xl border-2 transition-all ${voiceEngine === "mistral-deepgram-cartesia"
+                                                ? 'border-red-600 bg-red-600/5 dark:bg-red-600/10'
+                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'
+                                            }`}
+                                    >
+                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-deepgram-cartesia" ? 'bg-red-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                            <Brain className="h-5 w-5" />
+                                        </div>
+                                        <div className="text-left">
+                                            <p className="font-bold text-sm">Mistral + Deepgram + Cartesia</p>
+                                            <p className="text-xs text-slate-500">Nova-2 + Flux + Sonic</p>
+                                        </div>
+                                    </button>
                                 </div>
                             </div>
 
                             <div className="space-y-4 mb-6">
                                 <div className="flex items-center justify-between ml-1">
-                                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300">Response Verbosity</label>
+                                    <label htmlFor="response-verbosity" className="text-sm font-bold text-slate-700 dark:text-slate-300">Response Verbosity</label>
                                     <span className={`text-xs font-bold px-2 py-1 rounded-md ${aiVerbosity === "1" ? "bg-red-500/10 text-red-500" :
                                         aiVerbosity === "3" ? "bg-blue-500/10 text-blue-500" :
                                             "bg-green-500/10 text-green-500"
@@ -364,6 +381,7 @@ export default function SettingsPage() {
                                 </div>
                                 <div className="relative pt-1 px-1">
                                     <input
+                                        id="response-verbosity"
                                         type="range"
                                         min="1"
                                         max="3"
@@ -371,6 +389,7 @@ export default function SettingsPage() {
                                         value={aiVerbosity}
                                         onChange={(e) => setAiVerbosity(e.target.value)}
                                         className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-violet-600"
+                                        aria-label="Response verbosity level"
                                     />
                                     <div className="flex justify-between mt-2 px-1">
                                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Brevity</span>

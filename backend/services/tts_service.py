@@ -9,7 +9,7 @@ from typing import Optional
 from utils.config import (
     CARTESIA_API_KEY, CARTESIA_VOICE_ID, 
     ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID,
-    DEEPGRAM_API_KEY
+    DEEPGRAM_API_KEY, SARVAM_API_KEY
 )
 from utils.audio import clean_voice_text
 
@@ -93,9 +93,56 @@ class TTSService:
         except Exception as e:
             logger.error(f"❌ [Cartesia TTS] Error: {e}")
 
-    async def _sarvam_speak(self, text, communicator):
-        """Sarvam AI TTS."""
-        pass
+    async def _sarvam_speak(self, text, communicator, aiohttp_session=None):
+        """Sarvam AI TTS using aiohttp with mulaw output."""
+        if not SARVAM_API_KEY:
+            logger.error("❌ SARVAM_API_KEY missing!")
+            return
+
+        tts_start_time = time.time()
+        tts_first_byte_time = 0
+        
+        url = "https://api.sarvam.ai/text-to-speech/stream"
+        headers = {
+            "api-subscription-key": SARVAM_API_KEY,
+            "Content-Type": "application/json"
+        }
+        
+        payload = {
+            "text": text,
+            "target_language_code": "en-IN",
+            "speaker": "shubh",
+            "model": "bulbul:v3",
+            "pace": 1.1,
+            "speech_sample_rate": 8000,
+            "output_audio_codec": "mulaw",
+            "enable_preprocessing": True
+        }
+
+        async def _stream_on_response(response):
+            nonlocal tts_first_byte_time
+            async for chunk in response.content.iter_any():
+                if chunk:
+                    if tts_first_byte_time == 0:
+                        tts_first_byte_time = time.time() - tts_start_time
+                    
+                    # Sarvam provides raw binary, we need base64 for Twilio
+                    payload_b64 = base64.b64encode(chunk).decode("utf-8")
+                    await communicator.send_media(payload_b64)
+
+        try:
+            if aiohttp_session:
+                async with aiohttp_session.post(url, headers=headers, json=payload) as response:
+                    await _stream_on_response(response)
+            else:
+                async with aiohttp.ClientSession() as session:
+                    async with session.post(url, headers=headers, json=payload) as response:
+                        await _stream_on_response(response)
+            
+            self.last_tts_latency = tts_first_byte_time
+            logger.info(f"✅ [Sarvam TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
+        except Exception as e:
+            logger.error(f"❌ [Sarvam TTS] Error: {e}")
 
     async def _deepgram_speak(self, text, communicator, aiohttp_session=None, ws_to_use=None):
         """Deepgram Aura TTS (Streaming via WebSocket)."""

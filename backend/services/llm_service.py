@@ -58,6 +58,7 @@ class LLMService:
                     content = delta.content
                     accumulated_text += content
                     full_reply += content
+                    # logger.debug(f"[Mistral Token] {content}") # Too noisy
                     yield {"type": "token", "content": content}
 
                     # Sentence boundary detection for TTS
@@ -79,9 +80,11 @@ class LLMService:
 
             # Final remaining chunk
             if accumulated_text.strip():
+                logger.info(f"📤 [Mistral -> Queue] Final sentence: '{accumulated_text.strip()}'")
                 yield {"type": "sentence", "content": accumulated_text.strip()}
 
             # End of stream metadata
+            logger.info(f"✨ [Mistral Stream Finished] Full Reply: '{full_reply[:50]}...' Calls: {bool(tool_calls_dict)}")
             yield {
                 "type": "finished", 
                 "full_reply": full_reply, 
