@@ -33,6 +33,8 @@ venv/
 *.sqlite
 backend/calls
 backend/*.db
+knowledge_base/
+backend/knowledge_base/
 
 # OS
 .DS_Store

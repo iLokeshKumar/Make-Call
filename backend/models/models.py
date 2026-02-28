@@ -93,11 +93,20 @@ class User(AuditMixin, table=True):
     email_verified: bool = Field(default=False)
     verification_token: Optional[str] = None
     mfa_disable_otp: Optional[str] = None
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    reveal_otp: Optional[str] = None
+    reveal_otp_expires_at: Optional[datetime] = None
 
 class UserCreate(SQLModel):
     username: str
     email: str
     password: str
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone_number: Optional[str] = None
     role: Optional[str] = "sales_rep"
 
 class Token(SQLModel):
@@ -114,6 +123,9 @@ class MFAVerify(SQLModel):
     token: str
 
 class MFADisableRequest(SQLModel):
+    token: str
+
+class RevealOTPVerify(SQLModel):
     token: str
 
 class ResendVerification(SQLModel):

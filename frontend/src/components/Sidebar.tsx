@@ -1,8 +1,12 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut } from "lucide-react";
+import {
+  LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut,
+  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock
+} from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 
@@ -16,92 +20,337 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { user, logout } = useAuth();
+  const { user, token, logout } = useAuth();
+  const [isCollapsed, setIsCollapsed] = useState(false);
+  const [showPersonalDetails, setShowPersonalDetails] = useState(false);
+
+  // OTP Reveal State
+  const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
+  const [otpValue, setOtpValue] = useState("");
+  const [isRequestingOtp, setIsRequestingOtp] = useState(false);
+  const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
+  const [otpError, setOtpError] = useState("");
+
+  // Timer State
+  const [timeLeft, setTimeLeft] = useState(0);
+  const REVEAL_DURATION = 120; // 2 minutes in seconds
 
   const filteredItems = navItems.filter(item => !item.adminOnly || user?.role === 'admin');
 
+  // Auto-hide effect
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (showPersonalDetails && timeLeft > 0) {
+      interval = setInterval(() => {
+        setTimeLeft((prev) => prev - 1);
+      }, 1000);
+    } else if (timeLeft === 0 && showPersonalDetails) {
+      setShowPersonalDetails(false);
+    }
+    return () => clearInterval(interval);
+  }, [showPersonalDetails, timeLeft]);
+
+  // Helper to mask sensitive data
+  const maskEmail = (email: string) => {
+    if (!email) return "••••@••••.•••";
+    const [name, domain] = email.split("@");
+    return `${name[0]}••••@${domain}`;
+  };
+
+  const maskPhone = (phone: string) => {
+    if (!phone) return "•••••••000";
+    return `•••••••${phone.slice(-3)}`;
+  };
+
+  const handleRequestReveal = async () => {
+    if (showPersonalDetails) {
+      setShowPersonalDetails(false);
+      setTimeLeft(0);
+      return;
+    }
+
+    setIsOtpModalOpen(true);
+    setIsRequestingOtp(true);
+    setOtpError("");
+
+    try {
+      const res = await fetch("http://localhost:6060/auth/reveal/request", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) throw new Error("Failed to send OTP");
+    } catch (err) {
+      setOtpError("Failed to send verification code. Please try again.");
+    } finally {
+      setIsRequestingOtp(false);
+    }
+  };
+
+  const handleVerifyReveal = async () => {
+    setIsVerifyingOtp(true);
+    setOtpError("");
+
+    try {
+      const res = await fetch("http://localhost:6060/auth/reveal/verify", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({ token: otpValue }),
+      });
+
+      if (res.ok) {
+        setShowPersonalDetails(true);
+        setTimeLeft(REVEAL_DURATION);
+        setIsOtpModalOpen(false);
+        setOtpValue("");
+      } else {
+        const data = await res.json();
+        setOtpError(data.detail || "Invalid code. Please try again.");
+      }
+    } catch (err) {
+      setOtpError("Network error. Please try again.");
+    } finally {
+      setIsVerifyingOtp(false);
+    }
+  };
+
   return (
-    <div className="flex h-screen w-72 flex-col bg-slate-900 dark:bg-slate-900/60 border-r border-slate-700 dark:border-white/10 relative overflow-hidden">
-      {/* Animated Background Gradient */}
-      <div className="absolute inset-0 bg-gradient-to-br from-violet-500/10 via-blue-500/10 to-purple-500/10 animate-pulse opacity-20 dark:opacity-30" />
+    <>
+      <div
+        className={clsx(
+          "flex h-screen flex-col bg-slate-900 dark:bg-slate-900/60 border-r border-slate-700 dark:border-white/10 relative overflow-hidden transition-all duration-300",
+          isCollapsed ? "w-20" : "w-72"
+        )}
+      >
+        {/* Animated Background Gradient */}
+        <div className="absolute inset-0 bg-gradient-to-br from-violet-500/10 via-blue-500/10 to-purple-500/10 animate-pulse opacity-20 dark:opacity-30 pointer-events-none" />
 
-      {/* Header */}
-      <div className="relative flex h-24 items-center justify-center border-b border-slate-700 dark:border-white/10 px-6">
-        <div className="flex items-center space-x-2">
-          <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-blue-600 shadow-lg shadow-violet-500/50">
-            <Sparkles className="h-6 w-6 text-white" />
-          </div>
-          <div>
-            <h1 className="text-2xl font-bold tracking-tight">
-              <span className="gradient-text">Rio</span>
-              <span className="text-slate-200 dark:text-slate-200 ml-1">CRM</span>
-            </h1>
-            <p className="text-xs text-slate-400 dark:text-slate-400 font-medium">AI Sales Assistant</p>
-          </div>
-        </div>
-      </div>
-
-      {/* Navigation */}
-      <nav className="relative flex-1 space-y-2 p-4">
-        {filteredItems.map((item, index) => {
-          const isActive = pathname === item.href;
-          return (
-            <Link
-              key={item.name}
-              href={item.href}
-              style={{ animationDelay: `${index * 50}ms` }}
-              className={clsx(
-                "group flex items-center space-x-3 rounded-xl px-4 py-3.5 text-sm font-semibold transition-all duration-300 relative overflow-hidden",
-                isActive
-                  ? "bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-lg shadow-violet-500/50 scale-105"
-                  : "text-slate-300 dark:text-slate-400 hover:bg-slate-800 dark:hover:bg-slate-800/60 hover:text-white dark:hover:text-slate-100 hover:scale-105 hover:shadow-md"
-              )}
-            >
-              {/* Hover Effect Gradient */}
-              {!isActive && (
-                <div className="absolute inset-0 bg-gradient-to-r from-violet-600/0 via-blue-600/0 to-violet-600/0 group-hover:from-violet-600/10 group-hover:via-blue-600/10 group-hover:to-violet-600/10 transition-all duration-500" />
-              )}
-
-              <item.icon className={clsx(
-                "h-5 w-5 relative z-10 transition-transform group-hover:scale-110",
-                isActive ? "text-white" : "text-slate-400 dark:text-slate-500 group-hover:text-violet-400 dark:group-hover:text-violet-400"
-              )} />
-              <span className="relative z-10">{item.name}</span>
-
-              {/* Active Indicator */}
-              {isActive && (
-                <div className="absolute right-3 h-2 w-2 rounded-full bg-white animate-pulse" />
-              )}
-            </Link>
-          );
-        })}
-      </nav>
-
-      {/* Logout Button */}
-      <div className="p-4 border-t border-slate-700 dark:border-white/10">
+        {/* Collapse Toggle Button */}
         <button
-          onClick={logout}
-          className="group flex w-full items-center space-x-3 rounded-xl px-4 py-3 text-sm font-semibold text-slate-300 hover:bg-red-500/10 hover:text-red-500 transition-all duration-300"
+          onClick={() => setIsCollapsed(!isCollapsed)}
+          className="absolute -right-3 top-10 z-50 flex h-6 w-6 items-center justify-center rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white hover:border-violet-500 transition-all duration-300 shadow-lg"
         >
-          <LogOut className="h-5 w-5 transition-transform group-hover:translate-x-1" />
-          <span>Log Out</span>
+          {isCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
         </button>
-      </div>
 
-      {/* Footer Badge */}
-      <div className="relative p-4 border-t border-slate-700 dark:border-white/10">
-        <div className="rounded-xl bg-slate-800 dark:bg-gradient-to-br dark:from-violet-500/10 dark:to-blue-500/10 p-4 border border-slate-700 dark:border-violet-500/20">
-          <div className="flex items-center space-x-2">
-            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-green-400 to-emerald-600">
-              <div className="h-2 w-2 rounded-full bg-white animate-pulse" />
+        {/* Header */}
+        <div className={clsx(
+          "relative flex h-24 items-center border-b border-slate-700 dark:border-white/10 px-6 transition-all",
+          isCollapsed ? "justify-center" : "justify-start"
+        )}>
+          <div className="flex items-center space-x-3">
+            <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-violet-600 to-blue-600 shadow-lg shadow-violet-500/50">
+              <Sparkles className="h-6 w-6 text-white" />
             </div>
-            <div>
-              <p className="text-xs font-semibold text-slate-200 dark:text-slate-300">System Online</p>
-              <p className="text-[10px] text-slate-400 dark:text-slate-500">All services active</p>
+            {!isCollapsed && (
+              <div className="animate-in fade-in slide-in-from-left-2 duration-300">
+                <h1 className="text-2xl font-bold tracking-tight">
+                  <span className="gradient-text">Rio</span>
+                  <span className="text-slate-200 dark:text-slate-200 ml-1">CRM</span>
+                </h1>
+                <p className="text-xs text-slate-400 dark:text-slate-400 font-medium">AI Sales Assistant</p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {/* Navigation */}
+        <nav className="relative flex-1 space-y-2 p-4">
+          {filteredItems.map((item, index) => {
+            const isActive = pathname === item.href;
+            return (
+              <Link
+                key={item.name}
+                href={item.href}
+                style={{ animationDelay: `${index * 50}ms` }}
+                className={clsx(
+                  "group flex items-center rounded-xl px-4 py-3.5 text-sm font-semibold transition-all duration-300 relative overflow-hidden",
+                  isActive
+                    ? "bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-lg shadow-violet-500/50 scale-105"
+                    : "text-slate-300 dark:text-slate-400 hover:bg-slate-800 dark:hover:bg-slate-800/60 hover:text-white dark:hover:text-slate-100 hover:scale-105 hover:shadow-md",
+                  isCollapsed ? "justify-center" : "space-x-3"
+                )}
+              >
+                {/* Hover Effect Gradient */}
+                {!isActive && (
+                  <div className="absolute inset-0 bg-gradient-to-r from-violet-600/0 via-blue-600/0 to-violet-600/0 group-hover:from-violet-600/10 group-hover:via-blue-600/10 group-hover:to-violet-600/10 transition-all duration-500" />
+                )}
+
+                <item.icon className={clsx(
+                  "h-5 w-5 flex-shrink-0 relative z-10 transition-transform group-hover:scale-110",
+                  isActive ? "text-white" : "text-slate-400 dark:text-slate-500 group-hover:text-violet-400 dark:group-hover:text-violet-400"
+                )} />
+
+                {!isCollapsed && (
+                  <span className="relative z-10 animate-in fade-in slide-in-from-left-2 duration-300">{item.name}</span>
+                )}
+
+                {/* Active Indicator */}
+                {isActive && !isCollapsed && (
+                  <div className="absolute right-3 h-2 w-2 rounded-full bg-white animate-pulse" />
+                )}
+              </Link>
+            );
+          })}
+        </nav>
+
+        {/* User Section */}
+        {!isCollapsed && (
+          <div className="relative p-4 border-t border-slate-700 dark:border-white/10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <div className="rounded-xl bg-slate-800/50 dark:bg-slate-800/30 p-4 border border-slate-700 dark:border-white/5 space-y-3 relative overflow-hidden">
+              {/* Countdown Progress Bar */}
+              {showPersonalDetails && (
+                <div
+                  className="absolute top-0 left-0 h-0.5 bg-gradient-to-r from-violet-500 to-blue-500 transition-all duration-1000 ease-linear"
+                  style={{ width: `${(timeLeft / REVEAL_DURATION) * 100}%` }}
+                />
+              )}
+
+              <div className="flex items-center space-x-3">
+                <div className="h-10 w-10 rounded-full bg-gradient-to-br from-violet-500 to-blue-500 border border-white/10 flex items-center justify-center overflow-hidden shadow-inner">
+                  {user?.profile_picture_url ? (
+                    <img src={user.profile_picture_url} alt="Profile" className="h-full w-full object-cover" />
+                  ) : (
+                    <UserIcon size={20} className="text-white/80" />
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-sm font-bold text-white truncate">
+                    {user?.first_name || 'User'} {user?.last_name || ''}
+                  </p>
+                  <p className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">@{user?.username || 'rio_user'}</p>
+                </div>
+              </div>
+
+              <div className="space-y-1.5 border-t border-slate-700 pt-3 opacity-80">
+                <div className="flex items-center justify-between text-[11px] mb-1">
+                  <span className="text-slate-500 dark:text-slate-400 uppercase font-bold tracking-widest flex items-center">
+                    <ShieldCheck size={10} className="mr-1" /> Security
+                    {showPersonalDetails && (
+                      <span className="ml-2 flex items-center text-violet-400 animate-pulse">
+                        <Clock size={8} className="mr-1" /> {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+                      </span>
+                    )}
+                  </span>
+                  <button
+                    onClick={handleRequestReveal}
+                    className="text-violet-400 hover:text-white transition-colors"
+                  >
+                    {showPersonalDetails ? <EyeOff size={14} /> : <Eye size={14} />}
+                  </button>
+                </div>
+                <div className="flex items-center text-xs text-slate-300">
+                  <Mail size={12} className="mr-2 text-violet-400" />
+                  <span className="truncate">{showPersonalDetails ? (user?.email || 'user@example.com') : maskEmail(user?.email || '')}</span>
+                </div>
+                <div className="flex items-center text-xs text-slate-300">
+                  <Smartphone size={12} className="mr-2 text-blue-400" />
+                  <span>{showPersonalDetails ? (user?.phone_number || 'N/A') : maskPhone(user?.phone_number || '')}</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Logout & Footer */}
+        <div className="p-4 border-t border-slate-700 dark:border-white/10">
+          <button
+            onClick={logout}
+            className={clsx(
+              "group flex w-full items-center rounded-xl px-4 py-3 text-sm font-semibold text-slate-300 hover:bg-red-500/10 hover:text-red-500 transition-all duration-300",
+              isCollapsed ? "justify-center" : "space-x-3"
+            )}
+          >
+            <LogOut className="h-5 w-5 flex-shrink-0 transition-transform group-hover:translate-x-1" />
+            {!isCollapsed && <span>Log Out</span>}
+          </button>
+        </div>
+
+        <div className="relative p-4 border-t border-slate-700 dark:border-white/10">
+          <div className={clsx(
+            "rounded-xl bg-slate-800 dark:bg-gradient-to-br dark:from-violet-500/10 dark:to-blue-500/10 p-4 border border-slate-700 dark:border-violet-500/20",
+            isCollapsed ? "flex justify-center" : ""
+          )}>
+            <div className="flex items-center space-x-2">
+              <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-gradient-to-br from-green-400 to-emerald-600">
+                <div className="h-2 w-2 rounded-full bg-white animate-pulse" />
+              </div>
+              {!isCollapsed && (
+                <div>
+                  <p className="text-xs font-semibold text-slate-200 dark:text-slate-300">System Online</p>
+                  <p className="text-[10px] text-slate-400 dark:text-slate-500">All services active</p>
+                </div>
+              )}
             </div>
           </div>
         </div>
       </div>
-    </div>
+
+      {/* OTP Modal */}
+      {isOtpModalOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl space-y-6 relative overflow-hidden animate-in zoom-in-95 duration-300">
+            {/* Modal Background Decor */}
+            <div className="absolute -top-12 -right-12 h-32 w-32 bg-violet-600/20 rounded-full blur-3xl" />
+
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                <ShieldCheck className="text-violet-500" />
+                Identity Verification
+              </h3>
+              <button
+                onClick={() => setIsOtpModalOpen(false)}
+                className="text-slate-400 hover:text-white transition-colors"
+                disabled={isVerifyingOtp}
+              >
+                <X size={20} />
+              </button>
+            </div>
+
+            <p className="text-sm text-slate-400">
+              We've sent a 6-digit verification code to <strong>{maskEmail(user?.email || '')}</strong>. Enter it below to reveal your sensitive details.
+            </p>
+
+            <div className="space-y-4">
+              <div className="relative">
+                <input
+                  type="text"
+                  maxLength={6}
+                  value={otpValue}
+                  onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ""))}
+                  placeholder="000000"
+                  className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-center text-3xl tracking-[0.4em] font-mono text-white focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all placeholder:text-slate-600"
+                  disabled={isVerifyingOtp || isRequestingOtp}
+                  autoFocus
+                />
+                {isRequestingOtp && (
+                  <div className="absolute inset-0 bg-slate-900/50 flex items-center justify-center rounded-xl">
+                    <Loader2 className="animate-spin text-violet-500" />
+                  </div>
+                )}
+              </div>
+
+              {otpError && (
+                <p className="text-xs text-red-500 text-center animate-in shake duration-300">{otpError}</p>
+              )}
+
+              <button
+                onClick={handleVerifyReveal}
+                disabled={otpValue.length !== 6 || isVerifyingOtp || isRequestingOtp}
+                className="w-full py-3 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:scale-100 active:scale-95 flex items-center justify-center"
+              >
+                {isVerifyingOtp ? <Loader2 className="animate-spin mr-2" /> : "Verify & Reveal"}
+              </button>
+            </div>
+
+            <p className="text-[10px] text-center text-slate-500">
+              This code will expire in 10 minutes. Haven't received it? Check your spam folder.
+            </p>
+          </div>
+        </div>
+      )}
+    </>
   );
 }

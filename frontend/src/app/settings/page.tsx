@@ -102,7 +102,7 @@ export default function SettingsPage() {
     };
 
     return (
-        <div className="space-y-6 pb-8 max-w-4xl">
+        <div className="space-y-6 pb-8 text-slate-800 dark:text-slate-100">
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div>
@@ -354,8 +354,8 @@ export default function SettingsPage() {
                                     <button
                                         onClick={() => setVoiceEngine("mistral-deepgram-cartesia")}
                                         className={`flex items-center space-x-3 p-4 rounded-xl border-2 transition-all ${voiceEngine === "mistral-deepgram-cartesia"
-                                                ? 'border-red-600 bg-red-600/5 dark:bg-red-600/10'
-                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'
+                                            ? 'border-red-600 bg-red-600/5 dark:bg-red-600/10'
+                                            : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'
                                             }`}
                                     >
                                         <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-deepgram-cartesia" ? 'bg-red-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>

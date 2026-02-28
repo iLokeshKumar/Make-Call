@@ -10,6 +10,10 @@ interface User {
     mfa_enabled: boolean;
     is_active: boolean;
     email_verified: boolean;
+    first_name?: string;
+    last_name?: string;
+    phone_number?: string;
+    profile_picture_url?: string;
 }
 
 interface AuthContextType {

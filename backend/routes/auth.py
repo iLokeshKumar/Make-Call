@@ -1,6 +1,6 @@
 import random
 import uuid
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, select
 
 from database import get_session
-from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification
+from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification, RevealOTPVerify
 from auth import (
     verify_password, create_access_token, get_password_hash,
     get_current_active_user, generate_mfa_secret, get_mfa_provisioning_uri,
@@ -170,6 +170,9 @@ async def register_user(user: UserCreate, session: Session = Depends(get_session
         username=user.username,
         email=user.email,
         hashed_password=get_password_hash(user.password),
+        first_name=user.first_name,
+        last_name=user.last_name,
+        phone_number=user.phone_number,
         is_active=True,
         email_verified=False,
         verification_token=verification_token
@@ -225,3 +228,51 @@ async def resend_verification(data: ResendVerification, session: Session = Depen
 @router.get("/users/me", response_model=User)
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
+
+@router.post("/auth/reveal/request")
+async def request_reveal_otp(current_user: User = Depends(get_current_active_user), session: Session = Depends(get_session)):
+    otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
+    current_user.reveal_otp = otp
+    current_user.reveal_otp_expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    session.add(current_user)
+    session.commit()
+
+    subject = "Rio CRM: OTP for Data Reveal"
+    email_body = f"Hello {current_user.username},\n\nYour OTP to reveal sensitive data is: {otp}"
+    styled_html = get_styled_html(
+        "Data Reveal OTP",
+        f"You have requested to reveal sensitive contact information. Your verification code is:<br><br><span style='font-size: 24px; font-weight: bold; color: #7c3aed; letter-spacing: 5px;'>{otp}</span>",
+        current_user.username
+    )
+    
+    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    
+    return {"message": "OTP sent to your registered email"}
+
+@router.post("/auth/reveal/verify")
+async def verify_reveal_otp(verify: RevealOTPVerify, current_user: User = Depends(get_current_active_user), session: Session = Depends(get_session)):
+    if not current_user.reveal_otp or verify.token != current_user.reveal_otp:
+        raise HTTPException(status_code=400, detail="Invalid OTP")
+    
+    if current_user.reveal_otp_expires_at and datetime.now(timezone.utc).replace(tzinfo=None) > current_user.reveal_otp_expires_at.replace(tzinfo=None):
+         # Note: SQLModel might return naive datetimes or offset-aware depending on DB. 
+         # Best to normalize. I'll use timezone.utc throughout.
+         pass
+
+    # Re-comparing properly with timezone awareness
+    now = datetime.now(timezone.utc)
+    # Ensure reveal_otp_expires_at is timezone-aware if it's not
+    expires_at = current_user.reveal_otp_expires_at
+    if expires_at and expires_at.tzinfo is None:
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+    if expires_at and now > expires_at:
+        raise HTTPException(status_code=400, detail="OTP expired")
+    
+    # Clear the OTP after successful verification
+    current_user.reveal_otp = None
+    current_user.reveal_otp_expires_at = None
+    session.add(current_user)
+    session.commit()
+    
+    return {"message": "Verification successful", "email": current_user.email, "phone_number": current_user.phone_number}
