@@ -59,9 +59,9 @@ class STTService:
             return
 
         # Initialize helper with aggressiveness Level 1 (standard)
-        stt_helper = CartesiaSTT(api_key=CARTESIA_API_KEY, aggressiveness=1)
+        stt_helper = CartesiaSTT(api_key=CARTESIA_API_KEY)
         import audioop
-        
+        resample_state = None
         chunk_count = 0
         try:
             async for chunk in audio_generator:
@@ -71,14 +71,14 @@ class STTService:
                 # 1. Convert to Linear16
                 if encoding == "pcm_mulaw":
                     linear_8k = audioop.ulaw2lin(chunk, 2)
-                elif encoding == "linear16":
-                    linear_8k = chunk
+                #elif encoding == "linear16":
+                #    linear_8k = chunk
                 else:
                     linear_8k = chunk
 
                 # 2. Upsample from 8kHz to 16kHz for accurate VAD
                 try:
-                    linear_16k, _ = audioop.ratecv(linear_8k, 2, 1, 8000, 16000, None)
+                    linear_16k, resample_state = audioop.ratecv(linear_8k, 2, 1, 8000, 16000, resample_state)
                 except Exception as e:
                     logger.error(f"❌ Rate conversion (Cartesia) failed: {e}")
                     continue
@@ -91,7 +91,7 @@ class STTService:
                         yield {"transcript": transcript, "is_final": True}
                         
             # 4. Final flush
-            if stt_helper.buffer:
+            if stt_helper._speech_buffer:
                 transcript = await stt_helper.transcribe()
                 if transcript:
                     yield {"transcript": transcript, "is_final": True}
@@ -114,7 +114,7 @@ class STTService:
             return
 
         # Initialize helper with aggressiveness Level 1 (standard)
-        stt_helper = SarvamSTT(api_key=SARVAM_API_KEY, aggressiveness=1)
+        stt_helper = SarvamSTT(api_key=SARVAM_API_KEY, language="hi-IN")
         import audioop
         
         chunk_count = 0
@@ -146,7 +146,7 @@ class STTService:
                         yield {"transcript": transcript, "is_final": True}
                         
             # 4. Final flush
-            if stt_helper.buffer:
+            if stt_helper._speech_buffer:
                 transcript = await stt_helper.transcribe()
                 if transcript:
                     yield {"transcript": transcript, "is_final": True}

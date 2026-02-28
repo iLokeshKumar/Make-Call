@@ -110,7 +110,7 @@ class TTSService:
         
         payload = {
             "text": text,
-            "target_language_code": "en-IN",
+            "target_language_code": "hi-IN",
             "speaker": "shubh",
             "model": "bulbul:v3",
             "pace": 1.1,

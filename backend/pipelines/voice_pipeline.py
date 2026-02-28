@@ -38,84 +38,94 @@ class VoicePipeline:
         self.last_tts_start_time = 0.0
 
     async def run(self, engine_type: str = "mistral-cartesia"):
-        """
-        Main loop for the voice interaction.
-        """
-        try:
-            # 1. Start Speaker Loop (Wait for sentences)
-            speaker_task = asyncio.create_task(self._speaker_loop(engine_type))
+        speaker_task = asyncio.create_task(self._speaker_loop(engine_type))
+        audio_queue = asyncio.Queue()
 
-            # 2. Wait for the 'start' event from the telephony provider
-            # This ensures we have a stream_sid before we try to speak anything.
-            logger.info("⏳ Waiting for telephony stream to start...")
-            receiver = self.communicator.receive()
-            
-            # We consume from the receiver until we get the start SID
-            async for data in receiver:
-                event = data.get("event")
-                if event == "start":
+        async def _ingest():
+            async for data in self.communicator.receive():
+                await audio_queue.put(data)
+            await audio_queue.put({"event": "stop"})
+
+        ingest_task = asyncio.create_task(_ingest())
+
+        logger.info("⏳ Waiting for telephony stream to start...")
+        try:
+            while True:
+                data = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
+                if data.get("event") == "start":
                     self.communicator.stream_sid = data["start"]["streamSid"]
                     logger.info(f"🚀 [Twilio] Stream started. Sid: {self.communicator.stream_sid}")
                     break
-            
-            if not self.communicator.stream_sid:
-                logger.error("❌ Telephony 'start' event not received. Exiting.")
-                return
+                elif data.get("event") == "stop":
+                    logger.error("❌ Got stop before start. Exiting.")
+                    return
+        except asyncio.TimeoutError:
+            logger.error("❌ Timed out waiting for Twilio start event.")
+            return
 
-            # 3. Initial Greeting (Now safe to send)
-            greeting = "Hello, I'm Rio from Yexis Electronics! How can I help you today?"
-            await self.sentence_queue.put(greeting)
-            self.transcript_accumulator.append(f"Rio: {greeting}")
-            self.save_transcript()
-            
-            # 4. Audio Config
-            # Twilio sends 8kHz mulaw, but we transcode to 16kHz PCM for better STT quality.
-            # We pass these as strings ("pcm_s16le", "16000") to match the user's preferred protocol.
-            encoding, rate = "pcm_mulaw", "8000"
-            
-            # 5. STT Loop (Continuing from the same receiver)
-            stt_start_time = time.time()
-            last_final_transcript = ""
-            current_turn_transcript = ""
-            
-            async for result in self.stt_service.transcribe(self._audio_generator(receiver), engine_type, encoding, rate):
+        greeting = "Hello, I'm Rio from Yexis Electronics! How can I help you today?"
+        await self.sentence_queue.put(greeting)
+        self.transcript_accumulator.append(f"Rio: {greeting}")
+        self.save_transcript()
+
+        async def _audio_gen_from_queue():
+            chunk_count = 0
+            while True:
+                data = await audio_queue.get()
+                event = data.get("event")
+                if event == "media":
+                    chunk_count += 1
+                    if chunk_count == 1:
+                        logger.info("🎤 First audio chunk received from Twilio")
+                    yield base64.b64decode(data["media"]["payload"])
+                elif event == "stop":
+                    logger.info(f"🛑 [Twilio] Stream stopped. Total chunks: {chunk_count}")
+                    break
+
+        encoding, rate = "pcm_mulaw", "8000"
+        stt_start_time = time.time()
+        last_final_transcript = ""
+        current_turn_transcript = ""
+
+        try:
+            async for result in self.stt_service.transcribe(
+                _audio_gen_from_queue(), engine_type, encoding, rate
+            ):
                 transcript = result.get("transcript", "")
                 is_final = result.get("is_final", False)
                 res_type = result.get("type", "transcript")
-                
+
                 if transcript:
                     current_turn_transcript = transcript
-                
-                # Trigger LLM on final transcript OR eager End-of-Turn signal
+
                 if is_final or res_type == "end_of_turn":
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
                         continue
-                    
+
                     last_final_transcript = current_turn_transcript
                     logger.info(f"🎤 [STT] {'🎯 EOT' if res_type == 'end_of_turn' else '✅ FINAL'}: {current_turn_transcript}")
-                    
                     latency = time.time() - stt_start_time
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
-                    
+
                     if self.is_rio_speaking or not self.sentence_queue.empty():
                         await self._handle_barge_in(reason=current_turn_transcript)
 
-                    # --- FIX: Cancel ANY existing LLM task before starting a new one ---
                     if self.current_llm_task and not self.current_llm_task.done():
                         self.current_llm_task.cancel()
                         logger.info("♻️ Cancelled previous LLM task for new turn.")
 
-                    self.current_llm_task = asyncio.create_task(self._process_llm_response(current_turn_transcript, latency, engine_type))
+                    self.current_llm_task = asyncio.create_task(
+                        self._process_llm_response(current_turn_transcript, latency, engine_type)
+                    )
                     stt_start_time = time.time()
-                    current_turn_transcript = "" # Reset for next turn
-                    stt_start_time = time.time()
-                    current_turn_transcript = "" # Reset for next turn
-
-            await self.sentence_queue.put(None)
-            await speaker_task
+                    current_turn_transcript = ""
 
         except Exception as e:
-            logger.error(f"❌ [VoicePipeline] Error: {e}")
+            logger.error(f"❌ [VoicePipeline] STT loop error: {e}")
+        finally:
+            await self.sentence_queue.put(None)
+            await speaker_task
+            ingest_task.cancel()
 
     async def _speaker_loop(self, engine_type: str):
         """Continuously pulls sentences from the queue and speaks them."""

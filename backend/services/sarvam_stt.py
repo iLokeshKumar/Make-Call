@@ -1,105 +1,116 @@
 import io
 import wave
 import httpx
-import webrtcvad
 import logging
-from collections import deque
+import struct
+import math
 
 logger = logging.getLogger(__name__)
 
 class SarvamSTT:
-    def __init__(self, api_key: str, language: str = "en-IN", aggressiveness: int = 1):
-        """
-        Initializes the Sarvam REST STT helper with WebRTC VAD.
-        
-        Args:
-            api_key: Sarvam AI API subscription key.
-            language: Target language code (e.g., 'en-IN').
-            aggressiveness: VAD sensitivity (0-3). 1 is standard.
-        """
+    """
+    Utterance-based Sarvam STT using RMS energy VAD.
+    Works reliably on upsampled mulaw telephone audio.
+    """
+
+    SPEECH_RMS_THRESHOLD = 150
+    SILENCE_FRAMES_NEEDED = 20    # ~400ms at 20ms frames
+    MIN_SPEECH_FRAMES = 5         # ~100ms minimum
+
+    def __init__(self, api_key: str, language: str = "en-IN"):
         self.api_key = api_key
         self.language = language
-        self.vad = webrtcvad.Vad(aggressiveness)
-        self.buffer: list[bytes] = []
-        self.silence_frames = 0
-        self.is_recording = False
-        
-        # 30 frames of 20ms = 600ms of silence to trigger utterance end
-        self.SILENCE_THRESHOLD = 30 
+        self._incoming = b""
+        self._speech_buffer = b""
+        self.silence_counter = 0
+        self.speech_frame_count = 0
+        self.is_speech_active = False
 
-    def process_chunk(self, pcm16k: bytes) -> bool:
+    @staticmethod
+    def _rms(frame: bytes) -> float:
+        if len(frame) < 2:
+            return 0.0
+        samples = struct.unpack(f"<{len(frame)//2}h", frame)
+        return math.sqrt(sum(s * s for s in samples) / len(samples))
+
+    def process_chunk(self, pcm_16k: bytes) -> bool:
         """
-        Feed 16kHz PCM data.
-        Returns True when an utterance is complete (silence detected).
+        Feed 16kHz PCM. Returns True when utterance ends.
+        Uses RMS energy — reliable on any telephone audio.
         """
-        # VAD expects exactly 10ms, 20ms, or 30ms frames at 16kHz.
-        # 20ms = 320 samples = 640 bytes.
-        frame_size = 640
-        frames = [pcm16k[i:i+frame_size] for i in range(0, len(pcm16k), frame_size)]
-        
-        for frame in frames:
-            if len(frame) < frame_size:
-                continue
-            
-            is_speech = self.vad.is_speech(frame, 16000)
-            
+        self._incoming += pcm_16k
+        frame_size = 640  # 20ms @ 16kHz
+
+        while len(self._incoming) >= frame_size:
+            frame = self._incoming[:frame_size]
+            self._incoming = self._incoming[frame_size:]
+
+            rms = self._rms(frame)
+            logger.debug(f"🔊 [Sarvam] RMS: {rms:.0f}")
+            is_speech = rms > self.SPEECH_RMS_THRESHOLD
+
             if is_speech:
-                if not self.is_recording:
-                    logger.info("🔊 Speech started...")
-                    self.is_recording = True
-                self.buffer.append(frame)
-                self.silence_frames = 0
-            elif self.is_recording:
-                self.silence_frames += 1
-                self.buffer.append(frame) # Keep some silence frames for context
-                if self.silence_frames >= self.SILENCE_THRESHOLD:
-                    logger.info("🤫 Silence detected. Utterance complete.")
-                    self.is_recording = False
-                    return True
+                if not self.is_speech_active:
+                    logger.info(f"🔊 [Sarvam] Speech started (RMS: {rms:.0f})")
+                self.is_speech_active = True
+                self.silence_counter = 0
+                self.speech_frame_count += 1
+                self._speech_buffer += frame
+
+            elif self.is_speech_active:
+                self._speech_buffer += frame
+                self.silence_counter += 1
+
+                if self.silence_counter >= self.SILENCE_FRAMES_NEEDED:
+                    if self.speech_frame_count >= self.MIN_SPEECH_FRAMES:
+                        logger.info(f"🤫 [Sarvam] Utterance complete. Speech frames: {self.speech_frame_count}")
+                        self.silence_counter = 0
+                        self.speech_frame_count = 0
+                        self.is_speech_active = False
+                        return True
+                    else:
+                        logger.debug(f"[Sarvam] Noise burst ignored ({self.speech_frame_count} frames)")
+                        self._speech_buffer = b""
+                        self.silence_counter = 0
+                        self.speech_frame_count = 0
+                        self.is_speech_active = False
+
         return False
 
-    def get_wav_bytes(self) -> bytes:
-        """Converts buffered PCM into a WAV file in memory."""
-        audio_data = b"".join(self.buffer)
-        self.buffer = []
-        self.silence_frames = 0
-        
+    def _get_wav_bytes(self) -> bytes:
+        audio_data = self._speech_buffer
+        self._speech_buffer = b""
         buf = io.BytesIO()
         with wave.open(buf, "wb") as wf:
             wf.setnchannels(1)
-            wf.setsampwidth(2) # 16-bit
+            wf.setsampwidth(2)
             wf.setframerate(16000)
             wf.writeframes(audio_data)
-        
         return buf.getvalue()
 
     async def transcribe(self) -> str:
-        """
-        Sends the buffered audio to Sarvam REST API and returns the transcript.
-        """
-        wav_bytes = self.get_wav_bytes()
-        if not wav_bytes or len(wav_bytes) < 1000: # Ignore tiny noise
+        wav_bytes = self._get_wav_bytes()
+        if len(wav_bytes) < 1000:
             return ""
-            
-        logger.info(f"📡 Transcribing {len(wav_bytes)} bytes via Sarvam REST API...")
-        
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            try:
+
+        logger.info(f"📡 [Sarvam] Sending {len(wav_bytes)} bytes...")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.post(
                     "https://api.sarvam.ai/speech-to-text",
                     headers={"api-subscription-key": self.api_key},
                     files={"file": ("audio.wav", wav_bytes, "audio/wav")},
                     data={
                         "language_code": self.language,
-                        "model": "saarika:v2", # More stable for REST
+                        "model": "saarika:v2.5",
                         "with_timestamps": "false",
                     }
                 )
                 resp.raise_for_status()
-                result = resp.json()
-                transcript = result.get("transcript", "").strip()
-                logger.info(f"🛰️ Transcript: '{transcript}'")
+                transcript = resp.json().get("transcript", "").strip()
+                if transcript:
+                    logger.info(f"🛰️ [Sarvam STT] '{transcript}'")
                 return transcript
-            except Exception as e:
-                logger.error(f"❌ Sarvam REST error: {e}")
-                return ""
+        except Exception as e:
+            logger.error(f"❌ Sarvam REST error: {e}")
+            return ""
