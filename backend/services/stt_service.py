@@ -28,7 +28,8 @@ logger = logging.getLogger(__name__)
 
 class STTService:
     def __init__(self):
-        pass
+        self.last_provider = None
+        self.last_model = None
 
     async def transcribe(self, audio_generator, engine_type: str, encoding: str = "linear16", sample_rate: int = 8000):
         """
@@ -58,6 +59,9 @@ class STTService:
             yield {"transcript": "[Error: Cartesia API Key Missing]", "is_final": True}
             return
 
+        self.last_provider = "Cartesia"
+        self.last_model = "sonic-3"
+        
         # Initialize helper with aggressiveness Level 1 (standard)
         stt_helper = CartesiaSTT(api_key=CARTESIA_API_KEY)
         import audioop
@@ -113,6 +117,9 @@ class STTService:
             yield {"transcript": "[Error: Sarvam API Key Missing]", "is_final": True}
             return
 
+        self.last_provider = "Sarvam"
+        self.last_model = "bulbul:v3"
+
         # Initialize helper with aggressiveness Level 1 (standard)
         stt_helper = SarvamSTT(api_key=SARVAM_API_KEY, language="hi-IN")
         import audioop
@@ -165,6 +172,8 @@ class STTService:
         dg_encoding = "mulaw" if "mulaw" in encoding else encoding
         
         logger.info(f"🎙️ Deepgram STT using: {dg_encoding} @ {sample_rate}Hz")
+        self.last_provider = "Deepgram"
+        self.last_model = "nova-2"
         
         url = f"wss://api.deepgram.com/v1/listen?model=nova-2&encoding={dg_encoding}&sample_rate={sample_rate}&interim_results=true"
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}

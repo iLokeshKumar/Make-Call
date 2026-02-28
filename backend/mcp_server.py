@@ -5,7 +5,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from sqlmodel import select
-from models.models import Lead, Interaction, Product, Appointment, LatencyLog
+from models.models import Lead, Interaction, Product, Appointment, LatencyLog, Outcome
 from rag_service import search_products, sync_products_to_chroma
 
 load_dotenv()
@@ -23,7 +23,7 @@ SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Import email service for MCP tool use
 try:
-    from email_service import send_smtp_email
+    from email_service import send_smtp_email, get_styled_html
     EMAIL_SERVICE_AVAILABLE = True
 except ImportError:
     EMAIL_SERVICE_AVAILABLE = False
@@ -243,6 +243,62 @@ def check_guardrails(requested_discount_percent: float, requested_price: float =
         }
 
 @mcp.tool()
+def send_email(phone: str, email: str, subject: str, body: str) -> dict:
+    """
+    Sends an email to a lead and logs it in the interaction history.
+    Args:
+    - phone: The lead's phone number to link the interaction.
+    - email: The email address (captured during call).
+    - subject: Email subject.
+    - body: Email content (markdown or plain text).
+    """
+    logger.info(f"[send_email] Sending to {email} for phone {phone}")
+    with SessionLocal() as session:
+        # 1. Fetch lead
+        statement = select(Lead).where(Lead.phone == phone)
+        lead = session.execute(statement).scalar_one_or_none()
+        
+        # Priority: provided email > DB email
+        target_email = email or (lead.email if lead else None)
+        if not target_email:
+            return {"success": False, "message": "No email address available. Please ask user for email."}
+
+        # 2. Update lead email if new
+        if lead and email and lead.email != email:
+            lead.email = email
+            lead.notes = (lead.notes or "") + f"\n[AI]: Captured email address: {email}"
+            session.add(lead)
+            session.commit()
+
+        # 3. Send Email
+        html_content = get_styled_html(subject, body, lead.name if lead else "Valued Customer")
+        success = send_smtp_email(target_email, subject, body, html_body=html_content)
+
+        if success:
+            # 4. Log Interaction
+            interaction = Interaction(
+                lead_id=lead.id if lead else 0,
+                type="Email",
+                content=f"Sent Email: {subject}",
+                timestamp=datetime.now(timezone.utc)
+            )
+            session.add(interaction)
+
+            # 5. Track Outcome (Stage: Interest)
+            outcome = Outcome(
+                lead_id=lead.id if lead else 0,
+                type="EMAIL_SENT",
+                stage="Interest",
+                potential_value=1200.0,
+                probability=0.05 
+            )
+            session.add(outcome)
+            session.commit()
+            return {"success": True, "message": f"Email '{subject}' sent to {target_email} and logged."}
+        else:
+            return {"success": False, "message": "SMTP failure. Check environmental variables."}
+
+@mcp.tool()
 def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None) -> dict:
     """
     Book a meeting/demo for a qualified lead with Google Meet link.
@@ -441,6 +497,16 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                     )
                     email_sent = True
                     logger.info(f"[book_meeting] Email sent to {lead_dict['email']}")
+                    
+                    # Log Interaction for the Confirmation Email
+                    interaction = Interaction(
+                        lead_id=lead_id,
+                        type="Email",
+                        content=f"Sent Email: {email_subject}",
+                        timestamp=datetime.now(timezone.utc)
+                    )
+                    session.add(interaction)
+                    session.commit()
                     
                 except Exception as e:
                     email_error = str(e)

@@ -15,6 +15,8 @@ class LLMService:
     def __init__(self, system_prompt: str):
         self.system_prompt = system_prompt
         self.messages = [{"role": "system", "content": system_prompt}]
+        self.provider = "Mistral"
+        self.model = "mistral-large-latest"
 
     def add_user_message(self, content: str):
         self.messages.append({"role": "user", "content": content})

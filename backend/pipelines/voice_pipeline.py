@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import base64
 import logging
 import time
@@ -224,16 +225,15 @@ class VoicePipeline:
         if self.current_llm_task and not self.current_llm_task.done():
             self.current_llm_task.cancel()
 
-    def save_latency(self, engine_name, stt, llm, tts):
+    def save_latency(self, engine_name, stt, llm, tts, stt_p=None, stt_m=None, llm_p=None, llm_m=None, tts_p=None, tts_m=None):
         """Saves turn-level latency metrics to DB."""
         try:
-            # Handle non-integer interaction_id
+            # Handle non-integer interaction_id (e.g., session strings)
             try:
                 interaction_id_int = int(self.interaction_id)
             except (ValueError, TypeError):
-                logger.debug(f"Skipping DB latency log for non-integer interaction_id: {self.interaction_id}")
-                logger.info(f"⏱️ [Latency] STT: {stt:.2f}s | LLM: {llm:.2f}s | TTS: {tts:.2f}s")
-                return
+                interaction_id_int = None
+                logger.debug(f"ℹ️ Interaction ID '{self.interaction_id}' is a session string. Saving latency as anonymous.")
 
             log = LatencyLog(
                 interaction_id=interaction_id_int,
@@ -241,28 +241,68 @@ class VoicePipeline:
                 stt_ms=round(stt * 1000, 2),
                 llm_ms=round(llm * 1000, 2),
                 tts_ms=round(tts * 1000, 2),
-                total_ms=round((stt + llm + tts) * 1000, 2)
+                total_ms=round((stt + llm + tts) * 1000, 2),
+                stt_provider=stt_p,
+                stt_model=stt_m,
+                llm_provider=llm_p,
+                llm_model=llm_m,
+                tts_provider=tts_p,
+                tts_model=tts_m,
+                notes=f"ID: {self.interaction_id}" if interaction_id_int is None else None
             )
             self.session.add(log)
             self.session.commit()
-            logger.info(f"⏱️ [Latency Saved] Total: {log.total_ms}ms")
+            
+            # Detailed Logging
+            logger.info(
+                f"⏱️ [Latency Saved] {engine_name} | Total: {log.total_ms}ms\n"
+                f"   🎙️ STT: {stt*1000:.0f}ms ({stt_p}/{stt_m})\n"
+                f"   🧠 LLM: {llm*1000:.0f}ms ({llm_p}/{llm_m})\n"
+                f"   🔊 TTS: {tts*1000:.0f}ms ({tts_p}/{tts_m})"
+            )
         except Exception as e:
-            logger.error(f"Error saving latency: {e}")
+            logger.error(f"❌ Error saving latency: {e}")
 
-    def save_transcript(self):
-        """Saves transcript to Interaction table."""
+    def save_transcript(self, engine_name="voice_call"):
+        """Saves transcript to Interaction table. Upserts if record exists."""
         try:
+            full_transcript = "\n".join(self.transcript_accumulator)
+            if not full_transcript.strip():
+                return
+
             try:
                 interaction_id_int = int(self.interaction_id)
-            except (ValueError, TypeError): return
+            except (ValueError, TypeError):
+                interaction_id_int = None
 
-            db_i = self.session.get(Interaction, interaction_id_int)
-            if db_i:
-                db_i.transcript = "\n".join(self.transcript_accumulator)
+            db_i = None
+            if interaction_id_int:
+                db_i = self.session.get(Interaction, interaction_id_int)
+            
+            if not db_i:
+                # Try to find a lead if we have a phone number (not implemented in VoicePipeline but good pattern)
+                # For now, create a new Interaction record
+                db_i = Interaction(
+                    lead_id=0, # Anonymous lead
+                    type="call",
+                    content=f"Voice Interaction ({engine_name})",
+                    transcript=full_transcript,
+                    timestamp=datetime.now(timezone.utc)
+                )
                 self.session.add(db_i)
                 self.session.commit()
+                self.session.refresh(db_i)
+                # If we're now assigning an ID, update our internal reference
+                if not interaction_id_int:
+                    self.interaction_id = str(db_i.id)
+            else:
+                db_i.transcript = full_transcript
+                self.session.add(db_i)
+                self.session.commit()
+                
+            logger.debug(f"📜 [Transcript Saved] ID: {db_i.id} | Length: {len(full_transcript)} chars")
         except Exception as e:
-            logger.error(f"Error saving transcript: {e}")
+            logger.error(f"❌ Error saving transcript: {e}")
 
     async def _process_llm_response(self, user_input, stt_latency, engine_type):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
@@ -288,7 +328,18 @@ class VoicePipeline:
                     self.llm_service.add_assistant_message(full_reply)
                     self.transcript_accumulator.append(f"Rio: {full_reply}")
                     self.save_transcript()
-                    self.save_latency(engine_type, stt_latency, llm_latency, self.tts_service.last_tts_latency)
+                    self.save_latency(
+                        engine_type, 
+                        stt_latency, 
+                        llm_latency, 
+                        self.tts_service.last_tts_latency,
+                        stt_p=self.stt_service.last_provider,
+                        stt_m=self.stt_service.last_model,
+                        llm_p=self.llm_service.provider,
+                        llm_m=self.llm_service.model,
+                        tts_p=self.tts_service.last_provider,
+                        tts_m=self.tts_service.last_model
+                    )
                 
                 if tool_calls:
                     self.llm_service.add_assistant_message(full_reply, tool_calls=tool_calls)

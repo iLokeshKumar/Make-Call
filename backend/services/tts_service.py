@@ -18,6 +18,8 @@ logger = logging.getLogger(__name__)
 class TTSService:
     def __init__(self):
         self.last_tts_latency = 0
+        self.last_provider = None
+        self.last_model = None
 
     async def speak(self, text: str, engine_type: str, communicator, cartesia_ws=None, aiohttp_session=None, deepgram_ws=None, elevenlabs_ws=None, context_id=None):
         """
@@ -89,6 +91,8 @@ class TTSService:
                         await _stream_on_ws(ws)
 
             self.last_tts_latency = tts_first_byte_time
+            self.last_provider = "Cartesia"
+            self.last_model = "sonic-3"
             logger.info(f"✅ [Cartesia TTS] Complete (aiohttp). First byte: {tts_first_byte_time:.3f}s")
         except Exception as e:
             logger.error(f"❌ [Cartesia TTS] Error: {e}")
@@ -140,6 +144,8 @@ class TTSService:
                         await _stream_on_response(response)
             
             self.last_tts_latency = tts_first_byte_time
+            self.last_provider = "Sarvam"
+            self.last_model = "bulbul:v3"
             logger.info(f"✅ [Sarvam TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
         except Exception as e:
             logger.error(f"❌ [Sarvam TTS] Error: {e}")
@@ -188,6 +194,8 @@ class TTSService:
                         await _stream_on_ws(ws)
             
             self.last_tts_latency = tts_first_byte_time
+            self.last_provider = "Deepgram"
+            self.last_model = DEEPGRAM_VOICE
             logger.info(f"✅ [Deepgram TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
         except Exception as e:
             logger.error(f"❌ [Deepgram TTS] Error: {e}")
@@ -245,6 +253,8 @@ class TTSService:
                         await _stream_on_ws(ws)
             
             self.last_tts_latency = tts_first_byte_time
+            self.last_provider = "ElevenLabs"
+            self.last_model = "eleven_turbo_v2_5"
             logger.info(f"🔊 [ElevenLabs] TTS complete. First byte: {tts_first_byte_time:.3f}s")
         except Exception as e:
             logger.error(f"❌ [ElevenLabs TTS] Error: {e}")
