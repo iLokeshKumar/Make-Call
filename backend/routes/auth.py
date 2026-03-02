@@ -9,7 +9,7 @@ from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, select
 
 from database import get_session
-from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification, RevealOTPVerify
+from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification, RevealOTPVerify, UserUpdate
 from auth import (
     verify_password, create_access_token, get_password_hash,
     get_current_active_user, generate_mfa_secret, get_mfa_provisioning_uri,
@@ -227,6 +227,24 @@ async def resend_verification(data: ResendVerification, session: Session = Depen
 
 @router.get("/users/me", response_model=User)
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
+    return current_user
+
+@router.patch("/users/me", response_model=User)
+async def update_users_me(
+    user_update: UserUpdate,
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    update_data = user_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(current_user, key, value)
+    
+    current_user.updated_at = datetime.now(timezone.utc)
+    current_user.updated_by = current_user.username
+    
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
     return current_user
 
 @router.post("/auth/reveal/request")

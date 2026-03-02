@@ -114,7 +114,7 @@ class TTSService:
         
         payload = {
             "text": text,
-            "target_language_code": "hi-IN",
+            "target_language_code": "en-IN",
             "speaker": "shubh",
             "model": "bulbul:v3",
             "pace": 1.1,
@@ -135,13 +135,21 @@ class TTSService:
                     await communicator.send_media(payload_b64)
 
         try:
-            if aiohttp_session:
-                async with aiohttp_session.post(url, headers=headers, json=payload) as response:
+            session = aiohttp_session or aiohttp.ClientSession()
+            should_close = aiohttp_session is None
+            try:
+                async with session.post(url, headers=headers, json=payload) as response:
                     await _stream_on_response(response)
-            else:
-                async with aiohttp.ClientSession() as session:
-                    async with session.post(url, headers=headers, json=payload) as response:
-                        await _stream_on_response(response)
+            finally:
+                if should_close:
+                    await session.close()
+            #if aiohttp_session:
+            #    async with aiohttp_session.post(url, headers=headers, json=payload) as response:
+            #        await _stream_on_response(response)
+            #else:
+            #    async with aiohttp.ClientSession() as session:
+            #        async with session.post(url, headers=headers, json=payload) as response:
+            #            await _stream_on_response(response)
             
             self.last_tts_latency = tts_first_byte_time
             self.last_provider = "Sarvam"
@@ -213,6 +221,7 @@ class TTSService:
         
         async def _stream_on_ws(ws):
             nonlocal tts_first_byte_time
+            el_resample_state = None
             await ws.send_json({
                 "text": " ",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
@@ -229,9 +238,9 @@ class TTSService:
                             tts_first_byte_time = time.time() - tts_start_time
                         
                         pcm_16k = base64.b64decode(data["audio"])
-                        pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
+                        pcm_8k, el_resample_state = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, el_resample_state)
                         ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                        b64_audio = base64.b64encode(ulaw_8k).decode("utf-8")
+                        b64_audio = base64.b64encode(ulaw_8k).decode()
                         
                         await communicator.send_media(b64_audio)
                     

@@ -42,7 +42,8 @@ class GoogleMeetGenerator:
                 SCOPES
             )
             
-            self.credentials = flow.run_local_server(port=0)
+            # Use a fixed port to match Authorized Redirect URIs in Google Console
+            self.credentials = flow.run_local_server(port=3010)
             
             # Save credentials for future use
             with open('token.pickle', 'wb') as token:

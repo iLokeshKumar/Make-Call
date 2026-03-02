@@ -16,16 +16,26 @@ export default function Home() {
   });
 
   const [activities, setActivities] = useState<any[]>([]);
-  const { token } = useAuth();
+  const { token, sessionTimeout } = useAuth();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function fetchData() {
+      if (!token || token.split('.').length !== 3) {
+        setLoading(false);
+        return;
+      }
       try {
         // Fetch Stats
         const statsRes = await fetch("http://localhost:6060/dashboard/stats", {
           headers: { "Authorization": `Bearer ${token}` }
         });
+
+        if (statsRes.status === 401) {
+          sessionTimeout();
+          return;
+        }
+
         if (statsRes.ok) {
           const data = await statsRes.json();
           setStatsData(data);
@@ -35,6 +45,11 @@ export default function Home() {
         const leadsRes = await fetch("http://localhost:6060/leads", {
           headers: { "Authorization": `Bearer ${token}` }
         });
+
+        if (leadsRes.status === 401) {
+          sessionTimeout();
+          return;
+        }
         if (leadsRes.ok) {
           const leads = await leadsRes.json();
           // Map latest 5 leads to activity format

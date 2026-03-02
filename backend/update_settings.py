@@ -8,7 +8,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 engine = create_engine(DATABASE_URL)
 
 new_instruction = """
-You are Rio, a friendly AI sales assistant for Yexis Electronics.
+You are Rio, a friendly AI sales assistant for {company_name}.
 Southern India's authorized Samsung wholesale distributor (Mobility, Displays, HVAC).
 
 **STRICT VOICE RULES (MANDATORY):**

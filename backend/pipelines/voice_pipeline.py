@@ -20,12 +20,13 @@ from models.models import Interaction, LatencyLog
 logger = logging.getLogger(__name__)
 
 class VoicePipeline:
-    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session):
+    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, company_name: str = "Yexis Electronics"):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
         self.transcript_accumulator = transcript_accumulator
         self.session = session
+        self.company_name = company_name
         
         self.llm_service = LLMService(system_prompt)
         self.tts_service = TTSService()
@@ -64,7 +65,7 @@ class VoicePipeline:
             logger.error("❌ Timed out waiting for Twilio start event.")
             return
 
-        greeting = "Hello, I'm Rio from Yexis Electronics! How can I help you today?"
+        greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         await self.sentence_queue.put(greeting)
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
@@ -169,11 +170,9 @@ class VoicePipeline:
                         logger.warning("⚠️ Speaker loop waiting for stream_sid...")
                         await asyncio.sleep(0.5)
 
-                    # --- ADDING: Persistent WebSocket Health Check & Reconnect ---
                     if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
                         if not c_ws or c_ws.closed:
                             from utils.config import CARTESIA_API_KEY
-                            # Using the latest cartesia_version as suggested by the user
                             c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
                             c_ws = await session.ws_connect(c_url)
                             logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
@@ -184,25 +183,60 @@ class VoicePipeline:
                     
                     self.is_rio_speaking = True
                     self.last_tts_start_time = time.time()
-                    self.current_tts_task = asyncio.create_task(
-                        self.tts_service.speak(
-                            text=sentence, 
-                            engine_type=engine_type, 
-                            communicator=self.communicator, 
-                            cartesia_ws=c_ws,
-                            aiohttp_session=session,
-                            deepgram_ws=dg_ws,
-                            elevenlabs_ws=el_ws,
-                            context_id=turn_context_id
+
+                    # For Cartesia: fire TTS request AND immediately check for next sentence
+                    # Cartesia queues them server-side via context_id
+                    if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"] and c_ws:
+                        self.current_tts_task = asyncio.create_task(
+                            self.tts_service.speak(
+                                text=sentence,
+                                engine_type=engine_type,
+                                communicator=self.communicator,
+                                cartesia_ws=c_ws,
+                                context_id=turn_context_id
+                            )
                         )
-                    )
-                    try:
-                        await self.current_tts_task
-                    except asyncio.CancelledError:
-                        logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
-                    finally:
-                        self.is_rio_speaking = False
-                        self.sentence_queue.task_done()
+                        # While Cartesia streams audio, peek at queue for next sentence
+                        # and pre-send it — overlaps network+processing time
+                        #self.current_tts_task = asyncio.create_task(
+                            #self.tts_service.speak(
+                                #text=sentence, 
+                                #engine_type=engine_type, 
+                                #communicator=self.communicator, 
+                                #cartesia_ws=c_ws,
+                                #aiohttp_session=session,
+                                #deepgram_ws=dg_ws,
+                                #elevenlabs_ws=el_ws,
+                                #context_id=turn_context_id
+                            #)
+                        #)
+                        try:
+                            await self.current_tts_task
+                        except asyncio.CancelledError:
+                            logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                        finally:
+                            self.is_rio_speaking = False
+                            self.sentence_queue.task_done()
+                    else:
+                        self.current_tts_task = asyncio.create_task(
+                            self.tts_service.speak(
+                                text=sentence, 
+                                engine_type=engine_type, 
+                                communicator=self.communicator, 
+                                cartesia_ws=c_ws,
+                                aiohttp_session=session,
+                                deepgram_ws=dg_ws,
+                                elevenlabs_ws=el_ws,
+                                context_id=turn_context_id
+                            )
+                        )
+                        try:
+                            await self.current_tts_task
+                        except asyncio.CancelledError:
+                            logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                        finally:
+                            self.is_rio_speaking = False
+                            self.sentence_queue.task_done() 
             
             finally:
                 # Cleanup persistent WebSockets

@@ -9,7 +9,7 @@ from utils.config import mistral_client
 logger = logging.getLogger(__name__)
 
 # Sentence splitting regex for low-latency streaming
-SENTENCE_SPLIT_REGEX = re.compile(r'([.?!])\s+')
+SENTENCE_SPLIT_REGEX = re.compile(r'([.?!,;])\s+')
 
 class LLMService:
     def __init__(self, system_prompt: str):

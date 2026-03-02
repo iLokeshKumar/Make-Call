@@ -1,4 +1,3 @@
-# backend/communicators/exotel.py
 import json
 import base64
 import logging

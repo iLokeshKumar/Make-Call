@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut,
-  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock
+  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -15,6 +15,7 @@ const navItems = [
   { name: "Leads", href: "/leads", icon: Users },
   { name: "Inventory", href: "/inventory", icon: Package, adminOnly: true },
   { name: "Calls", href: "/calls", icon: Phone },
+  { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Settings", href: "/settings", icon: Settings, adminOnly: true },
 ];
 
@@ -146,11 +147,11 @@ export default function Sidebar() {
             </div>
             {!isCollapsed && (
               <div className="animate-in fade-in slide-in-from-left-2 duration-300">
-                <h1 className="text-2xl font-bold tracking-tight">
-                  <span className="gradient-text">Rio</span>
+                <h1 className="text-xl font-bold tracking-tight truncate max-w-[180px]">
+                  <span className="gradient-text">{user?.company_name || "Rio"}</span>
                   <span className="text-slate-200 dark:text-slate-200 ml-1">CRM</span>
                 </h1>
-                <p className="text-xs text-slate-400 dark:text-slate-400 font-medium">AI Sales Assistant</p>
+                <p className="text-[10px] text-slate-400 dark:text-slate-400 font-medium uppercase tracking-tighter">AI Sales Assistant</p>
               </div>
             )}
           </div>

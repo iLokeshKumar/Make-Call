@@ -115,7 +115,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RIO_PERSONA_PROMPT = """You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
+RIO_PERSONA_PROMPT = """You are Rio, a Senior Sales Consultant at {company_name}. You are NOT a bot; you are a professional sales representative.
 
 **ROLE**: Senior Sales Consultant
 - Your tone is professional, empathetic, and knowledgeable.
@@ -1544,7 +1544,7 @@ class ExotelCommunicator(TelephonyCommunicator):
         payload = {"event": "clear"}
         await self.websocket.send_json(payload)
 
-async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
+async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, company_name=None):
     """Handles the Native Multimodal Live API logic for Gemini."""
     
     logger.info(f"🤖 [LLM] Selected: GEMINI 2.0 Flash")
@@ -1639,7 +1639,7 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
                     print(f"Telephony Send Error: {e}")
 
             # Trigger initial greeting for outbound calls
-            greeting = "Hello, I me Rio from Adomita Technologies. How can I help you today?"
+            greeting = f"Hello, I am Rio from {company_name}. How can I help you today?"
             logger.info(f"🤖 [Gemini] Sending initial greeting: {greeting}")
             await gemini_session.send(input={"text": greeting})
             transcript_accumulator.append(f"Rio: {greeting}")
@@ -1842,11 +1842,16 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
     active_engine = engine_setting.value if engine_setting else "gemini"
     
-    verbosity_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
     verbosity = verbosity_setting.value if verbosity_setting else "2"
+    
+    # Fetch Company Branding from Admin User
+    admin = session.exec(select(User).where(User.role == "admin")).first()
+    company_name = admin.company_name if admin and admin.company_name else "Yexis Electronics"
+    
+    dynamic_instruction = dynamic_instruction.replace("{company_name}", company_name)
     dynamic_instruction = apply_verbosity_rules(dynamic_instruction, verbosity)
     
-    print(f"Twilio connected to media-stream WS (Engine: {active_engine.upper()}) | Interaction ID: {interaction_id} | Verbosity: {verbosity}")
+    print(f"Twilio connected to media-stream WS (Engine: {active_engine.upper()}) | Company: {company_name} | Interaction ID: {interaction_id} | Verbosity: {verbosity}")
 
     if interaction_id:
         try:
@@ -1861,11 +1866,11 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
 
     communicator = TwilioCommunicator(websocket)
     if active_engine.startswith("mistral"):
-        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine)
+        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine, company_name=company_name)
     else:
-        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
+        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, company_name=company_name)
 
-async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type="mistral"):
+async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type="mistral", company_name=None):
     """Orchestrates STT, Mistral (LLM with MCP tools), and TTS based on engine_type."""
     
     
@@ -2248,7 +2253,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             speaker_loop_task = asyncio.create_task(speaker_loop())
             
             # Start with a greeting for outbound calls
-            greeting = "Hello, I'm Rio from Adomita. I see you're interested in our services. How can I help you today?"
+            greeting = f"Hello, I'm Rio from {company_name}. I see you're interested in our services. How can I help you today?"
             await sentence_queue.put(greeting)
             transcript_accumulator.append(f"Rio: {greeting}")
             save_transcript(interaction_id, transcript_accumulator)
@@ -2424,7 +2429,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                 logger.info(f"🚀 [Mistral] Starting Deepgram STT for {engine_type}...")
                 
                 # Start with a greeting for outbound calls
-                greeting = "Hello, I'm Rio from Adomita Technologies. How can I help you today?"
+                greeting = f"Hello, I'm Rio from {company_name}. How can I help you today?"
                 asyncio.create_task(speak(greeting))
                 transcript_accumulator.append(f"Rio: {greeting}")
                 save_transcript(interaction_id, transcript_accumulator)

@@ -14,7 +14,7 @@ const themeOptions = [
 
 export default function SettingsPage() {
     const { theme, setTheme } = useTheme();
-    const { user, token } = useAuth();
+    const { user, token, sessionTimeout } = useAuth();
     const [systemInstruction, setSystemInstruction] = useState("");
     const [voiceEngine, setVoiceEngine] = useState("gemini");
     const [telephonyEngine, setTelephonyEngine] = useState("twilio");
@@ -31,6 +31,10 @@ export default function SettingsPage() {
                 const res = await fetch(`${API_BASE}/settings`, {
                     headers: { "Authorization": `Bearer ${token}` }
                 });
+                if (res.status === 401) {
+                    sessionTimeout();
+                    return;
+                }
                 const data = await res.json();
                 setSystemInstruction(data.system_instruction);
                 setVoiceEngine(data.voice_engine || "gemini");
@@ -90,6 +94,10 @@ export default function SettingsPage() {
                     ai_verbosity: aiVerbosity
                 }),
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             if (res.ok) {
                 setSaveSuccess(true);
                 setTimeout(() => setSaveSuccess(false), 3000);

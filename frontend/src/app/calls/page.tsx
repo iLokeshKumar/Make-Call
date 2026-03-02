@@ -15,7 +15,7 @@ interface Interaction {
 
 export default function CallsPage() {
     const [calls, setCalls] = useState<Interaction[]>([]);
-    const { token } = useAuth();
+    const { token, sessionTimeout } = useAuth();
     const [loading, setLoading] = useState(true);
     const [expandedCall, setExpandedCall] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -26,6 +26,10 @@ export default function CallsPage() {
                 const res = await fetch("http://localhost:6060/interactions", {
                     headers: { "Authorization": `Bearer ${token}` }
                 });
+                if (res.status === 401) {
+                    sessionTimeout();
+                    return;
+                }
                 if (!res.ok) throw new Error(`Server returned ${res.status}`);
                 const data = await res.json();
                 // Sort by timestamp descending
