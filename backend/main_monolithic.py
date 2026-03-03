@@ -2273,15 +2273,11 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                     is_final = result.get("is_final", False)
                     
                     if transcript:
-                        logger.debug(f"🎤 [Cartesia STT] Interim: {transcript}")
-                    
-                    if transcript and is_final:
-                        logger.info(f"🎤 [Cartesia STT] FINAL: {transcript}")
-                        # Log STT Latency
-                        logger.debug(f"⏱️ [Cartesia STT] Latency: {time.time() - stt_start_time:.3f}s")
+                        logger.debug(f"🎤 [Cartesia STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                         
+                        # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
                         if is_rio_speaking or not sentence_queue.empty():
-                            logger.info("🛑 Barge-in detected! Interrupting Rio.")
+                            logger.info(f"🛑 Barge-in detected! ('{transcript}') Interrupting Rio.")
                             await communicator.clear_audio_buffer()
                             # Clear queue
                             while not sentence_queue.empty():
@@ -2292,6 +2288,10 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 current_tts_task.cancel()
                             if current_mistral_task and not current_mistral_task.done():
                                 current_mistral_task.cancel()
+                    
+                    if transcript and is_final:
+                        # Log STT Latency
+                        logger.debug(f"⏱️ [Cartesia STT] Latency: {time.time() - stt_start_time:.3f}s")
                         
                         latency = time.time() - stt_start_time
                         transcript_accumulator.append(f"User: {transcript}")
@@ -2354,19 +2354,23 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 is_final = getattr(result, "is_final", False)
                             
                             if transcript:
-                                logger.debug(f"🎤 [Sarvam STT] Interim: {transcript}")
-                            
-                            if transcript and is_final:
-                                logger.info(f"🎤 [Sarvam STT] FINAL: {transcript}")
+                                logger.debug(f"🎤 [Sarvam STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                                 
-                                if is_rio_speaking:
-                                    logger.info("🛑 Barge-in detected! Interrupting Rio.")
+                                # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
+                                if is_rio_speaking or not sentence_queue.empty():
+                                    logger.info(f"🛑 Barge-in detected! ('{transcript}') Interrupting Rio.")
                                     await communicator.clear_audio_buffer()
+                                    # Clear queue
+                                    while not sentence_queue.empty():
+                                        try: sentence_queue.get_nowait()
+                                        except asyncio.QueueEmpty: break
+                                    
                                     if current_tts_task and not current_tts_task.done():
                                         current_tts_task.cancel()
                                     if current_mistral_task and not current_mistral_task.done():
                                         current_mistral_task.cancel()
-                                
+                            
+                            if transcript and is_final:
                                 latency = time.time() - stt_start_time
                                 transcript_accumulator.append(f"User: {transcript}")
                                 save_transcript(interaction_id, transcript_accumulator)
@@ -2387,7 +2391,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         else:
             enc_params = "encoding=mulaw&sample_rate=8000"
 
-        stt_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&{enc_params}"
+        stt_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&{enc_params}&interim_results=true"
         stt_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(stt_url, headers=stt_headers) as stt_ws:
@@ -2412,13 +2416,26 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 if "channel" in res:
                                     alt = res["channel"]["alternatives"][0]
                                     transcript = alt.get("transcript", "")
-                                    if transcript and res.get("is_final"):
-                                        logger.info(f"🎤 [Deepgram STT] FINAL: {transcript}")
-                                        if is_rio_speaking:
-                                            await communicator.clear_audio_buffer()
-                                            if current_tts_task and not current_tts_task.done(): current_tts_task.cancel()
-                                            if current_mistral_task and not current_mistral_task.done(): current_mistral_task.cancel()
+                                    is_final = res.get("is_final", False)
+                                    
+                                    if transcript:
+                                        logger.debug(f"🎤 [Deepgram STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                                         
+                                        # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
+                                        if is_rio_speaking or not sentence_queue.empty():
+                                            logger.info(f"🛑 Barge-in detected! ('{transcript}') Interrupting Rio.")
+                                            await communicator.clear_audio_buffer()
+                                            # Clear queue
+                                            while not sentence_queue.empty():
+                                                try: sentence_queue.get_nowait()
+                                                except asyncio.QueueEmpty: break
+                                            
+                                            if current_tts_task and not current_tts_task.done():
+                                                current_tts_task.cancel()
+                                            if current_mistral_task and not current_mistral_task.done():
+                                                current_mistral_task.cancel()
+                                    
+                                    if transcript and is_final:
                                         latency = time.time() - stt_start_time
                                         transcript_accumulator.append(f"User: {transcript}")
                                         save_transcript(interaction_id, transcript_accumulator)

@@ -98,7 +98,12 @@ class VoicePipeline:
                 res_type = result.get("type", "transcript")
 
                 if transcript:
+                    logger.debug(f"🎤 [VoicePipeline STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                     current_turn_transcript = transcript
+                    
+                    # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
+                    if self.is_rio_speaking or not self.sentence_queue.empty():
+                        await self._handle_barge_in(reason=transcript)
 
                 if is_final or res_type == "end_of_turn":
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
@@ -108,9 +113,6 @@ class VoicePipeline:
                     logger.info(f"🎤 [STT] {'🎯 EOT' if res_type == 'end_of_turn' else '✅ FINAL'}: {current_turn_transcript}")
                     latency = time.time() - stt_start_time
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
-
-                    if self.is_rio_speaking or not self.sentence_queue.empty():
-                        await self._handle_barge_in(reason=current_turn_transcript)
 
                     if self.current_llm_task and not self.current_llm_task.done():
                         self.current_llm_task.cancel()
@@ -321,7 +323,9 @@ class VoicePipeline:
                     type="call",
                     content=f"Voice Interaction ({engine_name})",
                     transcript=full_transcript,
-                    timestamp=datetime.now(timezone.utc)
+                    timestamp=datetime.now(timezone.utc),
+                    source="Voice Call",
+                    created_by="Rio AI"
                 )
                 self.session.add(db_i)
                 self.session.commit()
@@ -385,6 +389,24 @@ class VoicePipeline:
                         
                         try:
                             result = await execute_mcp_tool(tool_name, tool_args)
+                            
+                            # Auto-link interaction to lead if get_or_create_lead result has lead_id
+                            if tool_name == "get_or_create_lead" and "lead_id" in result:
+                                try:
+                                    lid = int(result["lead_id"])
+                                    logger.info(f"🔗 Linking interaction {self.interaction_id} to lead {lid}")
+                                    try:
+                                        interaction_id_int = int(self.interaction_id)
+                                        db_i = self.session.get(Interaction, interaction_id_int)
+                                        if db_i:
+                                            db_i.lead_id = lid
+                                            self.session.add(db_i)
+                                            self.session.commit()
+                                    except (ValueError, TypeError):
+                                        pass
+                                except Exception as e:
+                                    logger.error(f"❌ Failed to link interaction: {e}")
+
                         except Exception as e:
                             logger.error(f"❌ Tool Execution Error: {e}")
                             result = {"error": str(e)}

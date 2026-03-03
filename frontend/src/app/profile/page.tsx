@@ -22,6 +22,40 @@ export default function ProfilePage() {
         profile_picture_url: user?.profile_picture_url || "",
     });
 
+    const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+
+        setIsSaving(true);
+        setMessage(null);
+
+        const uploadData = new FormData();
+        uploadData.append("file", file);
+
+        try {
+            const res = await fetch("http://localhost:6060/auth/upload-avatar", {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+                body: uploadData,
+            });
+
+            if (res.ok) {
+                const data = await res.json();
+                setFormData(prev => ({ ...prev, profile_picture_url: data.url }));
+                setMessage({ type: 'success', text: "Photo uploaded! Save profile to confirm. ✨" });
+                await refreshUser();
+            } else {
+                setMessage({ type: 'error', text: "Failed to upload image." });
+            }
+        } catch (err) {
+            setMessage({ type: 'error', text: "Upload error. Please try again." });
+        } finally {
+            setIsSaving(false);
+        }
+    };
+
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
         setIsSaving(true);
@@ -85,8 +119,16 @@ export default function ProfilePage() {
                                         )}
                                     </div>
                                 </div>
+                                <input
+                                    type="file"
+                                    id="profile-upload"
+                                    className="hidden"
+                                    accept="image/*"
+                                    onChange={handleFileUpload}
+                                />
                                 <button
                                     type="button"
+                                    onClick={() => document.getElementById('profile-upload')?.click()}
                                     className="absolute bottom-1 right-1 h-10 w-10 bg-slate-800 border border-slate-700 rounded-full flex items-center justify-center text-violet-400 hover:text-white hover:bg-violet-600 transition-all shadow-lg"
                                 >
                                     <Camera size={18} />

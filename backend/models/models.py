@@ -25,6 +25,30 @@ class LeadCreate(SQLModel):
     status: Optional[str] = "New"
     notes: Optional[str] = None
 
+class Demo(AuditMixin, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    lead_id: int = Field(foreign_key="lead.id", index=True)
+    name: str
+    phone: str
+    email: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    demo_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = Field(default="Scheduled")
+    notes: Optional[str] = None
+
+class DemoCreate(SQLModel):
+    lead_id: int
+    name: str
+    phone: str
+    email: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    demo_date: Optional[datetime] = None
+    notes: Optional[str] = None
+
 class Interaction(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     lead_id: int

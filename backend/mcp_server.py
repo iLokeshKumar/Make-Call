@@ -1,12 +1,15 @@
 import os
 import logging
+from datetime import datetime, timezone
+from dateutil import parser as date_parser
 from fastmcp import FastMCP
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from sqlmodel import select
-from models.models import Lead, Interaction, Product, Appointment, LatencyLog, Outcome
+from models.models import Lead, Interaction, Product, Appointment, LatencyLog, Outcome, Demo
 from rag_service import search_products, sync_products_to_chroma
+from utils.phone import normalize_phone
 
 load_dotenv()
 
@@ -76,20 +79,29 @@ def get_or_create_lead(name: str, phone: str, email: str = None) -> dict:
     Use this towards the end of a conversation (e.g., when close to booking or finishing) 
     to identify the user. Avoid calling this at the very start of the call.
     """
-    logger.info(f"[get_or_create_lead] Searching for phone: {phone}")
+    normalized_phone = normalize_phone(phone)
+    logger.info(f"[get_or_create_lead] Searching for phone: {normalized_phone} (original: {phone})")
+    
     with SessionLocal() as session:
         # Use ORM select for better compatibility with AuditMixin
-        statement = select(Lead).where(Lead.phone == phone)
+        statement = select(Lead).where(Lead.phone == normalized_phone)
         lead = session.execute(statement).scalar_one_or_none()
         
         if not lead:
             logger.info(f"[get_or_create_lead] Creating new lead: {name}")
-            lead = Lead(name=name, phone=phone, email=email, status="New")
+            lead = Lead(name=name, phone=normalized_phone, email=email, status="New")
             session.add(lead)
             session.commit()
             session.refresh(lead)
             return {"lead_id": lead.id, "name": lead.name, "status": "New", "message": "New lead created successfully."}
         
+        # If lead exists but email is missing, update it
+        if email and not lead.email:
+            lead.email = email
+            session.add(lead)
+            session.commit()
+            logger.info(f"[get_or_create_lead] Updated email for lead {lead.id}")
+            
         logger.info(f"[get_or_create_lead] Existing lead found: {lead.name} (ID: {lead.id})")
         return {
             "lead_id": lead.id,
@@ -253,9 +265,10 @@ def send_email(phone: str, email: str, subject: str, body: str) -> dict:
     - body: Email content (markdown or plain text).
     """
     logger.info(f"[send_email] Sending to {email} for phone {phone}")
+    normalized_phone = normalize_phone(phone)
     with SessionLocal() as session:
         # 1. Fetch lead
-        statement = select(Lead).where(Lead.phone == phone)
+        statement = select(Lead).where(Lead.phone == normalized_phone)
         lead = session.execute(statement).scalar_one_or_none()
         
         # Priority: provided email > DB email
@@ -544,6 +557,90 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                 "error": error_msg,
                 "email_sent": False
             }
+
+@mcp.tool()
+def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, email: str = None, notes: str = None) -> dict:
+    """
+    Records a demo request with contact and location details (city, state, pincode).
+    Use this when a lead wants to schedule a demo and provides their location and contact info.
+    
+    Args:
+    - lead_id: The ID of the lead.
+    - name: Caller's name.
+    - phone: Caller's phone number.
+    - city: Caller's city.
+    - state: Caller's state.
+    - pincode: Caller's pincode.
+    - demo_date: The date and time requested for the demo (natural language).
+    - email: Caller's email address.
+    - notes: Any additional requirements for the demo.
+    """
+    normalized_phone = normalize_phone(phone)
+    logger.info(f"[book_demo] Recording demo for {name} ({normalized_phone}) at {city}, {state} on {demo_date}")
+    
+    # Parse demo date
+    try:
+        parsed_date = date_parser.parse(demo_date)
+        if parsed_date.tzinfo is None:
+            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+    except Exception as e:
+        logger.warning(f"[book_demo] Date parsing failed for '{demo_date}': {e}. Using current time as fallback.")
+        parsed_date = datetime.now(timezone.utc)
+
+    with SessionLocal() as session:
+        demo = Demo(
+            lead_id=lead_id,
+            name=name,
+            phone=normalized_phone,
+            email=email,
+            city=city,
+            state=state,
+            pincode=pincode,
+            notes=notes,
+            status="Scheduled",
+            demo_date=parsed_date
+        )
+        session.add(demo)
+        session.commit()
+        session.refresh(demo)
+        
+        # Log interaction
+        interaction = Interaction(
+            lead_id=lead_id,
+            type="Demo Booking",
+            content=f"Booked Demo for {name} ({normalized_phone}) at {city}, {state} ({pincode}) for {demo_date}",
+            timestamp=datetime.now(timezone.utc)
+        )
+        session.add(interaction)
+        session.commit()
+        
+        # Send Email Confirmation if email is available
+        email_sent = False
+        target_email = email
+        if not target_email:
+            # Try fetching from Lead table if not provided in tool call
+            lead = session.get(Lead, lead_id)
+            if lead and lead.email:
+                target_email = lead.email
+        
+        if EMAIL_SERVICE_AVAILABLE and target_email:
+            try:
+                subject = f"Demo Confirmation - {name}"
+                body = f"Hi {name},\n\nYour demo request has been recorded for {demo_date}.\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon."
+                html_content = get_styled_html(subject, body, name)
+                email_sent = send_smtp_email(target_email, subject, body, html_body=html_content)
+                if email_sent:
+                    logger.info(f"[book_demo] Confirmation email sent to {target_email}")
+            except Exception as e:
+                logger.error(f"[book_demo] Email sending failed: {e}")
+
+        return {
+            "success": True,
+            "demo_id": demo.id,
+            "demo_date": parsed_date.isoformat(),
+            "email_sent": email_sent,
+            "message": f"✅ Demo successfully recorded for {name} at {city}, {state} for {demo_date}." + (" Confirmation email sent." if email_sent else "")
+        }
 
 @mcp.tool()
 def get_call_latency_summary(interaction_id: int) -> str:

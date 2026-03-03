@@ -3,13 +3,14 @@ import uuid
 from datetime import timedelta, datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, select
 
 from database import get_session
 from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification, RevealOTPVerify, UserUpdate
+from services.user_service import save_avatar
 from auth import (
     verify_password, create_access_token, get_password_hash,
     get_current_active_user, generate_mfa_secret, get_mfa_provisioning_uri,
@@ -294,3 +295,21 @@ async def verify_reveal_otp(verify: RevealOTPVerify, current_user: User = Depend
     session.commit()
     
     return {"message": "Verification successful", "email": current_user.email, "phone_number": current_user.phone_number}
+
+@router.post("/auth/upload-avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    """Uploads a user avatar and updates the profile picture URL."""
+    try:
+        url = save_avatar(file)
+        current_user.profile_picture_url = f"http://localhost:6060{url}"
+        session.add(current_user)
+        session.commit()
+        session.refresh(current_user)
+        return {"url": current_user.profile_picture_url}
+    except Exception as e:
+        logger.error(f"❌ Avatar Upload Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload avatar")

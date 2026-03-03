@@ -34,7 +34,8 @@ from mcp_server import (
     book_meeting,
     get_call_latency_summary,
     get_or_create_lead,
-    sync_product_catalog
+    sync_product_catalog,
+    book_demo
 )
 
 logger = logging.getLogger(__name__)
@@ -174,6 +175,28 @@ def get_mistral_tools():
                     "required": ["name", "phone"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "book_demo",
+                "description": "Record a demo request with contact and location details. Use this when a lead wants a demo and provides their location (City, State, Pincode).",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lead_id": {"type": "integer", "description": "Lead ID"},
+                        "name": {"type": "string", "description": "Name of the person"},
+                        "phone": {"type": "string", "description": "Phone number"},
+                        "city": {"type": "string", "description": "City"},
+                        "state": {"type": "string", "description": "State"},
+                        "pincode": {"type": "string", "description": "Pincode"},
+                        "demo_date": {"type": "string", "description": "The date and time requested for the demo (e.g., 'Tomorrow at 2 PM')"},
+                        "email": {"type": "string", "description": "Email address (optional)"},
+                        "notes": {"type": "string", "description": "Additional requirements (optional)"}
+                    },
+                    "required": ["lead_id", "name", "phone", "city", "state", "pincode", "demo_date"]
+                }
+            }
         }
     ]
 
@@ -261,9 +284,25 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
         
+        elif tool_name == "book_demo":
+            # Delegate to MCP tool
+            result = book_demo.fn(
+                lead_id=arguments.get("lead_id"),
+                name=arguments.get("name"),
+                phone=arguments.get("phone"),
+                city=arguments.get("city"),
+                state=arguments.get("state"),
+                pincode=arguments.get("pincode"),
+                demo_date=arguments.get("demo_date"),
+                email=arguments.get("email"),
+                notes=arguments.get("notes")
+            )
+            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
+            return result
+        
         else:
             error = {
-                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog"]
+                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog", "book_demo"]
             }
             logger.error(f"[execute_mcp_tool] Unknown tool error: {error}")
             return error
@@ -300,5 +339,10 @@ TOOL_DESCRIPTIONS = {
         "use_when": "Lead shows interest and wants to move forward",
         "returns": "Appointment ID, calendar URL, email sent status",
         "note": "This is SELF-CONTAINED - handles database + email in one call. No need to call email separately."
+    },
+    "book_demo": {
+        "summary": "Record a demo request with contact and location details",
+        "use_when": "Lead wants a demo and provides location (City, State, Pincode)",
+        "returns": "Demo ID, success status, captured location message"
     }
 }

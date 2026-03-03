@@ -7,10 +7,11 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import Session, select, func, text
 from database import get_session, engine
-from models.models import Lead, LeadCreate, Product, Interaction, Outcome, ApolloSearch, SystemSettings
+from models.models import Lead, LeadCreate, Product, Interaction, Outcome, ApolloSearch, SystemSettings, User
 from utils.config import APOLLO_API_KEY
-from auth import RoleChecker
+from auth import RoleChecker, get_current_active_user
 from enrichment_service import enrich_lead_cascade
+from utils.phone import normalize_phone
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["CRM & Settings"])
@@ -21,9 +22,18 @@ async def get_leads(session: Session = Depends(get_session)):
     return session.exec(select(Lead).order_by(Lead.created_at.desc())).all()
 
 @router.post("/leads", response_model=Lead)
-async def create_lead(lead: LeadCreate, session: Session = Depends(get_session)):
+async def create_lead(
+    lead: LeadCreate, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
     """Create a new lead."""
     db_lead = Lead.model_validate(lead)
+    db_lead.phone = normalize_phone(db_lead.phone)
+    db_lead.created_by = current_user.username
+    if not db_lead.source:
+        db_lead.source = "Manual"
+    
     session.add(db_lead)
     session.commit()
     session.refresh(db_lead)
@@ -56,7 +66,11 @@ async def update_lead(lead_id: int, lead: LeadCreate, session: Session = Depends
     return db_lead
 
 @router.post("/leads/upload")
-async def upload_leads(file: UploadFile = File(...), session: Session = Depends(get_session)):
+async def upload_leads(
+    file: UploadFile = File(...), 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
     contents = await file.read()
     try:
         if file.filename.endswith('.csv'):
@@ -69,9 +83,16 @@ async def upload_leads(file: UploadFile = File(...), session: Session = Depends(
         df.columns = [c.lower().strip() for c in df.columns]
         added = 0
         for _, row in df.iterrows():
-            phone = str(row.get("phone", "")).replace(".0", "").strip()
+            raw_phone = str(row.get("phone", "")).replace(".0", "").strip()
+            phone = normalize_phone(raw_phone)
             if phone and not session.exec(select(Lead).where(Lead.phone == phone)).first():
-                session.add(Lead(name=row.get("name", "Unknown"), phone=phone, source="Upload"))
+                new_lead = Lead(
+                    name=row.get("name", "Unknown"), 
+                    phone=phone, 
+                    source="Upload",
+                    created_by=current_user.username
+                )
+                session.add(new_lead)
                 added += 1
         session.commit()
         return {"message": f"Added {added} leads"}

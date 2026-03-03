@@ -115,7 +115,7 @@ class TTSService:
         payload = {
             "text": text,
             "target_language_code": "en-IN",
-            "speaker": "shubh",
+            "speaker": "ritu",
             "model": "bulbul:v3",
             "pace": 1.1,
             "speech_sample_rate": 8000,
