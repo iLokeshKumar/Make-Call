@@ -16,7 +16,9 @@ export default function SettingsPage() {
     const { theme, setTheme } = useTheme();
     const { user, token, sessionTimeout } = useAuth();
     const [systemInstruction, setSystemInstruction] = useState("");
-    const [voiceEngine, setVoiceEngine] = useState("gemini");
+    const [sttProvider, setSttProvider] = useState("deepgram");
+    const [llmProvider, setLlmProvider] = useState("mistral");
+    const [ttsProvider, setTtsProvider] = useState("cartesia");
     const [telephonyEngine, setTelephonyEngine] = useState("twilio");
     const [aiVerbosity, setAiVerbosity] = useState("2");
     const [loading, setLoading] = useState(true);
@@ -36,8 +38,10 @@ export default function SettingsPage() {
                     return;
                 }
                 const data = await res.json();
-                setSystemInstruction(data.system_instruction);
-                setVoiceEngine(data.voice_engine || "gemini");
+                setSystemInstruction(data.system_instruction || "");
+                setSttProvider(data.stt_provider || "deepgram");
+                setLlmProvider(data.llm_provider || "mistral");
+                setTtsProvider(data.tts_provider || "cartesia");
                 setTelephonyEngine(data.telephony_engine || "twilio");
                 setAiVerbosity(data.ai_verbosity || "2");
             } catch (error) {
@@ -47,7 +51,7 @@ export default function SettingsPage() {
             }
         };
         fetchSettings();
-    }, []);
+    }, [token, sessionTimeout]);
 
     const handleDeleteAccount = async () => {
         if (!window.confirm("ARE YOU SURE? This will permanently delete your account and you will be logged out immediately. This action cannot be undone.")) {
@@ -64,7 +68,6 @@ export default function SettingsPage() {
 
             if (res.ok) {
                 alert("Account deleted successfully.");
-                // Clear local storage and redirect
                 localStorage.removeItem("access_token");
                 window.location.href = "/register";
             } else {
@@ -89,7 +92,9 @@ export default function SettingsPage() {
                 },
                 body: JSON.stringify({
                     system_instruction: systemInstruction,
-                    voice_engine: voiceEngine,
+                    stt_provider: sttProvider,
+                    llm_provider: llmProvider,
+                    tts_provider: ttsProvider,
                     telephony_engine: telephonyEngine,
                     ai_verbosity: aiVerbosity
                 }),
@@ -129,7 +134,6 @@ export default function SettingsPage() {
                 )}
             </div>
 
-            {/* Settings Sections */}
             <div className="space-y-6">
                 {/* Theme Settings */}
                 <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
@@ -153,21 +157,21 @@ export default function SettingsPage() {
                                     key={option.value}
                                     onClick={() => setTheme(option.value)}
                                     className={`
-                    relative overflow-hidden rounded-xl p-4 border-2 transition-all duration-300
-                    ${isActive
+                                        relative overflow-hidden rounded-xl p-4 border-2 transition-all duration-300
+                                        ${isActive
                                             ? 'border-violet-600 bg-gradient-to-br from-violet-500/10 to-blue-500/10 shadow-lg'
                                             : 'border-slate-200 dark:border-slate-700 bg-white/60 dark:bg-slate-800/60 hover:border-violet-400 dark:hover:border-violet-500'
                                         }
-                  `}
+                                    `}
                                 >
                                     <div className="flex flex-col items-center space-y-2">
                                         <div className={`
-                      flex h-12 w-12 items-center justify-center rounded-xl transition-all
-                      ${isActive
+                                            flex h-12 w-12 items-center justify-center rounded-xl transition-all
+                                            ${isActive
                                                 ? 'bg-gradient-to-br from-violet-600 to-blue-600 shadow-lg shadow-violet-500/50'
                                                 : 'bg-slate-100 dark:bg-slate-700'
                                             }
-                    `}>
+                                        `}>
                                             <Icon className={`h-6 w-6 ${isActive ? 'text-white' : 'text-slate-600 dark:text-slate-300'}`} />
                                         </div>
                                         <span className={`text-sm font-semibold ${isActive ? 'text-violet-700 dark:text-violet-400' : 'text-slate-700 dark:text-slate-300'}`}>
@@ -261,123 +265,60 @@ export default function SettingsPage() {
                             </div>
                             <div>
                                 <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">AI Assistant (Rio)</h3>
-                                <p className="text-sm text-slate-500 dark:text-slate-400">Modify the script and persona</p>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">Modular Engine Configuration</p>
                             </div>
                         </div>
 
-                        <div className="space-y-4">
-                            <div className="space-y-4 mb-6">
-                                <label className="text-sm font-bold text-slate-700 dark:text-slate-300 ml-1">Voice Engine</label>
-                                <div className="grid grid-cols-2 gap-4">
-                                    <button
-                                        onClick={() => setVoiceEngine("gemini")}
-                                        className={`
-                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
-                                            ${voiceEngine === "gemini"
-                                                ? 'border-violet-600 bg-violet-600/5 dark:bg-violet-600/10'
-                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
-                                        `}
+                        <div className="space-y-8">
+                            {/* Modular Providers Selection */}
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                                {/* STT Selection */}
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-slate-500 ml-1 uppercase">STT (Hearing)</label>
+                                    <select
+                                        value={sttProvider}
+                                        onChange={(e) => setSttProvider(e.target.value)}
+                                        className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
-                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "gemini" ? 'bg-violet-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                                            <Zap className="h-5 w-5" />
-                                        </div>
-                                        <div className="text-left">
-                                            <p className="font-bold text-sm">Gemini 2.0</p>
-                                            <p className="text-xs text-slate-500">Native Multimodal</p>
-                                        </div>
-                                    </button>
+                                        <option value="deepgram">Deepgram Nova-2</option>
+                                        <option value="sarvam">Sarvam Bulbul</option>
+                                        <option value="cartesia">Cartesia Sonic</option>
+                                    </select>
+                                </div>
 
-                                    <button
-                                        onClick={() => setVoiceEngine("mistral")}
-                                        className={`
-                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
-                                            ${voiceEngine === "mistral"
-                                                ? 'border-blue-600 bg-blue-600/5 dark:bg-blue-600/10'
-                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
-                                        `}
+                                {/* LLM Selection */}
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-slate-500 ml-1 uppercase">LLM (Thinking)</label>
+                                    <select
+                                        value={llmProvider}
+                                        onChange={(e) => setLlmProvider(e.target.value)}
+                                        className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
-                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral" ? 'bg-blue-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                                            <Monitor className="h-5 w-5" />
-                                        </div>
-                                        <div className="text-left">
-                                            <p className="font-bold text-sm">Mistral + ElevenLabs + Deepgram</p>
-                                            <p className="text-xs text-slate-500">Multimodal</p>
-                                        </div>
-                                    </button>
+                                        <option value="mistral">Mistral Large</option>
+                                        <option value="anthropic">Claude 3.5 Sonnet</option>
+                                        <option value="google">Gemini 1.5 Flash</option>
+                                        <option value="perplexity">Perplexity AI</option>
+                                    </select>
+                                </div>
 
-                                    <button
-                                        onClick={() => setVoiceEngine("mistral-cartesia")}
-                                        className={`
-                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
-                                            ${voiceEngine === "mistral-cartesia"
-                                                ? 'border-emerald-600 bg-emerald-600/5 dark:bg-emerald-600/10'
-                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
-                                        `}
+                                {/* TTS Selection */}
+                                <div className="space-y-2">
+                                    <label className="text-xs font-bold text-slate-500 ml-1 uppercase">TTS (Speaking)</label>
+                                    <select
+                                        value={ttsProvider}
+                                        onChange={(e) => setTtsProvider(e.target.value)}
+                                        className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
-                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-cartesia" ? 'bg-emerald-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                                            <Zap className="h-5 w-5" />
-                                        </div>
-                                        <div className="text-left">
-                                            <p className="font-bold text-sm">Mistral + Cartesia</p>
-                                            <p className="text-xs text-slate-500">Sonic S2S (Ultra-Fast)</p>
-                                        </div>
-                                    </button>
-
-                                    <button
-                                        onClick={() => setVoiceEngine("mistral-sarvam")}
-                                        className={`
-                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
-                                            ${voiceEngine === "mistral-sarvam"
-                                                ? 'border-orange-600 bg-orange-600/5 dark:bg-orange-600/10'
-                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
-                                        `}
-                                    >
-                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-sarvam" ? 'bg-orange-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                                            <Brain className="h-5 w-5" />
-                                        </div>
-                                        <div className="text-left">
-                                            <p className="font-bold text-sm">Mistral + Sarvam</p>
-                                            <p className="text-xs text-slate-500">India Specialized</p>
-                                        </div>
-                                    </button>
-
-                                    <button
-                                        onClick={() => setVoiceEngine("mistral-deepgram")}
-                                        className={`
-                                            flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
-                                            ${voiceEngine === "mistral-deepgram"
-                                                ? 'border-yellow-600 bg-yellow-600/5 dark:bg-yellow-600/10'
-                                                : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
-                                        `}
-                                    >
-                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-deepgram" ? 'bg-yellow-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                                            <Brain className="h-5 w-5" />
-                                        </div>
-                                        <div className="text-left">
-                                            <p className="font-bold text-sm">Mistral + Deepgram</p>
-                                            <p className="text-xs text-slate-500">Nova-2 + Aura-Asteria</p>
-                                        </div>
-                                    </button>
-
-                                    <button
-                                        onClick={() => setVoiceEngine("mistral-deepgram-cartesia")}
-                                        className={`flex items-center space-x-3 p-4 rounded-xl border-2 transition-all ${voiceEngine === "mistral-deepgram-cartesia"
-                                            ? 'border-red-600 bg-red-600/5 dark:bg-red-600/10'
-                                            : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'
-                                            }`}
-                                    >
-                                        <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${voiceEngine === "mistral-deepgram-cartesia" ? 'bg-red-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
-                                            <Brain className="h-5 w-5" />
-                                        </div>
-                                        <div className="text-left">
-                                            <p className="font-bold text-sm">Mistral + Deepgram + Cartesia</p>
-                                            <p className="text-xs text-slate-500">Nova-2 + Flux + Sonic</p>
-                                        </div>
-                                    </button>
+                                        <option value="cartesia">Cartesia Sonic</option>
+                                        <option value="elevenlabs">ElevenLabs Turbo</option>
+                                        <option value="sarvam">Sarvam Bulbul</option>
+                                        <option value="deepgram">Deepgram Aura</option>
+                                    </select>
                                 </div>
                             </div>
 
-                            <div className="space-y-4 mb-6">
+                            {/* Response Verbosity */}
+                            <div className="space-y-4">
                                 <div className="flex items-center justify-between ml-1">
                                     <label htmlFor="response-verbosity" className="text-sm font-bold text-slate-700 dark:text-slate-300">Response Verbosity</label>
                                     <span className={`text-xs font-bold px-2 py-1 rounded-md ${aiVerbosity === "1" ? "bg-red-500/10 text-red-500" :
@@ -397,20 +338,20 @@ export default function SettingsPage() {
                                         value={aiVerbosity}
                                         onChange={(e) => setAiVerbosity(e.target.value)}
                                         className="w-full h-2 bg-slate-200 dark:bg-slate-700 rounded-lg appearance-none cursor-pointer accent-violet-600"
-                                        aria-label="Response verbosity level"
                                     />
                                     <div className="flex justify-between mt-2 px-1">
                                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Brevity</span>
                                         <span className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Depth</span>
                                     </div>
                                     <p className="text-xs text-slate-500 dark:text-slate-400 mt-2 italic ml-1">
-                                        {aiVerbosity === "1" && "Rio will stick to 1 short sentence or even 1 word. Maximum efficiency."}
+                                        {aiVerbosity === "1" && "Rio will stick to 1 short sentence or even 1 word."}
                                         {aiVerbosity === "2" && "Rio will provide concise 1-3 sentence answers."}
                                         {aiVerbosity === "3" && "Rio will provide elaborate, detailed explanations."}
                                     </p>
                                 </div>
                             </div>
 
+                            {/* System Instructions */}
                             <div className="space-y-2">
                                 <label className="text-sm font-bold text-slate-700 dark:text-slate-300 ml-1">System Instructions / Script</label>
                                 {loading ? (
@@ -476,16 +417,6 @@ export default function SettingsPage() {
                                 </div>
                                 <p className="text-sm text-slate-600 dark:text-slate-400">Multimodal Assistant</p>
                             </div>
-
-                            <div className="rounded-xl bg-gradient-to-br from-orange-500/10 to-yellow-500/10 p-4 border border-orange-200/50 dark:border-orange-500/30 font-medium">
-                                <div className="flex items-center justify-between mb-2">
-                                    <p className="text-slate-900 dark:text-slate-100 italic">Exotel</p>
-                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
-                                        ● Active
-                                    </span>
-                                </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">High Quality PCM</p>
-                            </div>
                         </div>
                     </div>
                 )}
@@ -507,7 +438,7 @@ export default function SettingsPage() {
                     </div>
                 )}
 
-                {/* Account Deletion Area */}
+                {/* Danger Zone */}
                 <div className="rounded-2xl border border-red-200 dark:border-red-900/30 bg-red-50/50 dark:bg-red-900/10 p-6 mt-12">
                     <div className="flex items-center space-x-3 mb-4">
                         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-500">

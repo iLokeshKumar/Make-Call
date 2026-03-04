@@ -1,0 +1,69 @@
+import json
+import logging
+from typing import Optional, List, Dict, Any, AsyncGenerator
+from .base import BaseLLM, SENTENCE_SPLIT_REGEX
+from utils.config import mistral_client
+
+logger = logging.getLogger(__name__)
+
+class MistralLLM(BaseLLM):
+    def __init__(self, system_prompt: str):
+        super().__init__(system_prompt)
+        self.provider = "Mistral"
+        self.model = "mistral-large-latest"
+
+    async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
+        try:
+            accumulated_text = ""
+            full_reply = ""
+            tool_calls_dict = {}
+
+            stream = await mistral_client.chat.stream_async(
+                model=self.model,
+                messages=self.messages,
+                tools=tools,
+                max_tokens=2048,
+                temperature=0.7
+            )
+
+            async for chunk in stream:
+                delta = chunk.data.choices[0].delta
+                
+                # 1. Content
+                if delta.content:
+                    content = delta.content
+                    accumulated_text += content
+                    full_reply += content
+                    yield {"type": "token", "content": content}
+
+                    # Sentence boundary detection
+                    parts = SENTENCE_SPLIT_REGEX.split(accumulated_text)
+                    if len(parts) > 1:
+                        sentence = parts[0] + parts[1]
+                        accumulated_text = accumulated_text[len(sentence):]
+                        if sentence.strip():
+                            yield {"type": "sentence", "content": sentence.strip()}
+
+                # 2. Tool Calls
+                if delta.tool_calls:
+                    for tc in delta.tool_calls:
+                        idx = tc.index
+                        if idx not in tool_calls_dict:
+                            tool_calls_dict[idx] = tc
+                        else:
+                            tool_calls_dict[idx].function.arguments += tc.function.arguments
+
+            # Final remaining chunk
+            if accumulated_text.strip():
+                yield {"type": "sentence", "content": accumulated_text.strip()}
+
+            # End of stream metadata
+            yield {
+                "type": "finished", 
+                "full_reply": full_reply, 
+                "tool_calls": [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())] if tool_calls_dict else None
+            }
+
+        except Exception as e:
+            logger.error(f"❌ [MistralLLM] Stream Error: {e}")
+            yield {"type": "error", "content": str(e)}

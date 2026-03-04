@@ -41,47 +41,54 @@ class TTSService:
             logger.warning(f"⚠️ Unsupported TTS engine: {engine_type}")
 
     async def _cartesia_speak(self, text, communicator, ws_to_use=None, context_id=None):
-        """Streaming TTS from Cartesia using direct aiohttp WebSocket."""
         try:
             start_time = time.time()
             tts_first_byte_time = 0
-            
-            # 1. Prepare Request Dict
+            ctx = context_id or f"ctx_{int(time.time()*1000)}"
+
             tts_event = {
                 "model_id": "sonic-3",
                 "transcript": text,
-                "voice": {
-                    "mode": "id",
-                    "id": CARTESIA_VOICE_ID,
-                },
+                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
                 "output_format": {
                     "container": "raw",
-                    "encoding": "pcm_mulaw",
-                    "sample_rate": 8000,
+                    "encoding": "pcm_s16le",  # native, no internal mulaw conversion
+                    "sample_rate": 16000,     # sonic-3 quality sweet spot
                 },
                 "language": "en",
-                "context_id": context_id or f"ctx_{int(time.time()*1000)}"
+                "context_id": ctx,
             }
 
             async def _stream_on_ws(ws):
                 nonlocal tts_first_byte_time
+                resample_state = None   # for 16k→8k downsample
                 await ws.send_json(tts_event)
-                
+
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         data = json.loads(msg.data)
+
+                        # Skip audio from other concurrent sentences
+                        if data.get("context_id") and data["context_id"] != ctx:
+                            continue
+
                         audio_b64 = data.get("audio") or data.get("data")
                         if audio_b64:
                             if tts_first_byte_time == 0:
                                 tts_first_byte_time = time.time() - start_time
-                            await communicator.send_media(audio_b64)
-                        
+                            pcm_16k = base64.b64decode(audio_b64)
+                            # Downsample 16k→8k with maintained state (no artifacts)
+                            pcm_8k, resample_state = audioop.ratecv(
+                                pcm_16k, 2, 1, 16000, 8000, resample_state
+                            )
+                            mulaw = audioop.lin2ulaw(pcm_8k, 2)
+                            await communicator.send_media(base64.b64encode(mulaw).decode())
+
                         if data.get("done"):
                             break
                     elif msg.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                         break
 
-            # 2. Use existing WS or create temporary one
             if ws_to_use:
                 await _stream_on_ws(ws_to_use)
             else:
@@ -93,7 +100,7 @@ class TTSService:
             self.last_tts_latency = tts_first_byte_time
             self.last_provider = "Cartesia"
             self.last_model = "sonic-3"
-            logger.info(f"✅ [Cartesia TTS] Complete (aiohttp). First byte: {tts_first_byte_time:.3f}s")
+            logger.info(f"✅ [Cartesia TTS] First byte: {tts_first_byte_time:.3f}s")
         except Exception as e:
             logger.error(f"❌ [Cartesia TTS] Error: {e}")
 

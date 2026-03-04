@@ -35,7 +35,8 @@ from mcp_server import (
     get_call_latency_summary,
     get_or_create_lead,
     sync_product_catalog,
-    book_demo
+    book_demo,
+    send_communication
 )
 
 logger = logging.getLogger(__name__)
@@ -180,7 +181,7 @@ def get_mistral_tools():
             "type": "function",
             "function": {
                 "name": "book_demo",
-                "description": "Record a demo request with contact and location details. Use this when a lead wants a demo and provides their location (City, State, Pincode).",
+                "description": "Record a demo request with contact information, location, and product interest. Use this when a lead wants to schedule a demo for specific products.",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -191,10 +192,34 @@ def get_mistral_tools():
                         "state": {"type": "string", "description": "State"},
                         "pincode": {"type": "string", "description": "Pincode"},
                         "demo_date": {"type": "string", "description": "The date and time requested for the demo (e.g., 'Tomorrow at 2 PM')"},
+                        "products": {"type": "string", "description": "The specific products or services the lead is interested in"},
                         "email": {"type": "string", "description": "Email address (optional)"},
                         "notes": {"type": "string", "description": "Additional requirements (optional)"}
                     },
-                    "required": ["lead_id", "name", "phone", "city", "state", "pincode", "demo_date"]
+                    "required": ["lead_id", "name", "phone", "city", "state", "pincode", "demo_date", "products"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_communication",
+                "description": "Send detailed information (specs, brochures, addresses, etc.) to a lead via Email and/or WhatsApp. Use this whenever a customer asks for information to be shared.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lead_id": {"type": "integer", "description": "Lead ID"},
+                        "channels": {
+                            "type": "array", 
+                            "items": {"type": "string", "enum": ["email", "whatsapp"]},
+                            "description": "List of channels to use (e.g., ['email', 'whatsapp'])"
+                        },
+                        "content": {"type": "string", "description": "The detailed content to be shared with the customer"},
+                        "subject": {"type": "string", "description": "Subject line for the communication (primarily for email)"},
+                        "email": {"type": "string", "description": "Optional email address (updates the lead and used for sending)"},
+                        "phone": {"type": "string", "description": "Optional phone number (updates the lead and used for WhatsApp)"}
+                    },
+                    "required": ["lead_id", "channels", "content"]
                 }
             }
         }
@@ -294,15 +319,29 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
                 state=arguments.get("state"),
                 pincode=arguments.get("pincode"),
                 demo_date=arguments.get("demo_date"),
+                products=arguments.get("products"),
                 email=arguments.get("email"),
                 notes=arguments.get("notes")
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
         
+        elif tool_name == "send_communication":
+            # Delegate to MCP tool
+            result = send_communication.fn(
+                lead_id=arguments.get("lead_id"),
+                channels=arguments.get("channels"),
+                content=arguments.get("content"),
+                subject=arguments.get("subject", "Message from Rio AI"),
+                email=arguments.get("email"),
+                phone=arguments.get("phone")
+            )
+            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
+            return result
+        
         else:
             error = {
-                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog", "book_demo"]
+                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog", "book_demo", "send_communication"]
             }
             logger.error(f"[execute_mcp_tool] Unknown tool error: {error}")
             return error
@@ -341,8 +380,15 @@ TOOL_DESCRIPTIONS = {
         "note": "This is SELF-CONTAINED - handles database + email in one call. No need to call email separately."
     },
     "book_demo": {
-        "summary": "Record a demo request with contact and location details",
-        "use_when": "Lead wants a demo and provides location (City, State, Pincode)",
-        "returns": "Demo ID, success status, captured location message"
+        "summary": "Record a demo request with contact information, location, and product interest",
+        "use_when": "Lead wants a demo for specific products and provides location",
+        "returns": "Demo ID, success status, captured details",
+        "note": "Includes automated email confirmation with product details"
+    },
+    "send_communication": {
+        "summary": "Send any requested information via Email and/or WhatsApp",
+        "use_when": "Customer asks for specs, brochures, pricing, or any details to be shared",
+        "returns": "Success status per channel",
+        "note": "Can send to both Email and WhatsApp in one turn if requested"
     }
 }

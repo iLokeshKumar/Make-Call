@@ -36,6 +36,7 @@ class Demo(AuditMixin, table=True):
     pincode: str
     demo_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = Field(default="Scheduled")
+    products: Optional[str] = None
     notes: Optional[str] = None
 
 class DemoCreate(SQLModel):
@@ -47,6 +48,7 @@ class DemoCreate(SQLModel):
     state: str
     pincode: str
     demo_date: Optional[datetime] = None
+    products: Optional[str] = None
     notes: Optional[str] = None
 
 class Interaction(AuditMixin, table=True):

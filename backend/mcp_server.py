@@ -30,7 +30,15 @@ try:
     EMAIL_SERVICE_AVAILABLE = True
 except ImportError:
     EMAIL_SERVICE_AVAILABLE = False
-    logger.warning("Email service not available - book_meeting will skip email sending")
+    logger.warning("Email service not available")
+
+# Import WhatsApp service
+try:
+    from whatsapp_service import send_whatsapp_message
+    WHATSAPP_SERVICE_AVAILABLE = True
+except ImportError:
+    WHATSAPP_SERVICE_AVAILABLE = False
+    logger.warning("WhatsApp service not available")
 
 # Import Google Calendar service for Meet link generation
 try:
@@ -255,14 +263,100 @@ def check_guardrails(requested_discount_percent: float, requested_price: float =
         }
 
 @mcp.tool()
+def send_communication(lead_id: int, channels: list[str], content: str, subject: str = "Message from Rio AI", email: str = None, phone: str = None) -> dict:
+    """
+    Sends information to a lead via requested channels (email and/or whatsapp).
+    Use this to share product specs, brochures, addresses, or any other requested info.
+    
+    Args:
+    - lead_id: The ID of the lead.
+    - channels: A list of channels to use, e.g., ["email"], ["whatsapp"], or ["email", "whatsapp"].
+    - content: The detailed information to share.
+    - subject: Subject line (used for Email).
+    - email: Optional email address to update the lead and use for sending.
+    - phone: Optional phone number to update the lead and use for WhatsApp.
+    """
+    logger.info(f"[send_communication] sending to lead {lead_id} via {channels}")
+    
+    with SessionLocal() as session:
+        lead = session.query(Lead).filter(Lead.id == lead_id).first()
+        if not lead:
+            return {"success": False, "message": f"Lead {lead_id} not found."}
+
+        # Update lead info if provided
+        if email:
+            lead.email = email
+            logger.info(f"[send_communication] Updated lead {lead_id} email to {email}")
+        if phone:
+            lead.phone = phone
+            logger.info(f"[send_communication] Updated lead {lead_id} phone to {phone}")
+        
+        if email or phone:
+            session.commit()
+            session.refresh(lead)
+
+        results = {}
+        successful_channels = []
+
+        # 1. Handle Email
+        if "email" in channels:
+            target_email = email if email else lead.email
+            if not target_email:
+                results["email"] = "Failed: No email address on file or provided."
+            elif not EMAIL_SERVICE_AVAILABLE:
+                results["email"] = "Failed: Email service unavailable."
+            else:
+                html_content = get_styled_html(subject, content, lead.name)
+                success = send_smtp_email(target_email, subject, content, html_body=html_content)
+                if success:
+                    results["email"] = "Sent"
+                    successful_channels.append("Email")
+                else:
+                    results["email"] = "Failed (SMTP error)"
+
+        # 2. Handle WhatsApp
+        if "whatsapp" in channels:
+            target_phone = phone if phone else lead.phone
+            if not target_phone:
+                results["whatsapp"] = "Failed: No phone number on file or provided."
+            elif not WHATSAPP_SERVICE_AVAILABLE:
+                results["whatsapp"] = "Failed: WhatsApp service unavailable."
+            else:
+                success = send_whatsapp_message(target_phone, content)
+                if success:
+                    results["whatsapp"] = "Sent"
+                    successful_channels.append("WhatsApp")
+                else:
+                    results["whatsapp"] = "Failed (Twilio error)"
+
+        # 3. Log Interaction if anything was sent
+        if successful_channels:
+            channel_str = " & ".join(successful_channels)
+            interaction = Interaction(
+                lead_id=lead_id,
+                type="Multi-Channel Communication",
+                content=f"Sent {channel_str}: {content[:100]}...",
+                timestamp=datetime.now(timezone.utc)
+            )
+            session.add(interaction)
+            session.commit()
+            
+            return {
+                "success": True, 
+                "message": f"Communication sent via {channel_str}.",
+                "details": results
+            }
+        
+        return {
+            "success": False, 
+            "message": "No messages were sent. Verification failed for selected channels.",
+            "details": results
+        }
+
+@mcp.tool()
 def send_email(phone: str, email: str, subject: str, body: str) -> dict:
     """
-    Sends an email to a lead and logs it in the interaction history.
-    Args:
-    - phone: The lead's phone number to link the interaction.
-    - email: The email address (captured during call).
-    - subject: Email subject.
-    - body: Email content (markdown or plain text).
+    (Legacy) Sends a standalone email. For dynamic multi-channel requests, use `send_communication` instead.
     """
     logger.info(f"[send_email] Sending to {email} for phone {phone}")
     normalized_phone = normalize_phone(phone)
@@ -559,10 +653,10 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
             }
 
 @mcp.tool()
-def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, email: str = None, notes: str = None) -> dict:
+def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, email: str = None, notes: str = None) -> dict:
     """
-    Records a demo request with contact and location details (city, state, pincode).
-    Use this when a lead wants to schedule a demo and provides their location and contact info.
+    Records a demo request with contact information, location, and product interest.
+    Use this when a lead wants to schedule a demo for specific products.
     
     Args:
     - lead_id: The ID of the lead.
@@ -572,17 +666,21 @@ def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincod
     - state: Caller's state.
     - pincode: Caller's pincode.
     - demo_date: The date and time requested for the demo (natural language).
+    - products: The specific products or services the lead is interested in.
     - email: Caller's email address.
     - notes: Any additional requirements for the demo.
     """
     normalized_phone = normalize_phone(phone)
-    logger.info(f"[book_demo] Recording demo for {name} ({normalized_phone}) at {city}, {state} on {demo_date}")
+    logger.info(f"[book_demo] Recording demo for {name} ({normalized_phone}) at {city}, {state} on {demo_date}. Interest: {products}")
     
     # Parse demo date
     try:
+        # Detailed logging for debugging
+        logger.info(f"[book_demo] Attempting to parse date string: '{demo_date}'")
         parsed_date = date_parser.parse(demo_date)
         if parsed_date.tzinfo is None:
             parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+        logger.info(f"[book_demo] Successfully parsed '{demo_date}' to: {parsed_date}")
     except Exception as e:
         logger.warning(f"[book_demo] Date parsing failed for '{demo_date}': {e}. Using current time as fallback.")
         parsed_date = datetime.now(timezone.utc)
@@ -596,6 +694,7 @@ def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincod
             city=city,
             state=state,
             pincode=pincode,
+            products=products,
             notes=notes,
             status="Scheduled",
             demo_date=parsed_date
@@ -605,16 +704,17 @@ def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincod
         session.refresh(demo)
         
         # Log interaction
+        interactionContent = f"Booked Demo for {products} | {name} ({normalized_phone}) at {city}, {state} ({pincode}) for {demo_date}"
         interaction = Interaction(
             lead_id=lead_id,
             type="Demo Booking",
-            content=f"Booked Demo for {name} ({normalized_phone}) at {city}, {state} ({pincode}) for {demo_date}",
+            content=interactionContent,
             timestamp=datetime.now(timezone.utc)
         )
         session.add(interaction)
         session.commit()
         
-        # Send Email Confirmation if email is available
+        # Send Email Confirmation
         email_sent = False
         target_email = email
         if not target_email:
@@ -625,8 +725,8 @@ def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincod
         
         if EMAIL_SERVICE_AVAILABLE and target_email:
             try:
-                subject = f"Demo Confirmation - {name}"
-                body = f"Hi {name},\n\nYour demo request has been recorded for {demo_date}.\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon."
+                subject = f"Demo Confirmation - {products}"
+                body = f"Hi {name},\n\nYour demo request for {products} has been recorded for {demo_date}.\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon to finalize the details."
                 html_content = get_styled_html(subject, body, name)
                 email_sent = send_smtp_email(target_email, subject, body, html_body=html_content)
                 if email_sent:
@@ -638,8 +738,9 @@ def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincod
             "success": True,
             "demo_id": demo.id,
             "demo_date": parsed_date.isoformat(),
+            "products": products,
             "email_sent": email_sent,
-            "message": f"✅ Demo successfully recorded for {name} at {city}, {state} for {demo_date}." + (" Confirmation email sent." if email_sent else "")
+            "message": f"✅ Demo for {products} successfully recorded for {name} on {demo_date}." + (" Confirmation email sent." if email_sent else "")
         }
 
 @mcp.tool()

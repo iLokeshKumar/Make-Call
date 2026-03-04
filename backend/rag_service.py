@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize Local Embedding Model (SentenceTransformers)
-# This replaces Gemini API to avoid quota issues and 404s.
+
 print("Loading local embedding model (all-MiniLM-L6-v2)...")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 

@@ -8,9 +8,9 @@ import aiohttp
 import audioop
 from typing import List, Dict, Any, Optional
 
-from services.llm_service import LLMService
-from services.tts_service import TTSService
-from services.stt_service import STTService
+from services.llm import get_llm_service
+from services.tts import get_tts_service
+from services.stt import get_stt_service
 from utils.audio import clean_voice_text
 from utils.config import mistral_client
 from tool_adapter import get_mistral_tools, execute_mcp_tool
@@ -20,7 +20,9 @@ from models.models import Interaction, LatencyLog
 logger = logging.getLogger(__name__)
 
 class VoicePipeline:
-    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, company_name: str = "Yexis Electronics"):
+    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, 
+                 stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
+                 company_name: str = "Yexis Electronics"):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
@@ -28,9 +30,13 @@ class VoicePipeline:
         self.session = session
         self.company_name = company_name
         
-        self.llm_service = LLMService(system_prompt)
-        self.tts_service = TTSService()
-        self.stt_service = STTService()
+        self.stt_provider = stt_provider
+        self.llm_provider = llm_provider
+        self.tts_provider = tts_provider
+        
+        self.llm_service = get_llm_service(llm_provider, system_prompt)
+        self.tts_service = get_tts_service(tts_provider)
+        self.stt_service = get_stt_service(stt_provider)
         
         self.sentence_queue = asyncio.Queue()
         self.current_tts_task = None
@@ -39,8 +45,8 @@ class VoicePipeline:
         self.tts_first_byte_time = 0.0
         self.last_tts_start_time = 0.0
 
-    async def run(self, engine_type: str = "mistral-cartesia"):
-        speaker_task = asyncio.create_task(self._speaker_loop(engine_type))
+    async def run(self):
+        speaker_task = asyncio.create_task(self._speaker_loop())
         audio_queue = asyncio.Queue()
 
         async def _ingest():
@@ -91,7 +97,7 @@ class VoicePipeline:
 
         try:
             async for result in self.stt_service.transcribe(
-                _audio_gen_from_queue(), engine_type, encoding, rate
+                _audio_gen_from_queue(), encoding, rate
             ):
                 transcript = result.get("transcript", "")
                 is_final = result.get("is_final", False)
@@ -119,7 +125,7 @@ class VoicePipeline:
                         logger.info("♻️ Cancelled previous LLM task for new turn.")
 
                     self.current_llm_task = asyncio.create_task(
-                        self._process_llm_response(current_turn_transcript, latency, engine_type)
+                        self._process_llm_response(current_turn_transcript, latency)
                     )
                     stt_start_time = time.time()
                     current_turn_transcript = ""
@@ -131,7 +137,7 @@ class VoicePipeline:
             await speaker_task
             ingest_task.cancel()
 
-    async def _speaker_loop(self, engine_type: str):
+    async def _speaker_loop(self):
         """Continuously pulls sentences from the queue and speaks them."""
         async with aiohttp.ClientSession() as session:
             # Persistent WebSockets for specific providers
@@ -141,14 +147,14 @@ class VoicePipeline:
             
             try:
                 # 1. Setup persistent connections if needed
-                if engine_type == "mistral-deepgram":
+                if self.tts_provider == "deepgram":
                     from utils.config import DEEPGRAM_API_KEY, DEEPGRAM_VOICE
                     dg_url = f"wss://api.deepgram.com/v1/speak?model={DEEPGRAM_VOICE}&encoding=mulaw&sample_rate=8000"
                     dg_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
                     dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
                     logger.info("🎯 Deepgram TTS Persistent WebSocket Connected")
                 
-                elif engine_type == "mistral-elevenlabs":
+                elif self.tts_provider == "elevenlabs":
                     from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
                     el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
                     el_headers = {"xi-api-key": ELEVENLABS_API_KEY}
@@ -156,7 +162,7 @@ class VoicePipeline:
                     logger.info("🎯 ElevenLabs TTS Persistent WebSocket Connected")
                 
                 # Setup Cartesia Persistent Connection if using it
-                if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                if self.tts_provider == "cartesia":
                     from utils.config import CARTESIA_API_KEY
                     c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
                     c_ws = await session.ws_connect(c_url)
@@ -172,7 +178,7 @@ class VoicePipeline:
                         logger.warning("⚠️ Speaker loop waiting for stream_sid...")
                         await asyncio.sleep(0.5)
 
-                    if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                    if self.tts_provider == "cartesia":
                         if not c_ws or c_ws.closed:
                             from utils.config import CARTESIA_API_KEY
                             c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
@@ -188,30 +194,15 @@ class VoicePipeline:
 
                     # For Cartesia: fire TTS request AND immediately check for next sentence
                     # Cartesia queues them server-side via context_id
-                    if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"] and c_ws:
+                    if self.tts_provider == "cartesia" and c_ws:
                         self.current_tts_task = asyncio.create_task(
                             self.tts_service.speak(
                                 text=sentence,
-                                engine_type=engine_type,
                                 communicator=self.communicator,
-                                cartesia_ws=c_ws,
+                                ws_to_use=c_ws,
                                 context_id=turn_context_id
                             )
                         )
-                        # While Cartesia streams audio, peek at queue for next sentence
-                        # and pre-send it — overlaps network+processing time
-                        #self.current_tts_task = asyncio.create_task(
-                            #self.tts_service.speak(
-                                #text=sentence, 
-                                #engine_type=engine_type, 
-                                #communicator=self.communicator, 
-                                #cartesia_ws=c_ws,
-                                #aiohttp_session=session,
-                                #deepgram_ws=dg_ws,
-                                #elevenlabs_ws=el_ws,
-                                #context_id=turn_context_id
-                            #)
-                        #)
                         try:
                             await self.current_tts_task
                         except asyncio.CancelledError:
@@ -220,15 +211,17 @@ class VoicePipeline:
                             self.is_rio_speaking = False
                             self.sentence_queue.task_done()
                     else:
+                        # Determine which persistent WS to pass as generic 'ws_to_use'
+                        active_ws = None
+                        if self.tts_provider == "deepgram": active_ws = dg_ws
+                        elif self.tts_provider == "elevenlabs": active_ws = el_ws
+
                         self.current_tts_task = asyncio.create_task(
                             self.tts_service.speak(
                                 text=sentence, 
-                                engine_type=engine_type, 
                                 communicator=self.communicator, 
-                                cartesia_ws=c_ws,
+                                ws_to_use=active_ws,
                                 aiohttp_session=session,
-                                deepgram_ws=dg_ws,
-                                elevenlabs_ws=el_ws,
                                 context_id=turn_context_id
                             )
                         )
@@ -342,7 +335,7 @@ class VoicePipeline:
         except Exception as e:
             logger.error(f"❌ Error saving transcript: {e}")
 
-    async def _process_llm_response(self, user_input, stt_latency, engine_type):
+    async def _process_llm_response(self, user_input, stt_latency):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
         llm_start_time = time.time()
         self.llm_service.add_user_message(user_input)
@@ -352,7 +345,7 @@ class VoicePipeline:
         full_reply = ""
         tool_calls = None
         
-        async for chunk in self.llm_service.stream_mistral(tools=mistral_tools):
+        async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
                 logger.info(f"📤 [Mistral -> Queue] Sentence: '{chunk['content']}'")
                 await self.sentence_queue.put(chunk["content"])
@@ -367,16 +360,16 @@ class VoicePipeline:
                     self.transcript_accumulator.append(f"Rio: {full_reply}")
                     self.save_transcript()
                     self.save_latency(
-                        engine_type, 
+                        f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}", 
                         stt_latency, 
                         llm_latency, 
-                        self.tts_service.last_tts_latency,
-                        stt_p=self.stt_service.last_provider,
-                        stt_m=self.stt_service.last_model,
+                        self.tts_service.last_latency,
+                        stt_p=self.stt_service.provider,
+                        stt_m=self.stt_service.model,
                         llm_p=self.llm_service.provider,
                         llm_m=self.llm_service.model,
-                        tts_p=self.tts_service.last_provider,
-                        tts_m=self.tts_service.last_model
+                        tts_p=self.tts_service.provider,
+                        tts_m=self.tts_service.model
                     )
                 
                 if tool_calls:
@@ -414,7 +407,7 @@ class VoicePipeline:
                         self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
                     
                     logger.info("🔄 Tool results ready. Recursing for final LLM response.")
-                    await self._process_llm_response("Tool results ready.", 0, engine_type)
+                    await self._process_llm_response("Tool results ready.", 0)
 
     #async def _audio_generator(self, receiver):
     #    """Helper to yield audio chunks from the communicator."""

@@ -101,7 +101,9 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     if not replaced:
         logger.warning("⚠️ No matching placeholders found in system prompt for branding.")
         
-    voice_engine = all_settings.get("voice_engine", "mistral-cartesia")
+    stt_provider = all_settings.get("stt_provider", "deepgram")
+    llm_provider = all_settings.get("llm_provider", "mistral")
+    tts_provider = all_settings.get("tts_provider", "cartesia")
     
     # 1. Instantiate Communicator (Defaulting to Twilio for /media-stream)
     communicator = TwilioCommunicator(websocket)
@@ -114,16 +116,19 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         system_prompt, 
         transcript_accumulator, 
         session,
+        stt_provider=stt_provider,
+        llm_provider=llm_provider,
+        tts_provider=tts_provider,
         company_name=company_name
     )
     
     # 3. Handle specific telephony stream sid if present
     # pipeline.setup_sid(...) 
 
-    logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Engine: {voice_engine} | Company: {company_name}")
+    logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Providers: STT={stt_provider}, LLM={llm_provider}, TTS={tts_provider} | Company: {company_name}")
     
     try:
-        await pipeline.run(engine_type=voice_engine)
+        await pipeline.run()
     except Exception as e:
         logger.error(f"❌ Pipeline Error: {e}")
     finally:
