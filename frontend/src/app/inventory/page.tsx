@@ -115,7 +115,7 @@ export default function InventoryPage() {
                         <span className="gradient-text">Inventory</span>
                     </h1>
                     <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
-                        Manage products, stock levels, and pricing for the AI assistant
+                        Manage products, stock levels, and pricing for the Digital Sales Representative
                     </p>
                 </div>
                 <button

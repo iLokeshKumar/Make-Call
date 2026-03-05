@@ -127,6 +127,8 @@ class User(AuditMixin, table=True):
     reveal_otp_expires_at: Optional[datetime] = None
     company_name: Optional[str] = Field(default="Yexis Electronics")
     company_website: Optional[str] = Field(default="https://www.yexiselectronics.com/")
+    company_name: Optional[str] = Field(default="Rio CRM")
+    company_website: Optional[str] = Field(default="https://rio-crm.example.com/")
 
 class UserCreate(SQLModel):
     username: str
@@ -136,8 +138,8 @@ class UserCreate(SQLModel):
     last_name: Optional[str] = None
     phone_number: Optional[str] = None
     role: Optional[str] = "sales_rep"
-    company_name: Optional[str] = "Yexis Electronics"
-    company_website: Optional[str] = "https://www.yexiselectronics.com/"
+    company_name: Optional[str] = Field(default="Rio CRM")
+    company_website: Optional[str] = Field(default="https://rio-crm.example.com/")
 
 class UserUpdate(SQLModel):
     first_name: Optional[str] = None

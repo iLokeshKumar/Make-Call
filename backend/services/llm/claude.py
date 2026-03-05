@@ -11,7 +11,7 @@ class ClaudeLLM(BaseLLM):
     def __init__(self, system_prompt: str):
         super().__init__(system_prompt)
         self.provider = "Anthropic"
-        self.model = "claude-3-5-sonnet-20240620"
+        self.model = os.getenv("Claude_API_ID", "claude-haiku-4-5-20251001")
         self.client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
     def _convert_tools(self, mistral_tools: List[Dict]) -> List[Dict]:

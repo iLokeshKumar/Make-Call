@@ -27,35 +27,59 @@ class GoogleMeetGenerator:
         self.authenticate()
     
     def authenticate(self):
-        """Authenticate with Google Calendar API using OAuth2"""
+        """Check if authenticated, otherwise prepare for OAuth flow."""
         try:
-            # Try to load cached credentials
             if os.path.exists('token.pickle'):
                 with open('token.pickle', 'rb') as token:
                     self.credentials = pickle.load(token)
-                logger.info("✅ Loaded cached Google credentials")
-                return
+                
+                # Check if expired
+                if self.credentials and self.credentials.expired and self.credentials.refresh_token:
+                    from google.auth.transport.requests import Request
+                    try:
+                        self.credentials.refresh(Request())
+                        with open('token.pickle', 'wb') as token:
+                            pickle.dump(self.credentials, token)
+                        logger.info("✅ Refreshed Google credentials")
+                    except Exception as re:
+                        logger.warning(f"⚠️ Refresh failed: {re}. Re-authentication needed.")
+                        self.credentials = None
+                
+                if self.credentials:
+                    logger.info("✅ Google Calendar Authenticated")
+                    return True
             
-            # Create OAuth2 flow (installed app flow for desktop)
-            flow = InstalledAppFlow.from_client_secrets_file(
-                'google_credentials.json',
-                SCOPES
-            )
+            return False
+        except Exception as e:
+            logger.error(f"❌ Google auth check failed: {e}")
+            return False
+
+    def get_auth_url(self) -> str:
+        """Get the URL for the user to visit and authorize."""
+        flow = InstalledAppFlow.from_client_secrets_file('google_credentials.json', SCOPES)
+        # Using a fixed redirect URI that doesn't rely on a local server
+        flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob' 
+        auth_url, _ = flow.authorization_url(prompt='consent')
+        return auth_url
+
+    def finalize_auth(self, code: str) -> bool:
+        """Exchange auth code for tokens and save them."""
+        try:
+            flow = InstalledAppFlow.from_client_secrets_file('google_credentials.json', SCOPES)
+            flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
+            flow.fetch_token(code=code)
+            self.credentials = flow.credentials
             
-            # Use a fixed port to match Authorized Redirect URIs in Google Console
-            self.credentials = flow.run_local_server(port=3010)
-            
-            # Save credentials for future use
             with open('token.pickle', 'wb') as token:
                 pickle.dump(self.credentials, token)
             
-            logger.info("✅ Google Calendar authenticated successfully")
-            
+            logger.info("✅ Google Calendar tokens generated and saved")
+            return True
         except Exception as e:
-            logger.error(f"❌ Google authentication failed: {e}")
-            logger.warning("⚠️ Google Meet link generation will not work without authentication")
+            logger.error(f"❌ Failed to finalize auth: {e}")
+            return False
     
-    def create_google_meet_event(self, lead_name: str, lead_email: str, proposed_time: str, 
+    async def create_google_meet_event(self, lead_name: str, lead_email: str, proposed_time: str, 
                                   meeting_type: str = "demo", duration_minutes: int = 30) -> dict:
         """
         Create a Google Calendar event with Google Meet link
@@ -86,8 +110,8 @@ class GoogleMeetGenerator:
             }
         
         try:
-            # Parse proposed_time to datetime
-            meeting_datetime = self._parse_time_string(proposed_time)
+            # Parse proposed_time to datetime (ASYNC)
+            meeting_datetime = await self._parse_time_string(proposed_time)
             
             if not meeting_datetime:
                 return {
@@ -181,7 +205,7 @@ class GoogleMeetGenerator:
         
         return build('calendar', 'v3', credentials=self.credentials)
     
-    def _parse_time_string(self, time_str: str) -> datetime:
+    async def _parse_time_string(self, time_str: str) -> datetime:
         """
         Parse natural language time string to datetime
         
@@ -190,29 +214,33 @@ class GoogleMeetGenerator:
         - "2026-01-30 14:00" → January 30, 2026 at 2:00 PM
         - "tomorrow at 10 AM" → tomorrow at 10:00 AM
         """
-        import dateutil.parser as parser
-        from dateutil.relativedelta import relativedelta
+        import dateparser
+        import re
+        from utils.date_normalizer import normalize_date_ai
         
         try:
-            # Try direct parsing first
-            dt = parser.parse(time_str, fuzzy=True)
+            # Pre-process natural language strings for better parsing
+            processed_time = time_str.lower().strip()
+            processed_time = re.sub(r'\b(coming|next)\b\s*', '', processed_time)
             
-            # If the parsed date is in the past, assume it's for next occurrence
-            now = datetime.now()
-            if dt < now:
-                # If only time was parsed (date defaults to 1900), add today and check
-                if dt.year == 1900:
-                    dt = dt.replace(year=now.year, month=now.month, day=now.day)
-                    if dt < now:
-                        dt = dt + timedelta(days=1)
-                # If it's a weekday name (like "Tuesday"), find next occurrence
-                elif dt.date() < now.date():
-                    # This is likely a weekday that was parsed, find next occurrence
-                    days_ahead = (dt.weekday() - now.weekday()) % 7
-                    if days_ahead <= 0:
-                        days_ahead += 7
-                    dt = now + timedelta(days=days_ahead)
+            # 1. Local Parsing
+            dt = dateparser.parse(
+                processed_time,
+                settings={
+                    'PREFER_DATES_FROM': 'future',
+                    'RELATIVE_BASE': datetime.now()
+                }
+            )
             
+            # 2. AI Fallback
+            if not dt:
+                logger.info(f"🧠 [Calendar Service] Local parsing failed for '{time_str}', invoking AI Normalizer")
+                dt = await normalize_date_ai(time_str)
+            
+            if not dt:
+                logger.error(f"❌ Could not parse time: {processed_time} (original: {time_str})")
+                return None
+                
             return dt
         
         except Exception as e:
@@ -220,7 +248,7 @@ class GoogleMeetGenerator:
             return None
 
 
-def create_google_meet_for_booking(lead_name: str, lead_email: str, proposed_time: str, 
+async def create_google_meet_for_booking(lead_name: str, lead_email: str, proposed_time: str, 
                                     meeting_type: str = "demo") -> dict:
     """
     Convenience function to create Google Meet link for a booking
@@ -234,7 +262,7 @@ def create_google_meet_for_booking(lead_name: str, lead_email: str, proposed_tim
     """
     try:
         generator = GoogleMeetGenerator()
-        result = generator.create_google_meet_event(lead_name, lead_email, proposed_time, meeting_type)
+        result = await generator.create_google_meet_event(lead_name, lead_email, proposed_time, meeting_type)
         return result
     except Exception as e:
         logger.error(f"❌ Google Meet creation error: {e}")

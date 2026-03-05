@@ -1215,11 +1215,11 @@ async def incoming_call(request: Request, lead_id: int = None):
 
     # Announce based on engine
     if active_engine == "mistral":
-        response.say("Connected to AI assistant from Yexis Electronics by Mistral. Please start speaking.")
+        response.say("Connected to Digital Sales Representative from Yexis Electronics by Mistral. Please start speaking.")
     elif active_engine == "gemini":
-        response.say("Connected to AI assistant from Yexis Electronics by Google. Please start speaking.")
+        response.say("Connected to Digital Sales Representative from Yexis Electronics by Google. Please start speaking.")
     else:
-        response.say("Connected to Yexis Electronics AI assistant. Please start speaking.")
+        response.say("Connected to Yexis Electronics Digital Sales Representative. Please start speaking.")
     connect = Connect()
     stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')
     stream.parameter(name="interaction_id", value=str(interaction.id))

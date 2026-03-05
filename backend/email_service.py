@@ -10,7 +10,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer", company_name: str = "Yexis Electronics", company_website: str = "https://www.yexiselectronics.com/"):
+def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer", company_name: str = "Rio CRM", company_website: str = "https://rio-crm.example.com/"):
     """
     Wraps the body in a premium, modern HTML template.
     """
@@ -39,7 +39,7 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer",
                 <div style="font-size: 16px; color: #475569;">
                     {body.replace('\\n', '<br>')}
                 </div>
-                <p style="margin-top: 30px;">Best regards,<br><strong>Rio AI Assistant</strong><br>{company_name} Team</p>
+                <p style="margin-top: 30px;">Best regards,<br><strong>Rio Digital Sales Representative</strong><br>{company_name} Team</p>
             </div>
             <div class="footer">
                 &copy; 2026 {company_name}. All rights reserved.<br>

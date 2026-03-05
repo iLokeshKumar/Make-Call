@@ -1,7 +1,10 @@
 import os
 import logging
 from datetime import datetime, timezone
+import re
 from dateutil import parser as date_parser
+import dateparser
+from utils.date_normalizer import normalize_date_ai
 from fastmcp import FastMCP
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -406,7 +409,41 @@ def send_email(phone: str, email: str, subject: str, body: str) -> dict:
             return {"success": False, "message": "SMTP failure. Check environmental variables."}
 
 @mcp.tool()
-def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None) -> dict:
+def get_google_auth_url() -> dict:
+    """
+    Returns the URL to authenticate Rio with Google Calendar.
+    Use this if the user asks how to authorize or link their Google account.
+    """
+    from google_calendar_service import GoogleMeetGenerator
+    try:
+        generator = GoogleMeetGenerator()
+        auth_url = generator.get_auth_url()
+        return {
+            "success": True,
+            "auth_url": auth_url,
+            "message": "Please visit this URL to authorize Google Calendar, then provide the code using 'submit_google_auth_code'."
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+def submit_google_auth_code(code: str) -> dict:
+    """
+    Submits the Google authorization code to finalize linking.
+    """
+    from google_calendar_service import GoogleMeetGenerator
+    try:
+        generator = GoogleMeetGenerator()
+        success = generator.finalize_auth(code)
+        return {
+            "success": success,
+            "message": "Google Calendar linked successfully!" if success else "Failed to link Google Calendar. Check logs."
+        }
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+@mcp.tool()
+async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None) -> dict:
     """
     Book a meeting/demo for a qualified lead with Google Meet link.
     This MCP tool is self-contained - it handles all side effects internally:
@@ -433,7 +470,8 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
         "calendar_url": str,
         "email_sent": bool,
         "needs_email": bool,
-        "message": str
+        "message": str,
+        "auth_url": str (if Google Calendar needs authentication)
     }
     """
     logger.info(f"[book_meeting] Starting: lead_id={lead_id}, time={proposed_time}, type={meeting_type}")
@@ -449,45 +487,56 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
             
             if not lead:
                 error_msg = f"Lead with ID {lead_id} not found"
-                logger.error(f"[book_meeting] {error_msg}")
                 return {"confirmed": False, "error": error_msg, "needs_email": False}
             
             lead_dict = dict(lead._mapping)
-            logger.info(f"[book_meeting] Lead found: {lead_dict['name']}")
             
             # STEP 1B: Handle missing email
             if not lead_dict.get("email"):
                 if not lead_email:
-                    # Email missing and not provided - need to ask Rio to collect it
-                    logger.warning(f"[book_meeting] Lead {lead_id} has no email. Requesting from Rio...")
                     return {
                         "confirmed": False,
                         "needs_email": True,
                         "lead_id": lead_id,
                         "lead_name": lead_dict["name"],
-                        "message": f"⚠️ {lead_dict['name']} doesn't have an email on file. Please ask them for their email address so we can send the meeting confirmation."
+                        "message": f"⚠️ {lead_dict['name']} needs an email address for the invite."
                     }
                 else:
-                    # Email provided by Rio - update the lead record
-                    logger.info(f"[book_meeting] Updating email for lead {lead_id}: {lead_email}")
                     session.execute(
                         text("UPDATE lead SET email = :email WHERE id = :lid"),
                         {"email": lead_email, "lid": lead_id}
                     )
                     session.commit()
                     lead_dict["email"] = lead_email
-                    logger.info(f"[book_meeting] Email updated successfully")
-            
-            # STEP 2: Create Google Meet link
+
+            # STEP 2: Authenticate & Create Google Meet link
             google_meet_link = None
             calendar_url = None
-            
-            if GOOGLE_CALENDAR_AVAILABLE and lead_dict.get("email"):
-                try:
-                    meet_result = create_google_meet_for_booking(
+            auth_needed = False
+            auth_url = None
+            time_to_use = proposed_time # Initialize time_to_use
+
+            if GOOGLE_CALENDAR_AVAILABLE:
+                from google_calendar_service import GoogleMeetGenerator
+                generator = GoogleMeetGenerator()
+                if not generator.authenticate():
+                    auth_needed = True
+                    auth_url = generator.get_auth_url()
+                    logger.warning("[book_meeting] Re-authentication required for Google Calendar")
+                    return {
+                        "confirmed": False,
+                        "message": "Google Calendar integration requires authentication. Please use 'get_google_auth_url' and 'submit_google_auth_code'.",
+                        "auth_url": auth_url
+                    }
+                else:
+                    # Normalize time before passing to Google Calendar
+                    parsed_dt = await normalize_date_ai(proposed_time)
+                    time_to_use = parsed_dt.isoformat() if parsed_dt else proposed_time
+                    
+                    meet_result = await generator.create_google_meet_event(
                         lead_name=lead_dict["name"],
                         lead_email=lead_dict["email"],
-                        proposed_time=proposed_time,
+                        proposed_time=time_to_use,
                         meeting_type=meeting_type
                     )
                     
@@ -496,15 +545,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                         calendar_url = meet_result.get("calendar_link")
                         logger.info(f"[book_meeting] Google Meet link created: {google_meet_link}")
                     else:
-                        logger.warning(f"[book_meeting] Google Meet creation failed: {meet_result.get('error')}")
-                
-                except Exception as e:
-                    logger.warning(f"[book_meeting] Google Meet error: {e}")
-            else:
-                if not GOOGLE_CALENDAR_AVAILABLE:
-                    logger.warning("[book_meeting] Google Calendar not available - Meet link will not be generated")
-                elif not lead_dict.get("email"):
-                    logger.warning("[book_meeting] Cannot create Meet link without email")
+                        logger.warning(f"[book_meeting] Meet creation failed: {meet_result.get('error')}")
             
             # STEP 3: Create appointment record in database
             appointment_insert = text("""
@@ -517,7 +558,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                 appointment_insert,
                 {
                     "lid": lead_id,
-                    "atime": proposed_time,
+                    "atime": time_to_use,
                     "status": "scheduled",
                     "meet_link": google_meet_link
                 }
@@ -576,9 +617,9 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                         {meet_section}
                         
                         <p>
-                            <a href="https://rio-crm.example.com/appointment/{appointment_id}" 
+                            <a href="#" 
                                style="display: inline-block; background-color: #27ae60; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                                View Full Meeting Details
+                                View Meeting Details
                             </a>
                         </p>
                         
@@ -588,7 +629,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                         
                         <div style="border-top: 1px solid #ecf0f1; padding-top: 20px; margin-top: 30px; color: #7f8c8d; font-size: 12px;">
                             <p>
-                            <strong>Rio</strong> - Your AI Sales Assistant<br/>
+                            <strong>Rio</strong> - Your Digital Sales Representative<br/>
                             Powered by Advanced Conversational AI<br/>
                             </p>
                         </div>
@@ -625,7 +666,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
                     logger.warning(f"[book_meeting] No email address for lead {lead_id}")
             
             # STEP 5: Return success response
-            crm_calendar_url = f"https://rio-crm.example.com/appointment/{appointment_id}"
+            crm_calendar_url = "#"
             
             return {
                 "confirmed": True,
@@ -653,7 +694,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", l
             }
 
 @mcp.tool()
-def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, email: str = None, notes: str = None) -> dict:
+async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, email: str = None, notes: str = None) -> dict:
     """
     Records a demo request with contact information, location, and product interest.
     Use this when a lead wants to schedule a demo for specific products.
@@ -677,7 +718,24 @@ def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincod
     try:
         # Detailed logging for debugging
         logger.info(f"[book_demo] Attempting to parse date string: '{demo_date}'")
-        parsed_date = date_parser.parse(demo_date)
+        
+        # Pre-process natural language strings for better parsing
+        processed_date = demo_date.lower().strip()
+        processed_date = re.sub(r'\b(coming|next)\b\s*', '', processed_date)
+        
+        # 3-Tier Parsing: 1. dateparser -> 2. AI Normalization -> 3. Fallback to now
+        parsed_date = dateparser.parse(
+            processed_date, 
+            settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': datetime.now()}
+        )
+        
+        if not parsed_date:
+            logger.info(f"[book_demo] dateparser failed for '{demo_date}', invoking AI Normalizer")
+            parsed_date = await normalize_date_ai(demo_date)
+            
+        if not parsed_date:
+            raise ValueError(f"AI could not resolve demo_date: '{demo_date}'")
+            
         if parsed_date.tzinfo is None:
             parsed_date = parsed_date.replace(tzinfo=timezone.utc)
         logger.info(f"[book_demo] Successfully parsed '{demo_date}' to: {parsed_date}")

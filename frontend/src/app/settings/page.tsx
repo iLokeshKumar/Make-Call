@@ -264,7 +264,7 @@ export default function SettingsPage() {
                                 <Brain className="h-5 w-5 text-white" />
                             </div>
                             <div>
-                                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">AI Assistant (Rio)</h3>
+                                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">Digital Sales Representative (Rio)</h3>
                                 <p className="text-sm text-slate-500 dark:text-slate-400">Modular Engine Configuration</p>
                             </div>
                         </div>

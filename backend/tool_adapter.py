@@ -1,5 +1,5 @@
 """
-Unified Tool Adapter for Rio AI Sales Assistant
+Unified Tool Adapter for Rio Digital Sales Representative
 
 ARCHITECTURE - This is the CORRECT MCP pattern:
 ===============================================
@@ -36,7 +36,9 @@ from mcp_server import (
     get_or_create_lead,
     sync_product_catalog,
     book_demo,
-    send_communication
+    send_communication,
+    get_google_auth_url,
+    submit_google_auth_code
 )
 
 logger = logging.getLogger(__name__)
@@ -124,7 +126,7 @@ def get_mistral_tools():
                         },
                         "proposed_time": {
                             "type": "string",
-                            "description": "Proposed meeting time (e.g., 'Tuesday at 3 PM' or '2026-01-28T15:00:00')"
+                            "description": "Proposed meeting time. Preferred format: ISO-8601 (e.g., '2026-03-30T15:00:00'). If unsure, use the raw natural language string (e.g., 'Coming Tuesday at 3 PM')."
                         },
                         "meeting_type": {
                             "type": "string",
@@ -191,7 +193,10 @@ def get_mistral_tools():
                         "city": {"type": "string", "description": "City"},
                         "state": {"type": "string", "description": "State"},
                         "pincode": {"type": "string", "description": "Pincode"},
-                        "demo_date": {"type": "string", "description": "The date and time requested for the demo (e.g., 'Tomorrow at 2 PM')"},
+                        "demo_date": {
+                            "type": "string", 
+                            "description": "The date and time requested for the demo. Preferred format: ISO-8601 (e.g., '2026-03-30T15:00:00'). If unsure, use the raw natural language string (e.g., 'Tomorrow at 2 PM')."
+                        },
                         "products": {"type": "string", "description": "The specific products or services the lead is interested in"},
                         "email": {"type": "string", "description": "Email address (optional)"},
                         "notes": {"type": "string", "description": "Additional requirements (optional)"}
@@ -220,6 +225,34 @@ def get_mistral_tools():
                         "phone": {"type": "string", "description": "Optional phone number (updates the lead and used for WhatsApp)"}
                     },
                     "required": ["lead_id", "channels", "content"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_google_auth_url",
+                "description": "Generate a URL for the user to authorize Rio to access their Google Calendar. Use this if the user asks how to link their account or if book_meeting requires it.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_google_auth_code",
+                "description": "Submit the 12-digit Google authorization code provided by the user after they visit the auth URL.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {
+                            "type": "string",
+                            "description": "The authorization code from Google (e.g. '4/0AdQt8...' )"
+                        }
+                    },
+                    "required": ["code"]
                 }
             }
         }
@@ -277,7 +310,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             return result
         elif tool_name == "book_meeting":
             # Delegate to MCP tool
-            result = book_meeting.fn(
+            result = await book_meeting.fn(
                 lead_id=arguments.get("lead_id"),
                 proposed_time=arguments.get("proposed_time"),
                 meeting_type=arguments.get("meeting_type", "demo")
@@ -311,7 +344,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
         
         elif tool_name == "book_demo":
             # Delegate to MCP tool
-            result = book_demo.fn(
+            result = await book_demo.fn(
                 lead_id=arguments.get("lead_id"),
                 name=arguments.get("name"),
                 phone=arguments.get("phone"),
@@ -339,9 +372,19 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
         
+        elif tool_name == "get_google_auth_url":
+            result = get_google_auth_url.fn()
+            logger.info(f"[execute_mcp_tool] {tool_name} returned result")
+            return result
+            
+        elif tool_name == "submit_google_auth_code":
+            result = submit_google_auth_code.fn(code=arguments.get("code"))
+            logger.info(f"[execute_mcp_tool] {tool_name} returned result")
+            return result
+        
         else:
             error = {
-                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog", "book_demo", "send_communication"]
+                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog", "book_demo", "send_communication", "get_google_auth_url", "submit_google_auth_code"]
             }
             logger.error(f"[execute_mcp_tool] Unknown tool error: {error}")
             return error

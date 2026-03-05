@@ -34,7 +34,12 @@ class VoicePipeline:
         self.llm_provider = llm_provider
         self.tts_provider = tts_provider
         
-        self.llm_service = get_llm_service(llm_provider, system_prompt)
+        # Inject current time into system prompt for relative date/time resolution
+        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        full_system_prompt = system_prompt + time_context
+        
+        self.llm_service = get_llm_service(llm_provider, full_system_prompt)
         self.tts_service = get_tts_service(tts_provider)
         self.stt_service = get_stt_service(stt_provider)
         

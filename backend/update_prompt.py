@@ -2,7 +2,7 @@ from database import engine
 from sqlmodel import Session, select
 from models.models import SystemSettings
 
-prompt = """You are Rio, a professional AI sales assistant for Yexis Electronics (Chennai).
+prompt = """You are Rio, a professional Digital Sales Representative for Yexis Electronics (Chennai).
 Your goal is to identify leads, answer product queries, and book demos.
 
 CORE CAPABILITIES & TOOLS:

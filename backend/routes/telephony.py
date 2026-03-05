@@ -52,11 +52,11 @@ async def incoming_call(request: Request, lead_id: int = None):
         company_name = admin.company_name if admin and admin.company_name else "Yexis Electronics"
 
     if active_engine == "mistral":
-        response.say(f"Connected to AI assistant from {company_name} by Mistral. Please start speaking.")
+        response.say(f"Connected to Digital Sales Representative from {company_name} by Mistral. Please start speaking.")
     elif active_engine == "gemini":
-        response.say(f"Connected to AI assistant from {company_name} by Google. Please start speaking.")
+        response.say(f"Connected to Digital Sales Representative from {company_name} by Google. Please start speaking.")
     else:
-        response.say(f"Connected to {company_name} AI assistant. Please start speaking.")
+        response.say(f"Connected to {company_name} Digital Sales Representative. Please start speaking.")
     
     connect = Connect()
     stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')

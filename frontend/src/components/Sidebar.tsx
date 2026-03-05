@@ -151,7 +151,7 @@ export default function Sidebar() {
                   <span className="gradient-text">{user?.company_name || "Rio"}</span>
                   <span className="text-slate-200 dark:text-slate-200 ml-1">CRM</span>
                 </h1>
-                <p className="text-[10px] text-slate-400 dark:text-slate-400 font-medium uppercase tracking-tighter">AI Sales Assistant</p>
+                <p className="text-[10px] text-slate-400 dark:text-slate-400 font-medium uppercase tracking-tighter">Digital Sales Representative</p>
               </div>
             )}
           </div>
