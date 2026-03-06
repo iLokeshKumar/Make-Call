@@ -15,20 +15,21 @@ from utils.audio import clean_voice_text
 from utils.config import mistral_client
 from tool_adapter import get_mistral_tools, execute_mcp_tool
 from sqlmodel import Session
-from models.models import Interaction, LatencyLog
+from models.models import Interaction, LatencyLog, User
 
 logger = logging.getLogger(__name__)
 
 class VoicePipeline:
     def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, 
                  stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
-                 company_name: str = "Yexis Electronics"):
+                 company_name: str = "Yexis Electronics", user: User = None):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
         self.transcript_accumulator = transcript_accumulator
         self.session = session
         self.company_name = company_name
+        self.user = user
         
         self.stt_provider = stt_provider
         self.llm_provider = llm_provider
@@ -82,52 +83,112 @@ class VoicePipeline:
         self.save_transcript()
 
         async def _audio_gen_from_queue():
-            chunk_count = 0
             while True:
                 data = await audio_queue.get()
                 event = data.get("event")
                 if event == "media":
-                    chunk_count += 1
-                    if chunk_count == 1:
-                        logger.info("🎤 First audio chunk received from Twilio")
                     yield base64.b64decode(data["media"]["payload"])
                 elif event == "stop":
-                    logger.info(f"🛑 [Twilio] Stream stopped. Total chunks: {chunk_count}")
                     break
+
+        # ── Two consumers of audio: barge-in detector + STT ──────────────
+        # We can't use the same generator twice, so we fan-out via a second queue
+        stt_queue = asyncio.Queue()
+        barge_queue = asyncio.Queue()
+
+        async def _fan_out():
+            """Read raw audio once, copy to both queues."""
+            async for chunk in _audio_gen_from_queue():
+                await stt_queue.put(chunk)
+                await barge_queue.put(chunk)
+            await stt_queue.put(None)   # sentinel
+            await barge_queue.put(None)
+
+        async def _stt_gen():
+            """Feed STT from stt_queue."""
+            while True:
+                chunk = await stt_queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+
+        async def _barge_in_detector():
+            """
+            Runs parallel to STT. Detects speech onset from raw mulaw audio.
+            Uses RMS energy — no API, no latency. Fires the moment customer speaks.
+            """
+            import audioop, struct, math
+            SPEECH_RMS = 400          # tune up if echo triggers, down if misses speech
+            SPEECH_FRAMES_NEEDED = 3  # ~3 consecutive 20ms frames = 60ms of speech
+            SILENCE_RESET_FRAMES = 15 # frames of silence before resetting counter
+            
+            speech_counter = 0
+            silence_counter = 0
+
+            while True:
+                chunk = await barge_queue.get()
+                if chunk is None:
+                    break
+
+                # mulaw → linear16 for RMS
+                try:
+                    pcm = audioop.ulaw2lin(chunk, 2)
+                except Exception:
+                    pcm = chunk
+
+                samples = struct.unpack(f"<{len(pcm)//2}h", pcm)
+                rms = math.sqrt(sum(s*s for s in samples) / len(samples)) if samples else 0
+
+                if rms > SPEECH_RMS:
+                    silence_counter = 0
+                    speech_counter += 1
+                    if speech_counter >= SPEECH_FRAMES_NEEDED:
+                        # Customer is speaking — interrupt Rio if she's talking
+                        if self.is_rio_speaking or not self.sentence_queue.empty():
+                            logger.info(f"⚡ [Barge-in] Customer speaking (RMS:{rms:.0f}) — interrupting")
+                            await self._handle_barge_in(reason="customer_speaking")
+                            speech_counter = 0  # reset after firing
+                else:
+                    silence_counter += 1
+                    if silence_counter > SILENCE_RESET_FRAMES:
+                        speech_counter = 0
 
         encoding, rate = "pcm_mulaw", "8000"
         stt_start_time = time.time()
         last_final_transcript = ""
         current_turn_transcript = ""
 
+        fan_out_task = asyncio.create_task(_fan_out())
+        barge_task = asyncio.create_task(_barge_in_detector())
+
         try:
-            async for result in self.stt_service.transcribe(
-                _audio_gen_from_queue(), encoding, rate
-            ):
+            async for result in self.stt_service.transcribe(_stt_gen(), encoding, rate):
                 transcript = result.get("transcript", "")
                 is_final = result.get("is_final", False)
                 res_type = result.get("type", "transcript")
 
                 if transcript:
-                    logger.debug(f"🎤 [VoicePipeline STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
+                    logger.debug(f"🎤 {'FINAL' if is_final else 'Interim'}: {transcript}")
                     current_turn_transcript = transcript
-                    
-                    # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
-                    if self.is_rio_speaking or not self.sentence_queue.empty():
-                        await self._handle_barge_in(reason=transcript)
 
                 if is_final or res_type == "end_of_turn":
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
                         continue
 
+                    # Gate: discard echo while Rio is speaking
+                    if self.is_rio_speaking or not self.sentence_queue.empty():
+                        logger.info(f"🔇 Echo ignored: '{current_turn_transcript}'")
+                        current_turn_transcript = ""
+                        continue
+
                     last_final_transcript = current_turn_transcript
-                    logger.info(f"🎤 [STT] {'🎯 EOT' if res_type == 'end_of_turn' else '✅ FINAL'}: {current_turn_transcript}")
+                    logger.info(f"🎤 [STT] FINAL: {current_turn_transcript}")
                     latency = time.time() - stt_start_time
+
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
 
                     if self.current_llm_task and not self.current_llm_task.done():
                         self.current_llm_task.cancel()
-                        logger.info("♻️ Cancelled previous LLM task for new turn.")
 
                     self.current_llm_task = asyncio.create_task(
                         self._process_llm_response(current_turn_transcript, latency)
@@ -140,6 +201,8 @@ class VoicePipeline:
         finally:
             await self.sentence_queue.put(None)
             await speaker_task
+            fan_out_task.cancel()
+            barge_task.cancel()
             ingest_task.cancel()
 
     async def _speaker_loop(self):
@@ -386,7 +449,7 @@ class VoicePipeline:
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
                         
                         try:
-                            result = await execute_mcp_tool(tool_name, tool_args)
+                            result = await execute_mcp_tool(tool_name, tool_args, user=self.user)
                             
                             # Auto-link interaction to lead if get_or_create_lead result has lead_id
                             if tool_name == "get_or_create_lead" and "lead_id" in result:

@@ -17,6 +17,7 @@ from auth import (
     generate_mfa_qr_base64, verify_mfa_token, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from email_service import send_smtp_email, get_styled_html
+from google_calendar_service import GoogleMeetGenerator
 
 router = APIRouter(tags=["Authentication"])
 
@@ -313,3 +314,42 @@ async def upload_avatar(
     except Exception as e:
         logger.error(f"❌ Avatar Upload Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload avatar")
+@router.get("/auth/google/url")
+async def get_google_auth_url(current_user: User = Depends(get_current_active_user)):
+    """Returns the URL for the user to visit and authorize Google Calendar."""
+    generator = GoogleMeetGenerator(user=current_user)
+    auth_url = generator.get_auth_url()
+    return {"auth_url": auth_url}
+
+@router.post("/auth/google/callback")
+async def google_auth_callback(
+    data: dict, 
+    current_user: User = Depends(get_current_active_user), 
+    session: Session = Depends(get_session)
+):
+    """Exchanges the authorization code for tokens and saves them for the user."""
+    code = data.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+    
+    generator = GoogleMeetGenerator(user=current_user)
+    success = generator.finalize_auth(code=code, user=current_user, session=session)
+    
+    if success:
+        return {"message": "Google account connected successfully! 📅"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to connect Google account")
+
+@router.delete("/auth/google/disconnect")
+async def google_auth_disconnect(
+    current_user: User = Depends(get_current_active_user), 
+    session: Session = Depends(get_session)
+):
+    """Disconnects and clears Google OAuth tokens for the current user."""
+    current_user.google_access_token = None
+    current_user.google_refresh_token = None
+    current_user.google_token_expiry = None
+    current_user.google_account_email = None
+    session.add(current_user)
+    session.commit()
+    return {"message": "Google account disconnected."}

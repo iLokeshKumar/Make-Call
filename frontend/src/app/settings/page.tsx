@@ -3,7 +3,6 @@
 import { useState, useEffect } from "react";
 import { Save, Brain, Bell, Shield, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
-import MFASetup from "@/components/MFASetup";
 import { useAuth } from "@/context/AuthContext";
 
 const themeOptions = [
@@ -53,32 +52,6 @@ export default function SettingsPage() {
         fetchSettings();
     }, [token, sessionTimeout]);
 
-    const handleDeleteAccount = async () => {
-        if (!window.confirm("ARE YOU SURE? This will permanently delete your account and you will be logged out immediately. This action cannot be undone.")) {
-            return;
-        }
-
-        try {
-            const res = await fetch(`${API_BASE}/auth/me`, {
-                method: "DELETE",
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                },
-            });
-
-            if (res.ok) {
-                alert("Account deleted successfully.");
-                localStorage.removeItem("access_token");
-                window.location.href = "/register";
-            } else {
-                const errorData = await res.json();
-                alert(`Error: ${errorData.detail || "Could not delete account"}`);
-            }
-        } catch (error) {
-            console.error("Error deleting account:", error);
-            alert("A network error occurred.");
-        }
-    };
 
     const handleSave = async () => {
         setSaving(true);
@@ -371,8 +344,6 @@ export default function SettingsPage() {
                     </div>
                 )}
 
-                {/* MFA Section */}
-                <MFASetup />
 
                 {/* Integrations */}
                 {user?.role === "admin" && (
@@ -423,7 +394,7 @@ export default function SettingsPage() {
 
                 {/* Save Button */}
                 {user?.role === "admin" && (
-                    <div className="flex justify-end">
+                    <div className="flex justify-end pt-12">
                         <button
                             onClick={handleSave}
                             disabled={saving}
@@ -437,32 +408,6 @@ export default function SettingsPage() {
                         </button>
                     </div>
                 )}
-
-                {/* Danger Zone */}
-                <div className="rounded-2xl border border-red-200 dark:border-red-900/30 bg-red-50/50 dark:bg-red-900/10 p-6 mt-12">
-                    <div className="flex items-center space-x-3 mb-4">
-                        <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-red-500">
-                            <Shield className="h-5 w-5 text-white" />
-                        </div>
-                        <div>
-                            <h3 className="text-xl font-bold text-red-600 dark:text-red-400">Danger Zone</h3>
-                            <p className="text-sm text-slate-500 dark:text-slate-400">Irreversible account actions</p>
-                        </div>
-                    </div>
-
-                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 p-4 rounded-xl bg-white/50 dark:bg-slate-900/50 border border-red-100 dark:border-red-900/20">
-                        <div>
-                            <p className="font-bold text-slate-900 dark:text-slate-100">Delete Account</p>
-                            <p className="text-sm text-slate-500 dark:text-slate-400">Permanently remove your account and all associated data.</p>
-                        </div>
-                        <button
-                            onClick={handleDeleteAccount}
-                            className="bg-red-600 hover:bg-red-700 text-white px-6 py-2 rounded-xl font-bold transition-all shadow-lg shadow-red-500/30 hover:shadow-red-500/50 whitespace-nowrap"
-                        >
-                            Delete My Account
-                        </button>
-                    </div>
-                </div>
             </div>
         </div>
     );

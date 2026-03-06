@@ -198,10 +198,11 @@ def get_mistral_tools():
                             "description": "The date and time requested for the demo. Preferred format: ISO-8601 (e.g., '2026-03-30T15:00:00'). If unsure, use the raw natural language string (e.g., 'Tomorrow at 2 PM')."
                         },
                         "products": {"type": "string", "description": "The specific products or services the lead is interested in"},
+                        "demo_type": {"type": "string", "enum": ["Online", "Offline"], "description": "Whether the demo is 'Online' (virtual) or 'Offline' (at customer's place)"},
                         "email": {"type": "string", "description": "Email address (optional)"},
                         "notes": {"type": "string", "description": "Additional requirements (optional)"}
                     },
-                    "required": ["lead_id", "name", "phone", "city", "state", "pincode", "demo_date", "products"]
+                    "required": ["lead_id", "name", "phone", "city", "state", "pincode", "demo_date", "products", "demo_type"]
                 }
             }
         },
@@ -261,7 +262,7 @@ def get_mistral_tools():
 
 # UNIFIED TOOL EXECUTOR
 
-async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
+async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
     """
     Execute MCP tools by delegating to mcp_server.py.
     
@@ -271,6 +272,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
     Args:
         tool_name: Name of the tool to execute
         arguments: Dict of arguments for the tool
+        user: Optional User object for personalization (e.g. Google Auth)
         
     Returns:
         Tool result as dict
@@ -313,7 +315,8 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
             result = await book_meeting.fn(
                 lead_id=arguments.get("lead_id"),
                 proposed_time=arguments.get("proposed_time"),
-                meeting_type=arguments.get("meeting_type", "demo")
+                meeting_type=arguments.get("meeting_type", "demo"),
+                user=user
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
@@ -353,6 +356,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
                 pincode=arguments.get("pincode"),
                 demo_date=arguments.get("demo_date"),
                 products=arguments.get("products"),
+                demo_type=arguments.get("demo_type", "Offline"),
                 email=arguments.get("email"),
                 notes=arguments.get("notes")
             )

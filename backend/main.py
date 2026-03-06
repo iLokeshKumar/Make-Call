@@ -119,7 +119,8 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         stt_provider=stt_provider,
         llm_provider=llm_provider,
         tts_provider=tts_provider,
-        company_name=company_name
+        company_name=company_name,
+        user=admin_user
     )
     
     # 3. Handle specific telephony stream sid if present

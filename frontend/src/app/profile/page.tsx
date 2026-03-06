@@ -4,14 +4,54 @@ import { useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import {
     User as UserIcon, Mail, Smartphone, Globe, Building2,
-    Lock, Save, Loader2, CheckCircle2, AlertCircle, Camera
+    Lock, Save, Loader2, CheckCircle2, AlertCircle, Camera,
+    Shield, Trash2, ExternalLink, RefreshCw, XCircle
 } from "lucide-react";
 import clsx from "clsx";
+import MFASetup from "@/components/MFASetup";
+import { useEffect } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 
 export default function ProfilePage() {
     const { user, token, refreshUser } = useAuth();
     const [isSaving, setIsSaving] = useState(false);
+    const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+    const searchParams = useSearchParams();
+    const router = useRouter();
+
+    useEffect(() => {
+        const code = searchParams.get("code");
+        if (code && token) {
+            const finalizeGoogleAuth = async () => {
+                setIsConnectingGoogle(true);
+                try {
+                    const res = await fetch("http://localhost:6060/auth/google/callback", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({ code }),
+                    });
+                    if (res.ok) {
+                        setMessage({ type: 'success', text: "Google account connected successfully! 📅" });
+                        await refreshUser();
+                        // Clean up URL
+                        router.replace("/profile");
+                    } else {
+                        setMessage({ type: 'error', text: "Failed to connect Google account." });
+                    }
+                } catch (err) {
+                    console.error("Finalizing Google Auth error:", err);
+                    setMessage({ type: 'error', text: "An error occurred during Google connection." });
+                } finally {
+                    setIsConnectingGoogle(false);
+                }
+            };
+            finalizeGoogleAuth();
+        }
+    }, [searchParams, token, refreshUser, router]);
 
     const [formData, setFormData] = useState({
         first_name: user?.first_name || "",
@@ -53,6 +93,76 @@ export default function ProfilePage() {
             setMessage({ type: 'error', text: "Upload error. Please try again." });
         } finally {
             setIsSaving(false);
+        }
+    };
+
+    const handleConnectGoogle = async () => {
+        setIsConnectingGoogle(true);
+        try {
+            const res = await fetch("http://localhost:6060/auth/google/url", {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            const data = await res.json();
+            if (data.auth_url) {
+                // Open in a new window/tab
+                const authWindow = window.open(data.auth_url, '_blank', 'width=600,height=700');
+
+                // Set up a listener for the callback
+                const checkWindow = setInterval(async () => {
+                    if (authWindow?.closed) {
+                        clearInterval(checkWindow);
+                        setIsConnectingGoogle(false);
+                        await refreshUser();
+                    }
+                }, 1000);
+            }
+        } catch (err) {
+            console.error("Google Auth error:", err);
+            setIsConnectingGoogle(false);
+        }
+    };
+
+    const handleDisconnectGoogle = async () => {
+        if (!window.confirm("Disconnect your Google account? You won't be able to generate Meet links automatically.")) return;
+
+        try {
+            const res = await fetch("http://localhost:6060/auth/google/disconnect", {
+                method: "DELETE",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                setMessage({ type: 'success', text: "Google account disconnected." });
+                await refreshUser();
+            }
+        } catch (err) {
+            setMessage({ type: 'error', text: "Failed to disconnect." });
+        }
+    };
+
+    const handleDeleteAccount = async () => {
+        if (!window.confirm("ARE YOU SURE? This will permanently delete your account and you will be logged out immediately. This action cannot be undone.")) {
+            return;
+        }
+
+        try {
+            const res = await fetch("http://localhost:6060/auth/me", {
+                method: "DELETE",
+                headers: {
+                    "Authorization": `Bearer ${token}`
+                },
+            });
+
+            if (res.ok) {
+                alert("Account deleted successfully.");
+                localStorage.removeItem("access_token");
+                window.location.href = "/register";
+            } else {
+                const errorData = await res.json();
+                alert(`Error: ${errorData.detail || "Could not delete account"}`);
+            }
+        } catch (error) {
+            console.error("Error deleting account:", error);
+            alert("A network error occurred.");
         }
     };
 
@@ -264,6 +374,87 @@ export default function ProfilePage() {
                                 >
                                     {isSaving ? <Loader2 size={18} className="animate-spin" /> : <Save size={18} />}
                                     {isSaving ? "Saving..." : "Save Changes"}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Connected Accounts Section */}
+                        <div className="glass-panel p-8 rounded-3xl space-y-6">
+                            <div className="flex items-center space-x-2 text-slate-400 border-b border-white/5 pb-2">
+                                <Globe size={16} />
+                                <span className="text-xs font-bold uppercase tracking-wider">Connected Accounts</span>
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-4">
+                                <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-violet-500/30 transition-all group">
+                                    <div className="flex items-center space-x-4">
+                                        <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-white text-slate-900 font-bold shadow-lg">
+                                            G
+                                        </div>
+                                        <div>
+                                            <p className="font-bold text-white">Google Account</p>
+                                            <p className="text-xs text-slate-500">
+                                                {user?.google_account_email ? `Connected: ${user.google_account_email}` : "For Google Meet integration"}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {user?.google_account_email ? (
+                                        <button
+                                            type="button"
+                                            onClick={handleDisconnectGoogle}
+                                            className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500 hover:text-white transition-all"
+                                        >
+                                            <XCircle size={14} />
+                                            <span>Disconnect</span>
+                                        </button>
+                                    ) : (
+                                        <button
+                                            type="button"
+                                            onClick={handleConnectGoogle}
+                                            disabled={isConnectingGoogle}
+                                            className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
+                                        >
+                                            {isConnectingGoogle ? <RefreshCw size={14} className="animate-spin" /> : <ExternalLink size={14} />}
+                                            <span>Connect Google</span>
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* MFA Section */}
+                        <div className="glass-panel p-8 rounded-3xl overflow-hidden relative">
+                            <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
+                                <Shield size={120} className="text-violet-400" />
+                            </div>
+                            <MFASetup />
+                        </div>
+
+                        {/* Danger Zone */}
+                        <div className="rounded-3xl border border-red-500/20 bg-red-500/5 p-8 space-y-6">
+                            <div className="flex items-center space-x-3">
+                                <div className="h-10 w-10 rounded-xl bg-red-500 flex items-center justify-center text-white shadow-lg shadow-red-500/20">
+                                    <Shield size={20} />
+                                </div>
+                                <div>
+                                    <h3 className="text-xl font-bold text-red-400">Danger Zone</h3>
+                                    <p className="text-sm text-slate-500">Security and account deletion</p>
+                                </div>
+                            </div>
+
+                            <div className="p-6 rounded-2xl bg-slate-900/50 border border-red-500/10 flex flex-col md:flex-row items-center justify-between gap-6">
+                                <div className="space-y-1 text-center md:text-left">
+                                    <p className="font-bold text-white">Delete Account</p>
+                                    <p className="text-sm text-slate-500">Once deleted, your data cannot be recovered. Please be certain.</p>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={handleDeleteAccount}
+                                    className="flex items-center space-x-2 px-6 py-3 rounded-xl bg-red-600 text-white font-bold hover:bg-red-700 transition-all shadow-lg shadow-red-600/20"
+                                >
+                                    <Trash2 size={18} />
+                                    <span>Delete My Account</span>
                                 </button>
                             </div>
                         </div>

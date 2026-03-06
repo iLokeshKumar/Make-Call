@@ -10,6 +10,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as UserCredentials
 import pickle
 import requests
+from models.models import User
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +20,38 @@ SCOPES = ['https://www.googleapis.com/auth/calendar']
 class GoogleMeetGenerator:
     """Generate Google Meet links for demo meetings using Google Calendar API"""
     
-    def __init__(self):
-        """Initialize with credentials from environment"""
+    def __init__(self, user: User = None):
+        """Initialize with credentials from user or environment"""
         self.client_id = os.getenv("Client_ID")
         self.client_secret = os.getenv("Client_Secret")
         self.credentials = None
-        self.authenticate()
+        self.user = user
+        if user:
+            self.load_from_user(user)
+        else:
+            self.authenticate()
     
+    def load_from_user(self, user: User):
+        """Load credentials from a User model."""
+        if user.google_access_token and user.google_refresh_token:
+            self.credentials = UserCredentials(
+                token=user.google_access_token,
+                refresh_token=user.google_refresh_token,
+                token_uri="https://oauth2.googleapis.com/token",
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                scopes=SCOPES
+            )
+            # Handle expiry
+            if user.google_token_expiry:
+                self.credentials.expiry = user.google_token_expiry
+            
+            logger.info(f"✅ Loaded Google credentials for user: {user.username}")
+            return True
+        return False
+
     def authenticate(self):
-        """Check if authenticated, otherwise prepare for OAuth flow."""
+        """Check if authenticated (legacy/fallback), otherwise prepare for OAuth flow."""
         try:
             if os.path.exists('token.pickle'):
                 with open('token.pickle', 'rb') as token:
@@ -46,7 +70,7 @@ class GoogleMeetGenerator:
                         self.credentials = None
                 
                 if self.credentials:
-                    logger.info("✅ Google Calendar Authenticated")
+                    logger.info("✅ Google Calendar Authenticated (Legacy)")
                     return True
             
             return False
@@ -57,23 +81,42 @@ class GoogleMeetGenerator:
     def get_auth_url(self) -> str:
         """Get the URL for the user to visit and authorize."""
         flow = InstalledAppFlow.from_client_secrets_file('google_credentials.json', SCOPES)
-        # Using a fixed redirect URI that doesn't rely on a local server
-        flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob' 
+        # Using the web redirect URI for port 3006
+        flow.redirect_uri = 'http://localhost:3006/profile' 
         auth_url, _ = flow.authorization_url(prompt='consent')
         return auth_url
 
-    def finalize_auth(self, code: str) -> bool:
-        """Exchange auth code for tokens and save them."""
+    def finalize_auth(self, code: str, user: User = None, session=None) -> bool:
+        """Exchange auth code for tokens and save them to user or pickle."""
         try:
             flow = InstalledAppFlow.from_client_secrets_file('google_credentials.json', SCOPES)
-            flow.redirect_uri = 'urn:ietf:wg:oauth:2.0:oob'
+            flow.redirect_uri = 'http://localhost:3006/profile'
             flow.fetch_token(code=code)
             self.credentials = flow.credentials
             
-            with open('token.pickle', 'wb') as token:
-                pickle.dump(self.credentials, token)
+            if user and session:
+                user.google_access_token = self.credentials.token
+                user.google_refresh_token = self.credentials.refresh_token
+                user.google_token_expiry = self.credentials.expiry
+                
+                # Try to get the email if possible
+                try:
+                    user_info = requests.get(
+                        'https://www.googleapis.com/oauth2/v3/userinfo',
+                        headers={'Authorization': f'Bearer {self.credentials.token}'}
+                    ).json()
+                    user.google_account_email = user_info.get('email')
+                except:
+                    pass
+                
+                session.add(user)
+                session.commit()
+                logger.info(f"✅ Google Calendar tokens saved to database for user: {user.username}")
+            else:
+                with open('token.pickle', 'wb') as token:
+                    pickle.dump(self.credentials, token)
+                logger.info("✅ Google Calendar tokens generated and saved (Legacy)")
             
-            logger.info("✅ Google Calendar tokens generated and saved")
             return True
         except Exception as e:
             logger.error(f"❌ Failed to finalize auth: {e}")

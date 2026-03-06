@@ -37,6 +37,7 @@ class Demo(AuditMixin, table=True):
     demo_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     status: str = Field(default="Scheduled")
     products: Optional[str] = None
+    demo_type: str = Field(default="Offline")
     notes: Optional[str] = None
 
 class DemoCreate(SQLModel):
@@ -49,6 +50,7 @@ class DemoCreate(SQLModel):
     pincode: str
     demo_date: Optional[datetime] = None
     products: Optional[str] = None
+    demo_type: Optional[str] = "Offline"
     notes: Optional[str] = None
 
 class Interaction(AuditMixin, table=True):
@@ -125,10 +127,14 @@ class User(AuditMixin, table=True):
     profile_picture_url: Optional[str] = None
     reveal_otp: Optional[str] = None
     reveal_otp_expires_at: Optional[datetime] = None
-    company_name: Optional[str] = Field(default="Yexis Electronics")
-    company_website: Optional[str] = Field(default="https://www.yexiselectronics.com/")
     company_name: Optional[str] = Field(default="Rio CRM")
     company_website: Optional[str] = Field(default="https://rio-crm.example.com/")
+    
+    # Google OAuth Fields
+    google_access_token: Optional[str] = None
+    google_refresh_token: Optional[str] = None
+    google_token_expiry: Optional[datetime] = None
+    google_account_email: Optional[str] = None
 
 class UserCreate(SQLModel):
     username: str

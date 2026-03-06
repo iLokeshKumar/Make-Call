@@ -493,21 +493,13 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             
             # STEP 1B: Handle missing email
             if not lead_dict.get("email"):
-                if not lead_email:
-                    return {
-                        "confirmed": False,
-                        "needs_email": True,
-                        "lead_id": lead_id,
-                        "lead_name": lead_dict["name"],
-                        "message": f"⚠️ {lead_dict['name']} needs an email address for the invite."
-                    }
-                else:
-                    session.execute(
-                        text("UPDATE lead SET email = :email WHERE id = :lid"),
-                        {"email": lead_email, "lid": lead_id}
-                    )
-                    session.commit()
-                    lead_dict["email"] = lead_email
+                return {
+                    "confirmed": False,
+                    "needs_email": True,
+                    "lead_id": lead_id,
+                    "lead_name": lead_dict["name"],
+                    "message": f"⚠️ {lead_dict['name']} needs an email address for the invite."
+                }
 
             # STEP 2: Authenticate & Create Google Meet link
             google_meet_link = None
@@ -518,7 +510,7 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
 
             if GOOGLE_CALENDAR_AVAILABLE:
                 from google_calendar_service import GoogleMeetGenerator
-                generator = GoogleMeetGenerator()
+                generator = GoogleMeetGenerator(user=user)
                 if not generator.authenticate():
                     auth_needed = True
                     auth_url = generator.get_auth_url()
@@ -694,7 +686,7 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             }
 
 @mcp.tool()
-async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, email: str = None, notes: str = None) -> dict:
+async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, demo_type: str = "Offline", email: str = None, notes: str = None) -> dict:
     """
     Records a demo request with contact information, location, and product interest.
     Use this when a lead wants to schedule a demo for specific products.
@@ -753,6 +745,7 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
             state=state,
             pincode=pincode,
             products=products,
+            demo_type=demo_type,
             notes=notes,
             status="Scheduled",
             demo_date=parsed_date
@@ -783,8 +776,8 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
         
         if EMAIL_SERVICE_AVAILABLE and target_email:
             try:
-                subject = f"Demo Confirmation - {products}"
-                body = f"Hi {name},\n\nYour demo request for {products} has been recorded for {demo_date}.\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon to finalize the details."
+                subject = f"{demo_type} Demo Confirmation - {products}"
+                body = f"Hi {name},\n\nYour {demo_type.lower()} demo request for {products} has been recorded for {demo_date}.\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon to finalize the details."
                 html_content = get_styled_html(subject, body, name)
                 email_sent = send_smtp_email(target_email, subject, body, html_body=html_content)
                 if email_sent:

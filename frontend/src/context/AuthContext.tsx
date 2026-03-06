@@ -16,6 +16,7 @@ interface User {
     profile_picture_url?: string;
     company_name?: string;
     company_website?: string;
+    google_account_email?: string;
 }
 
 interface AuthContextType {
