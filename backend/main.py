@@ -85,6 +85,7 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         logger.warning("⚠️ No users found in database for branding!")
 
     company_name = admin_user.company_name if admin_user and admin_user.company_name else "Rio CRM"
+    company_website = admin_user.company_website if admin_user and admin_user.company_website else "https://rio-crm.example.com/"
     
     system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
     logger.info(f"📜 Original System Prompt (first 50 chars): {system_prompt[:50]}...")

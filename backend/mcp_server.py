@@ -10,7 +10,7 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 from dotenv import load_dotenv
 from sqlmodel import select
-from models.models import Lead, Interaction, Product, Appointment, LatencyLog, Outcome, Demo
+from models.models import Lead, Interaction, Product, Appointment, LatencyLog, Outcome, Demo, User
 from rag_service import search_products, sync_products_to_chroma
 from utils.phone import normalize_phone
 
@@ -443,7 +443,7 @@ def submit_google_auth_code(code: str) -> dict:
         return {"success": False, "error": str(e)}
 
 @mcp.tool()
-async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None) -> dict:
+async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None, user: User = None) -> dict:
     """
     Book a meeting/demo for a qualified lead with Google Meet link.
     This MCP tool is self-contained - it handles all side effects internally:
@@ -686,7 +686,7 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             }
 
 @mcp.tool()
-async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, demo_type: str = "Offline", email: str = None, notes: str = None) -> dict:
+async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, demo_type: str = "Offline", email: str = None, notes: str = None, user: User = None) -> dict:
     """
     Records a demo request with contact information, location, and product interest.
     Use this when a lead wants to schedule a demo for specific products.
@@ -750,6 +750,26 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
             status="Scheduled",
             demo_date=parsed_date
         )
+
+        # Handle Online Demo with Google Meet link
+        google_meet_link = None
+        if demo_type.lower() == "online" and GOOGLE_CALENDAR_AVAILABLE:
+            from google_calendar_service import GoogleMeetGenerator
+            generator = GoogleMeetGenerator(user=user)
+            if generator.authenticate():
+                # Extract clean meeting type from products
+                meeting_title = f"{products} Demo"
+                meet_result = await generator.create_google_meet_event(
+                    lead_name=name,
+                    lead_email=email or "customer@example.com",
+                    proposed_time=parsed_date.isoformat(),
+                    meeting_type=meeting_title
+                )
+                if meet_result.get("success"):
+                    google_meet_link = meet_result.get("google_meet_link")
+                    demo.google_meet_link = google_meet_link
+                    logger.info(f"[book_demo] Created Google Meet for online demo: {google_meet_link}")
+
         session.add(demo)
         session.commit()
         session.refresh(demo)
@@ -777,7 +797,8 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
         if EMAIL_SERVICE_AVAILABLE and target_email:
             try:
                 subject = f"{demo_type} Demo Confirmation - {products}"
-                body = f"Hi {name},\n\nYour {demo_type.lower()} demo request for {products} has been recorded for {demo_date}.\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon to finalize the details."
+                meet_text = f"\n\nGoogle Meet Link: {google_meet_link}" if google_meet_link else ""
+                body = f"Hi {name},\n\nYour {demo_type.lower()} demo request for {products} has been recorded for {demo_date}.{meet_text}\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon to finalize the details."
                 html_content = get_styled_html(subject, body, name)
                 email_sent = send_smtp_email(target_email, subject, body, html_body=html_content)
                 if email_sent:
@@ -790,8 +811,11 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
             "demo_id": demo.id,
             "demo_date": parsed_date.isoformat(),
             "products": products,
+            "google_meet_link": google_meet_link,
             "email_sent": email_sent,
-            "message": f"✅ Demo for {products} successfully recorded for {name} on {demo_date}." + (" Confirmation email sent." if email_sent else "")
+            "message": f"✅ {demo_type} Demo for {products} successfully recorded for {name} on {demo_date}." + 
+                      (f" | Google Meet: {google_meet_link}" if google_meet_link else "") +
+                      (" | Confirmation email sent." if email_sent else "")
         }
 
 @mcp.tool()

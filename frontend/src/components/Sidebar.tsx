@@ -9,6 +9,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
+import { maskEmail, maskPhone } from "@/utils/security";
 
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
@@ -21,9 +22,8 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { user, token, logout } = useAuth();
+  const { user, token, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [showPersonalDetails, setShowPersonalDetails] = useState(false);
 
   // OTP Reveal State
   const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
@@ -33,40 +33,13 @@ export default function Sidebar() {
   const [otpError, setOtpError] = useState("");
 
   // Timer State
-  const [timeLeft, setTimeLeft] = useState(0);
   const REVEAL_DURATION = 120; // 2 minutes in seconds
 
   const filteredItems = navItems.filter(item => !item.adminOnly || user?.role === 'admin');
 
-  // Auto-hide effect
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (showPersonalDetails && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
-      }, 1000);
-    } else if (timeLeft === 0 && showPersonalDetails) {
-      setShowPersonalDetails(false);
-    }
-    return () => clearInterval(interval);
-  }, [showPersonalDetails, timeLeft]);
-
-  // Helper to mask sensitive data
-  const maskEmail = (email: string) => {
-    if (!email) return "••••@••••.•••";
-    const [name, domain] = email.split("@");
-    return `${name[0]}••••@${domain}`;
-  };
-
-  const maskPhone = (phone: string) => {
-    if (!phone) return "•••••••000";
-    return `•••••••${phone.slice(-3)}`;
-  };
-
   const handleRequestReveal = async () => {
     if (showPersonalDetails) {
-      setShowPersonalDetails(false);
-      setTimeLeft(0);
+      hidePersonalDetails();
       return;
     }
 
@@ -102,8 +75,7 @@ export default function Sidebar() {
       });
 
       if (res.ok) {
-        setShowPersonalDetails(true);
-        setTimeLeft(REVEAL_DURATION);
+        revealPersonalDetails();
         setIsOtpModalOpen(false);
         setOtpValue("");
       } else {

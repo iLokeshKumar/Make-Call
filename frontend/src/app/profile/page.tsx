@@ -1,57 +1,31 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import {
     User as UserIcon, Mail, Smartphone, Globe, Building2,
     Lock, Save, Loader2, CheckCircle2, AlertCircle, Camera,
-    Shield, Trash2, ExternalLink, RefreshCw, XCircle
+    Shield, Trash2, ExternalLink, RefreshCw, XCircle,
+    Eye, EyeOff, ShieldCheck, X, Clock
 } from "lucide-react";
 import clsx from "clsx";
 import MFASetup from "@/components/MFASetup";
 import { useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
+import { maskEmail, maskPhone } from "@/utils/security";
 
 export default function ProfilePage() {
-    const { user, token, refreshUser } = useAuth();
+    const { user, token, refreshUser, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
     const [isSaving, setIsSaving] = useState(false);
     const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
+    const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
+    const [otpValue, setOtpValue] = useState("");
+    const [isRequestingOtp, setIsRequestingOtp] = useState(false);
+    const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
+    const [otpError, setOtpError] = useState("");
     const searchParams = useSearchParams();
     const router = useRouter();
-
-    useEffect(() => {
-        const code = searchParams.get("code");
-        if (code && token) {
-            const finalizeGoogleAuth = async () => {
-                setIsConnectingGoogle(true);
-                try {
-                    const res = await fetch("http://localhost:6060/auth/google/callback", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${token}`,
-                        },
-                        body: JSON.stringify({ code }),
-                    });
-                    if (res.ok) {
-                        setMessage({ type: 'success', text: "Google account connected successfully! 📅" });
-                        await refreshUser();
-                        // Clean up URL
-                        router.replace("/profile");
-                    } else {
-                        setMessage({ type: 'error', text: "Failed to connect Google account." });
-                    }
-                } catch (err) {
-                    console.error("Finalizing Google Auth error:", err);
-                    setMessage({ type: 'error', text: "An error occurred during Google connection." });
-                } finally {
-                    setIsConnectingGoogle(false);
-                }
-            };
-            finalizeGoogleAuth();
-        }
-    }, [searchParams, token, refreshUser, router]);
 
     const [formData, setFormData] = useState({
         first_name: user?.first_name || "",
@@ -96,6 +70,42 @@ export default function ProfilePage() {
         }
     };
 
+    // Add this near the top of ProfilePage component
+    const hasHandledCode = useRef(false);
+
+    useEffect(() => {
+        const code = searchParams.get("code");
+        if (code && token && !hasHandledCode.current) {
+            hasHandledCode.current = true;  // ← blocks second fire
+            const finalizeGoogleAuth = async () => {
+                setIsConnectingGoogle(true);
+                try {
+                    const res = await fetch("http://localhost:6060/auth/google/callback", {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            Authorization: `Bearer ${token}`,
+                        },
+                        body: JSON.stringify({ code }),
+                    });
+                    if (res.ok) {
+                        setMessage({ type: 'success', text: "Google account connected successfully! 📅" });
+                        await refreshUser();
+                        router.replace("/profile");
+                    } else {
+                        const err = await res.json();
+                        setMessage({ type: 'error', text: err.detail || "Failed to connect Google account." });
+                    }
+                } catch (err) {
+                    setMessage({ type: 'error', text: "An error occurred during Google connection." });
+                } finally {
+                    setIsConnectingGoogle(false);
+                }
+            };
+            finalizeGoogleAuth();
+        }
+    }, [searchParams, token]); // ← remove refreshUser and router from deps
+
     const handleConnectGoogle = async () => {
         setIsConnectingGoogle(true);
         try {
@@ -136,6 +146,58 @@ export default function ProfilePage() {
             }
         } catch (err) {
             setMessage({ type: 'error', text: "Failed to disconnect." });
+        }
+    };
+
+    const handleRequestReveal = async () => {
+        if (showPersonalDetails) {
+            hidePersonalDetails();
+            return;
+        }
+
+        setIsOtpModalOpen(true);
+        setIsRequestingOtp(true);
+        setOtpError("");
+
+        try {
+            const res = await fetch("http://localhost:6060/auth/reveal/request", {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (!res.ok) throw new Error("Failed to send OTP");
+        } catch (err) {
+            setOtpError("Failed to send verification code. Please try again.");
+        } finally {
+            setIsRequestingOtp(false);
+        }
+    };
+
+    const handleVerifyReveal = async () => {
+        setIsVerifyingOtp(true);
+        setOtpError("");
+
+        try {
+            const res = await fetch("http://localhost:6060/auth/reveal/verify", {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`
+                },
+                body: JSON.stringify({ token: otpValue }),
+            });
+
+            if (res.ok) {
+                revealPersonalDetails();
+                setIsOtpModalOpen(false);
+                setOtpValue("");
+            } else {
+                const data = await res.json();
+                setOtpError(data.detail || "Invalid code. Please try again.");
+            }
+        } catch (err) {
+            setOtpError("Network error. Please try again.");
+        } finally {
+            setIsVerifyingOtp(false);
         }
     };
 
@@ -277,9 +339,26 @@ export default function ProfilePage() {
 
                             {/* Personal Section */}
                             <div className="space-y-6">
-                                <div className="flex items-center space-x-2 text-slate-400 border-b border-white/5 pb-2">
-                                    <UserIcon size={16} />
-                                    <span className="text-xs font-bold uppercase tracking-wider">Personal Information</span>
+                                <div className="flex items-center justify-between border-b border-white/5 pb-2">
+                                    <div className="flex items-center space-x-2 text-slate-400">
+                                        <UserIcon size={16} />
+                                        <span className="text-xs font-bold uppercase tracking-wider">Personal Information</span>
+                                    </div>
+                                    <div className="flex items-center gap-3">
+                                        {showPersonalDetails && (
+                                            <span className="flex items-center text-[10px] text-violet-400 font-bold uppercase tracking-tighter animate-pulse">
+                                                <Clock size={10} className="mr-1" /> {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
+                                            </span>
+                                        )}
+                                        <button
+                                            type="button"
+                                            onClick={handleRequestReveal}
+                                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-violet-400 transition-all border border-white/10 group"
+                                            title={showPersonalDetails ? "Hide private info" : "Reveal private info"}
+                                        >
+                                            {showPersonalDetails ? <EyeOff size={16} /> : <Eye size={16} />}
+                                        </button>
+                                    </div>
                                 </div>
 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -301,22 +380,33 @@ export default function ProfilePage() {
                                             className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all"
                                         />
                                     </div>
-                                    <div className="space-y-2 opacity-60">
+                                    <div className="space-y-2 opacity-80">
                                         <label className="text-xs font-bold text-slate-500 ml-1 flex items-center">
                                             Email address <Lock size={10} className="ml-1" />
                                         </label>
-                                        <div className="w-full bg-slate-900/80 border border-slate-800 rounded-xl px-4 py-3 text-slate-400 cursor-not-allowed">
-                                            {user?.email}
+                                        <div className="w-full bg-slate-900/80 border border-slate-800 rounded-xl px-4 py-3 text-slate-300 font-medium">
+                                            {showPersonalDetails ? user?.email : maskEmail(user?.email || '')}
                                         </div>
                                     </div>
                                     <div className="space-y-2">
                                         <label className="text-xs font-bold text-slate-500 ml-1">Phone Number</label>
-                                        <input
-                                            type="text"
-                                            value={formData.phone_number}
-                                            onChange={(e) => setFormData({ ...formData, phone_number: e.target.value })}
-                                            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all"
-                                        />
+                                        <div className="relative group/input">
+                                            <input
+                                                type="text"
+                                                value={showPersonalDetails ? formData.phone_number : maskPhone(formData.phone_number || '')}
+                                                onChange={(e) => setFormData({ ...formData, phone_number: e.target.value })}
+                                                disabled={!showPersonalDetails}
+                                                className={clsx(
+                                                    "w-full bg-slate-800/50 border rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all",
+                                                    showPersonalDetails ? "border-slate-700" : "border-slate-800/50 text-slate-500 cursor-not-allowed select-none"
+                                                )}
+                                            />
+                                            {!showPersonalDetails && (
+                                                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/40 backdrop-blur-[1px] rounded-xl opacity-0 group-hover/input:opacity-100 transition-opacity pointer-events-none">
+                                                    <span className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">Reveal to edit</span>
+                                                </div>
+                                            )}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -461,6 +551,72 @@ export default function ProfilePage() {
                     </div>
                 </form>
             </div>
+
+            {/* OTP Modal */}
+            {isOtpModalOpen && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+                    <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl space-y-6 relative overflow-hidden animate-in zoom-in-95 duration-300">
+                        {/* Modal Background Decor */}
+                        <div className="absolute -top-12 -right-12 h-32 w-32 bg-violet-600/20 rounded-full blur-3xl" />
+
+                        <div className="flex items-center justify-between">
+                            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                                <ShieldCheck className="text-violet-500" />
+                                Identity Verification
+                            </h3>
+                            <button
+                                type="button"
+                                onClick={() => setIsOtpModalOpen(false)}
+                                className="text-slate-400 hover:text-white transition-colors"
+                                disabled={isVerifyingOtp}
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        <p className="text-sm text-slate-400">
+                            We've sent a 6-digit verification code to <strong>{maskEmail(user?.email || '')}</strong>. Enter it below to reveal your sensitive details.
+                        </p>
+
+                        <div className="space-y-4">
+                            <div className="relative">
+                                <input
+                                    type="text"
+                                    maxLength={6}
+                                    value={otpValue}
+                                    onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ""))}
+                                    placeholder="000000"
+                                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-center text-3xl tracking-[0.4em] font-mono text-white focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all placeholder:text-slate-600"
+                                    disabled={isVerifyingOtp || isRequestingOtp}
+                                    autoFocus
+                                />
+                                {isRequestingOtp && (
+                                    <div className="absolute inset-0 bg-slate-900/50 flex items-center justify-center rounded-xl">
+                                        <Loader2 className="animate-spin text-violet-500" />
+                                    </div>
+                                )}
+                            </div>
+
+                            {otpError && (
+                                <p className="text-xs text-red-500 text-center animate-in shake duration-300">{otpError}</p>
+                            )}
+
+                            <button
+                                type="button"
+                                onClick={handleVerifyReveal}
+                                disabled={otpValue.length !== 6 || isVerifyingOtp || isRequestingOtp}
+                                className="w-full py-3 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white rounded-xl font-bold transition-all disabled:opacity-50 disabled:scale-100 active:scale-95 flex items-center justify-center"
+                            >
+                                {isVerifyingOtp ? <Loader2 className="animate-spin mr-2" /> : "Verify & Reveal"}
+                            </button>
+                        </div>
+
+                        <p className="text-[10px] text-center text-slate-500">
+                            This code will expire in 10 minutes. Haven't received it? Check your spam folder.
+                        </p>
+                    </div>
+                </div>
+            )}
 
             <style jsx>{`
         .glass-panel {

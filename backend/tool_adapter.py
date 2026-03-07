@@ -131,6 +131,10 @@ def get_mistral_tools():
                         "meeting_type": {
                             "type": "string",
                             "description": "Type of meeting: 'demo', 'consultation', 'followup', or 'discovery'"
+                        },
+                        "lead_email": {
+                            "type": "string",
+                            "description": "Optional email address to update the lead record"
                         }
                     },
                     "required": ["lead_id", "proposed_time", "meeting_type"]
@@ -316,6 +320,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
                 lead_id=arguments.get("lead_id"),
                 proposed_time=arguments.get("proposed_time"),
                 meeting_type=arguments.get("meeting_type", "demo"),
+                lead_email=arguments.get("lead_email"),
                 user=user
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
@@ -358,7 +363,8 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
                 products=arguments.get("products"),
                 demo_type=arguments.get("demo_type", "Offline"),
                 email=arguments.get("email"),
-                notes=arguments.get("notes")
+                notes=arguments.get("notes"),
+                user=user
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result

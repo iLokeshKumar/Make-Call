@@ -28,6 +28,10 @@ interface AuthContextType {
     isLoading: boolean;
     isSessionExpired: boolean;
     sessionTimeout: () => void;
+    showPersonalDetails: boolean;
+    revealPersonalDetails: () => void;
+    hidePersonalDetails: () => void;
+    timeLeft: number;
 }
 
 const AuthContext = createContext<AuthContextType>({
@@ -39,6 +43,10 @@ const AuthContext = createContext<AuthContextType>({
     isLoading: true,
     isSessionExpired: false,
     sessionTimeout: () => { },
+    showPersonalDetails: false,
+    revealPersonalDetails: () => { },
+    hidePersonalDetails: () => { },
+    timeLeft: 0,
 });
 
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
@@ -46,7 +54,32 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const [token, setToken] = useState<string | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isSessionExpired, setIsSessionExpired] = useState(false);
+    const [showPersonalDetails, setShowPersonalDetails] = useState(false);
+    const [timeLeft, setTimeLeft] = useState(0);
+    const REVEAL_DURATION = 120; // 2 minutes
     const router = useRouter();
+
+    useEffect(() => {
+        let interval: NodeJS.Timeout;
+        if (showPersonalDetails && timeLeft > 0) {
+            interval = setInterval(() => {
+                setTimeLeft((prev) => prev - 1);
+            }, 1000);
+        } else if (timeLeft === 0 && showPersonalDetails) {
+            setShowPersonalDetails(false);
+        }
+        return () => clearInterval(interval);
+    }, [showPersonalDetails, timeLeft]);
+
+    const revealPersonalDetails = () => {
+        setShowPersonalDetails(true);
+        setTimeLeft(REVEAL_DURATION);
+    };
+
+    const hidePersonalDetails = () => {
+        setShowPersonalDetails(false);
+        setTimeLeft(0);
+    };
 
     useEffect(() => {
         // Load token from localStorage on init
@@ -111,7 +144,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     return (
-        <AuthContext.Provider value={{ user, token, login, logout, refreshUser, isLoading, isSessionExpired, sessionTimeout }}>
+        <AuthContext.Provider value={{
+            user, token, login, logout, refreshUser, isLoading, isSessionExpired, sessionTimeout,
+            showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft
+        }}>
             {children}
         </AuthContext.Provider>
     );

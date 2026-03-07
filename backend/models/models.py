@@ -39,6 +39,7 @@ class Demo(AuditMixin, table=True):
     products: Optional[str] = None
     demo_type: str = Field(default="Offline")
     notes: Optional[str] = None
+    google_meet_link: Optional[str] = None
 
 class DemoCreate(SQLModel):
     lead_id: int
@@ -52,6 +53,7 @@ class DemoCreate(SQLModel):
     products: Optional[str] = None
     demo_type: Optional[str] = "Offline"
     notes: Optional[str] = None
+    google_meet_link: Optional[str] = None
 
 class Interaction(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)

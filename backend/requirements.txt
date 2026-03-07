@@ -19,3 +19,5 @@ python-multipart
 requests
 cartesia>=1.0.0
 sarvamai>=0.2.0
+dateparser
+python-dateutil

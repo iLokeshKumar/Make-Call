@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from google.oauth2 import service_account
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as UserCredentials
 import pickle
@@ -15,7 +15,11 @@ from models.models import User
 logger = logging.getLogger(__name__)
 
 # Google Calendar API scopes
-SCOPES = ['https://www.googleapis.com/auth/calendar']
+SCOPES = [
+    'https://www.googleapis.com/auth/calendar',
+    'https://www.googleapis.com/auth/userinfo.email',
+    'openid'
+]
 
 class GoogleMeetGenerator:
     """Generate Google Meet links for demo meetings using Google Calendar API"""
@@ -80,17 +84,14 @@ class GoogleMeetGenerator:
 
     def get_auth_url(self) -> str:
         """Get the URL for the user to visit and authorize."""
-        flow = InstalledAppFlow.from_client_secrets_file('google_credentials.json', SCOPES)
-        # Using the web redirect URI for port 3006
-        flow.redirect_uri = 'http://localhost:3006/profile' 
-        auth_url, _ = flow.authorization_url(prompt='consent')
+        flow = Flow.from_client_secrets_file('google_credentials.json', SCOPES, redirect_uri='http://localhost:3006/profile')
+        auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
         return auth_url
 
     def finalize_auth(self, code: str, user: User = None, session=None) -> bool:
         """Exchange auth code for tokens and save them to user or pickle."""
         try:
-            flow = InstalledAppFlow.from_client_secrets_file('google_credentials.json', SCOPES)
-            flow.redirect_uri = 'http://localhost:3006/profile'
+            flow = Flow.from_client_secrets_file('google_credentials.json', SCOPES, redirect_uri='http://localhost:3006/profile')
             flow.fetch_token(code=code)
             self.credentials = flow.credentials
             
@@ -106,8 +107,8 @@ class GoogleMeetGenerator:
                         headers={'Authorization': f'Bearer {self.credentials.token}'}
                     ).json()
                     user.google_account_email = user_info.get('email')
-                except:
-                    pass
+                except Exception as info_err:
+                    logger.error(f"❌ Failed to fetch Google user info: {info_err}")
                 
                 session.add(user)
                 session.commit()
