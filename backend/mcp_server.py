@@ -86,40 +86,68 @@ def get_appointments():
 @mcp.tool()
 def get_or_create_lead(name: str, phone: str, email: str = None) -> dict:
     """
-    Looks up a lead by phone number or creates a new one if not found. 
-    Use this towards the end of a conversation (e.g., when close to booking or finishing) 
-    to identify the user. Avoid calling this at the very start of the call.
+    Looks up a lead by phone number or email, or creates a new one if not found.
+    Implements deduplication by checking both identifiers.
     """
     normalized_phone = normalize_phone(phone)
-    logger.info(f"[get_or_create_lead] Searching for phone: {normalized_phone} (original: {phone})")
+    logger.info(f"[get_or_create_lead] Searching for phone: {normalized_phone} or email: {email}")
     
     with SessionLocal() as session:
-        # Use ORM select for better compatibility with AuditMixin
-        statement = select(Lead).where(Lead.phone == normalized_phone)
-        lead = session.execute(statement).scalar_one_or_none()
+        # 1. Search by phone
+        lead = session.exec(select(Lead).where(Lead.phone == normalized_phone)).first()
         
+        # 2. Search by email if not found by phone
+        if not lead and email:
+            lead = session.exec(select(Lead).where(Lead.email == email)).first()
+            if lead:
+                logger.info(f"[get_or_create_lead] Found lead by email: {email}")
+                # Update phone if it was missing or different?
+                # User says: if phone number is different & not present in existing record then create?
+                # No, "if lead is already there lets not create a lead". 
+                # So if we find it by email, we should probably update the phone if it's new.
+                if not lead.phone or lead.phone == "N/A":
+                    lead.phone = normalized_phone
+                    session.add(lead)
+                    session.commit()
+                    logger.info(f"[get_or_create_lead] Updated phone for lead {lead.id}")
+
         if not lead:
             logger.info(f"[get_or_create_lead] Creating new lead: {name}")
-            lead = Lead(name=name, phone=normalized_phone, email=email, status="New")
+            lead = Lead(
+                name=name, 
+                phone=normalized_phone, 
+                email=email, 
+                status="New",
+                source="On Call",
+                created_by="Rio AI"
+            )
             session.add(lead)
             session.commit()
             session.refresh(lead)
-            return {"lead_id": lead.id, "name": lead.name, "status": "New", "message": "New lead created successfully."}
+            return {"lead_id": lead.id, "name": lead.name, "status": "New", "message": "New lead created from call."}
         
-        # If lead exists but email is missing, update it
+        # 3. Update missing info on existing lead
+        updated = False
         if email and not lead.email:
             lead.email = email
+            updated = True
+        
+        if normalized_phone and (not lead.phone or lead.phone == "N/A"):
+            lead.phone = normalized_phone
+            updated = True
+            
+        if updated:
             session.add(lead)
             session.commit()
-            logger.info(f"[get_or_create_lead] Updated email for lead {lead.id}")
+            logger.info(f"[get_or_create_lead] Updated info for lead {lead.id}")
             
-        logger.info(f"[get_or_create_lead] Existing lead found: {lead.name} (ID: {lead.id})")
+        logger.info(f"[get_or_create_lead] Existing lead identified: {lead.name} (ID: {lead.id})")
         return {
             "lead_id": lead.id,
             "name": lead.name,
             "phone": lead.phone,
             "email": lead.email,
-            "message": "Existing lead identified."
+            "message": "Existing lead identified and confirmed."
         }
 
 @mcp.tool()
