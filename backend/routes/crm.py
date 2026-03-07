@@ -12,6 +12,7 @@ from utils.config import APOLLO_API_KEY
 from auth import RoleChecker, get_current_active_user
 from enrichment_service import enrich_lead_cascade
 from utils.phone import normalize_phone
+from utils import settings_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["CRM & Settings"])
@@ -227,4 +228,12 @@ async def update_settings(data: dict, session: Session = Depends(get_session)):
             db_s.value = str(value)
         session.add(db_s)
     session.commit()
+    settings_cache.update({key: str(value) for key, value in data.items()})
     return {"message": "Settings updated"}
+
+@router.get("/settings/reload_cache", dependencies=[Depends(RoleChecker(["admin"]))])
+async def reload_settings_cache(session: Session = Depends(get_session)):
+    """Force reload settings from DB into cache."""
+    settings_cache.load(session)
+    return {"message": f"Settings cache reloaded. Cache reloaded with {len(settings_cache.get_all())} keys"}
+

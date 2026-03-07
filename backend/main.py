@@ -18,6 +18,7 @@ from utils.config import PORT
 from routes import auth, crm, telephony
 from communicators import TwilioCommunicator, ExotelCommunicator, EnableXCommunicator
 from pipelines.voice_pipeline import VoicePipeline
+from utils import settings_cache
 
 # Setup logger
 logger = setup_logger(__name__)
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
     with Session(engine) as session:
         products = session.exec(select(Product)).all()
         sync_products_to_chroma(products)
+        settings_cache.load(session)
     
     yield
 
@@ -74,8 +76,11 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         logger.info(f"Assigning fallback Interaction ID: {interaction_id}")
     
     # Load dynamic context
-    settings_list = session.exec(select(SystemSettings)).all()
-    all_settings = {s.key: s.value for s in settings_list}
+    #settings_list = session.exec(select(SystemSettings)).all()
+    #all_settings = {s.key: s.value for s in settings_list}
+
+    # Use cached settings
+    all_settings = settings_cache.get_all()
     
     # Fetch admin user for company name
     admin_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
