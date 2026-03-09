@@ -36,6 +36,7 @@ ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "CwhOLp6mAE7h9asvUURR")
 
 # Server Config
 DOMAIN = os.getenv("DOMAIN", "localhost")
+EXOTEL_APP_ID = os.getenv("EXOTEL_APP_ID")
 if DOMAIN:
     DOMAIN = DOMAIN.replace("http://", "").replace("https://", "").replace("/", "")
 PORT = int(os.getenv("PORT", 6060))

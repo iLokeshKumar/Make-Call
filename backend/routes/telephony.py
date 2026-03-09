@@ -20,7 +20,7 @@ from models.models import Lead, Interaction, SystemSettings, Product, ApolloSear
 from utils.config import (
     DOMAIN, twilio_client, PHONE_NUMBER_FROM, 
     EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN,
-    ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE,
+    ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE, EXOTEL_APP_ID
 )
 from auth import RoleChecker
 
@@ -100,11 +100,14 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
         elif active_telephony == "exotel":
             url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
             exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id or 'default'}?lead_id={lead_id or 0}"
+            exotel_app_url = f"http://my.exotel.com/{EXOTEL_ACCOUNT_SID}/exoml/start/{EXOTEL_APP_ID}"
+            logger.info(f"🔗 Exotel ExoML URL: {exoml_url}")
+            logger.info(f"🔗 Exotel App URL: {exotel_app_url}")
             data = {
                 "From": to,
-                "To": EXOPHONE,
+                #"To": EXOPHONE,
                 "CallerId": EXOPHONE,
-                "Url": exoml_url,
+                "Url": exotel_app_url,
                 "CallType": "trans",
                 "TimeLimit": "3600",
                 "StatusCallback": f"https://{DOMAIN}/exotel-event"
@@ -141,7 +144,7 @@ async def exoml_start(request: Request, interaction_id: str = "default", lead_id
 </Response>"""
 
     logger.info(f"📋 ExoML served for interaction {interaction_id}: ws_url={ws_url}")
-    return Response(content=exoml, media_type="text/xml")
+    return Response(content=exoml, media_type="text/xml", headers={"ngrok-skip-browser-warning": "true"})
 
 @router.post("/enablex-event")
 async def enablex_event(request: Request, lead_id: int = None):
