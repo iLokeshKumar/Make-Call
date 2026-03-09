@@ -141,6 +141,53 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     finally:
         logger.info(f"👋 Pipeline finished for session: {interaction_id}")
 
+@app.websocket("/exotel-media-stream")
+async def handle_exotel_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
+    """Exotel media-stream handler — PCM s16le 8kHz, stream_sid at root."""
+    await websocket.accept()
+
+    interaction_id = websocket.query_params.get("interaction_id", f"exo_{uuid.uuid4().hex[:8]}")
+    lead_id = websocket.query_params.get("lead_id", "0")
+
+    all_settings = settings_cache.get_all()
+    admin_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
+    company_name = admin_user.company_name if admin_user and admin_user.company_name else "Rio CRM"
+
+    system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
+    for ph in ["{company_name}", "Yexis Electronics (Chennai)", "Yexis Electronics", "Rio CRM"]:
+        if ph in system_prompt:
+            system_prompt = system_prompt.replace(ph, company_name)
+            break
+
+    stt_provider = all_settings.get("stt_provider", "deepgram")
+    llm_provider = all_settings.get("llm_provider", "mistral")
+    tts_provider = all_settings.get("tts_provider", "cartesia")
+
+    communicator = ExotelCommunicator(websocket)
+
+    pipeline = VoicePipeline(
+        communicator,
+        interaction_id,
+        system_prompt,
+        [],
+        session,
+        stt_provider=stt_provider,
+        llm_provider=llm_provider,
+        tts_provider=tts_provider,
+        company_name=company_name,
+        user=admin_user,
+        audio_encoding="linear16",   # ← Exotel sends PCM not mulaw
+        audio_sample_rate=8000
+    )
+
+    logger.info(f"📞 Exotel connection | Interaction: {interaction_id} | Lead: {lead_id}")
+    try:
+        await pipeline.run()
+    except Exception as e:
+        logger.error(f"❌ Exotel Pipeline Error: {e}")
+    finally:
+        logger.info(f"👋 Exotel pipeline finished: {interaction_id}")
+
 
 if __name__ == "__main__":
     import uvicorn

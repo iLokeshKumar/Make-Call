@@ -22,7 +22,8 @@ logger = logging.getLogger(__name__)
 class VoicePipeline:
     def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, 
                  stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
-                 company_name: str = "Yexis Electronics", user: User = None):
+                 company_name: str = "Yexis Electronics", user: User = None,
+                 audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000): #made changes for exotel. specified audio_encoding and audio_sample_rate as str & int respectively.
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
@@ -34,6 +35,8 @@ class VoicePipeline:
         self.stt_provider = stt_provider
         self.llm_provider = llm_provider
         self.tts_provider = tts_provider
+        self.audio_encoding = audio_encoding
+        self.audio_sample_rate = audio_sample_rate
         
         # Inject current time into system prompt for relative date/time resolution
         now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
@@ -153,7 +156,8 @@ class VoicePipeline:
                     if silence_counter > SILENCE_RESET_FRAMES:
                         speech_counter = 0
 
-        encoding, rate = "pcm_mulaw", "8000"
+        # encoding, rate = "pcm_mulaw", "8000"
+        encoding, rate = self.audio_encoding, self.audio_sample_rate
         stt_start_time = time.time()
         last_final_transcript = ""
         current_turn_transcript = ""

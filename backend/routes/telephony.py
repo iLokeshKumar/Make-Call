@@ -20,7 +20,7 @@ from models.models import Lead, Interaction, SystemSettings, Product, ApolloSear
 from utils.config import (
     DOMAIN, twilio_client, PHONE_NUMBER_FROM, 
     EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN,
-    ENABLEX_APP_ID, ENABLEX_APP_KEY
+    ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE,
 )
 from auth import RoleChecker
 
@@ -98,16 +98,20 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
             return {"message": "Twilio Call initiated", "call_sid": call.sid}
         
         elif active_telephony == "exotel":
-            url = f"https://{EXOTEL_API_KEY}:{EXOTEL_API_TOKEN}@api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
+            url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
             exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id or 'default'}?lead_id={lead_id or 0}"
             data = {
                 "From": to,
-                "CallerId": PHONE_NUMBER_FROM,
+                "To": EXOPHONE,
+                "CallerId": EXOPHONE,
                 "Url": exoml_url,
-                "CallType": "trans"
+                "CallType": "trans",
+                "TimeLimit": "3600",
+                "StatusCallback": f"https://{DOMAIN}/exotel-event"
             }
+            auth = aiohttp.BasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
             async with aiohttp.ClientSession() as http_session:
-                async with http_session.post(url, data=data) as resp:
+                async with http_session.post(url, data=data, auth=auth) as resp:
                     result = await resp.json()
                     if resp.status not in [200, 201]:
                         raise Exception(f"Exotel Error: {result}")
@@ -123,17 +127,21 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
 @router.get("/exoml-start/{interaction_id}")
 @router.post("/exoml-start/{interaction_id}")
 async def exoml_start(request: Request, interaction_id: str = "default", lead_id: Optional[int] = None):
-    """Returns ExoML to connect Exotel call to WebSocket."""
-    ws_url = f"wss://{DOMAIN}/exotel-media-stream?sample-rate=16000&interaction_id={interaction_id}&lead_id={lead_id or 0}&ngrok-skip-browser-warning=1"
+    logger.info(f"📥 ExoML request from {request.client.host} | params: {dict(request.query_params)}")
+    # Strip any http/https prefix from DOMAIN — wss:// needs bare domain
+    bare_domain = DOMAIN.replace("https://", "").replace("http://", "").rstrip("/")
     
+    ws_url = f"wss://{bare_domain}/exotel-media-stream?interaction_id={interaction_id}&lead_id={lead_id or 0}"
+
+    # Exotel ExoML — Stream is directly under Response, NOT inside <Connect>
     exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>
-    <Say>Connecting to Rio Voice Assistant.</Say>
-    <Connect>
-        <Stream url="{ws_url}" />
-    </Connect>
+    <Say>Please wait while I connect you.</Say>
+    <Stream url="{ws_url}" />
 </Response>"""
-    return Response(content=exoml, media_type="text/xml", headers={"ngrok-skip-browser-warning": "69420"})
+
+    logger.info(f"📋 ExoML served for interaction {interaction_id}: ws_url={ws_url}")
+    return Response(content=exoml, media_type="text/xml")
 
 @router.post("/enablex-event")
 async def enablex_event(request: Request, lead_id: int = None):

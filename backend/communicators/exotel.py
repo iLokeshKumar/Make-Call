@@ -53,22 +53,47 @@ class ExotelCommunicator(TelephonyCommunicator):
 
     async def send_media(self, b64_audio: str):
         """
-        Exotel expects raw PCM s16le base64 back — NOT mulaw.
-        b64_audio coming from TTS must be PCM, not mulaw.
+        TTS pipeline produces mulaw. Exotel expects PCM s16le.
+        Convert here so nothing else in the pipeline needs to change.
         """
+        import audioop, base64
         if self.stream_sid:
             try:
                 if self.websocket.client_state.name == "CONNECTED":
+                    # mulaw → PCM s16le conversion
+                    mulaw_data = base64.b64decode(b64_audio)
+                    pcm_data = audioop.ulaw2lin(mulaw_data, 2)
+                    b64_pcm = base64.b64encode(pcm_data).decode()
+                
                     await self.websocket.send_json({
                         "event": "media",
-                        "stream_sid": self.stream_sid,   # Exotel uses stream_sid not streamSid
-                        "media": {"payload": b64_audio}
+                        "stream_sid": self.stream_sid,
+                        "media": {"payload": b64_pcm}
                     })
             except Exception as e:
                 if "close message has been sent" not in str(e):
                     logger.error(f"❌ [Exotel] send_media error: {e}")
         else:
             logger.warning("⚠️ [Exotel] stream_sid missing, cannot send media")
+
+    # async def send_media(self, b64_audio: str):
+    #     """
+    #     Exotel expects raw PCM s16le base64 back — NOT mulaw.
+    #     b64_audio coming from TTS must be PCM, not mulaw.
+    #     """
+    #     if self.stream_sid:
+    #         try:
+    #             if self.websocket.client_state.name == "CONNECTED":
+    #                 await self.websocket.send_json({
+    #                     "event": "media",
+    #                     "stream_sid": self.stream_sid,   # Exotel uses stream_sid not streamSid
+    #                     "media": {"payload": b64_audio}
+    #                 })
+    #         except Exception as e:
+    #             if "close message has been sent" not in str(e):
+    #                 logger.error(f"❌ [Exotel] send_media error: {e}")
+    #     else:
+    #         logger.warning("⚠️ [Exotel] stream_sid missing, cannot send media")
 
     async def clear_audio_buffer(self):
         if self.stream_sid:
