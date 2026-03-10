@@ -93,24 +93,24 @@ export default function Sidebar() {
     <>
       <div
         className={clsx(
-          "flex h-screen flex-col bg-slate-900 dark:bg-slate-900/60 border-r border-slate-700 dark:border-white/10 relative overflow-hidden transition-all duration-300",
+          "flex h-screen flex-col bg-white dark:bg-slate-900/60 border-r border-slate-200 dark:border-white/10 relative overflow-hidden transition-all duration-300",
           isCollapsed ? "w-20" : "w-72"
         )}
       >
         {/* Animated Background Gradient */}
-        <div className="absolute inset-0 bg-gradient-to-br from-violet-500/10 via-blue-500/10 to-purple-500/10 animate-pulse opacity-20 dark:opacity-30 pointer-events-none" />
+        <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 via-blue-500/5 to-purple-500/5 dark:from-violet-500/10 dark:via-blue-500/10 dark:to-purple-500/10 animate-pulse opacity-40 dark:opacity-30 pointer-events-none" />
 
         {/* Collapse Toggle Button */}
         <button
           onClick={() => setIsCollapsed(!isCollapsed)}
-          className="absolute -right-3 top-10 z-50 flex h-6 w-6 items-center justify-center rounded-full bg-slate-800 border border-slate-700 text-slate-400 hover:text-white hover:border-violet-500 transition-all duration-300 shadow-lg"
+          className="absolute -right-3 top-10 z-50 flex h-6 w-6 items-center justify-center rounded-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-violet-600 dark:hover:text-white hover:border-violet-400 dark:hover:border-violet-500 transition-all duration-300 shadow-lg"
         >
           {isCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
         </button>
 
         {/* Header */}
         <div className={clsx(
-          "relative flex h-24 items-center border-b border-slate-700 dark:border-white/10 px-6 transition-all",
+          "relative flex h-24 items-center border-b border-slate-200 dark:border-white/10 px-6 transition-all",
           isCollapsed ? "justify-center" : "justify-start"
         )}>
           <div className="flex items-center space-x-3">
@@ -121,9 +121,9 @@ export default function Sidebar() {
               <div className="animate-in fade-in slide-in-from-left-2 duration-300">
                 <h1 className="text-xl font-bold tracking-tight truncate max-w-[180px]">
                   <span className="gradient-text">{user?.company_name || "Rio"}</span>
-                  <span className="text-slate-200 dark:text-slate-200 ml-1">CRM</span>
+                  <span className="text-slate-700 dark:text-slate-200 ml-1">CRM</span>
                 </h1>
-                <p className="text-[10px] text-slate-400 dark:text-slate-400 font-medium uppercase tracking-tighter">Digital Sales Representative</p>
+                <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium uppercase tracking-tighter">Digital Sales Representative</p>
               </div>
             )}
           </div>
@@ -142,18 +142,18 @@ export default function Sidebar() {
                   "group flex items-center rounded-xl px-4 py-3.5 text-sm font-semibold transition-all duration-300 relative overflow-hidden",
                   isActive
                     ? "bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-lg shadow-violet-500/50 scale-105"
-                    : "text-slate-300 dark:text-slate-400 hover:bg-slate-800 dark:hover:bg-slate-800/60 hover:text-white dark:hover:text-slate-100 hover:scale-105 hover:shadow-md",
+                    : "text-slate-600 dark:text-slate-400 hover:bg-slate-100 dark:hover:bg-slate-800/60 hover:text-slate-900 dark:hover:text-slate-100 hover:scale-105 hover:shadow-md",
                   isCollapsed ? "justify-center" : "space-x-3"
                 )}
               >
                 {/* Hover Effect Gradient */}
                 {!isActive && (
-                  <div className="absolute inset-0 bg-gradient-to-r from-violet-600/0 via-blue-600/0 to-violet-600/0 group-hover:from-violet-600/10 group-hover:via-blue-600/10 group-hover:to-violet-600/10 transition-all duration-500" />
+                  <div className="absolute inset-0 bg-gradient-to-r from-violet-600/0 via-blue-600/0 to-violet-600/0 group-hover:from-violet-600/5 group-hover:via-blue-600/5 group-hover:to-violet-600/5 dark:group-hover:from-violet-600/10 dark:group-hover:via-blue-600/10 dark:group-hover:to-violet-600/10 transition-all duration-500" />
                 )}
 
                 <item.icon className={clsx(
                   "h-5 w-5 flex-shrink-0 relative z-10 transition-transform group-hover:scale-110",
-                  isActive ? "text-white" : "text-slate-400 dark:text-slate-500 group-hover:text-violet-400 dark:group-hover:text-violet-400"
+                  isActive ? "text-white" : "text-slate-400 dark:text-slate-500 group-hover:text-violet-500 dark:group-hover:text-violet-400"
                 )} />
 
                 {!isCollapsed && (
@@ -171,8 +171,8 @@ export default function Sidebar() {
 
         {/* User Section */}
         {!isCollapsed && (
-          <div className="relative p-4 border-t border-slate-700 dark:border-white/10 animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <div className="rounded-xl bg-slate-800/50 dark:bg-slate-800/30 p-4 border border-slate-700 dark:border-white/5 space-y-3 relative overflow-hidden">
+          <div className="relative p-4 border-t border-slate-200 dark:border-white/10 animate-in fade-in slide-in-from-bottom-2 duration-500">
+            <div className="rounded-xl bg-slate-50 dark:bg-slate-800/30 p-4 border border-slate-200 dark:border-white/5 space-y-3 relative overflow-hidden">
               {/* Countdown Progress Bar */}
               {showPersonalDetails && (
                 <div
@@ -190,36 +190,36 @@ export default function Sidebar() {
                   )}
                 </div>
                 <div className="flex-1 min-w-0">
-                  <p className="text-sm font-bold text-white truncate">
+                  <p className="text-sm font-bold text-slate-900 dark:text-white truncate">
                     {user?.first_name || 'User'} {user?.last_name || ''}
                   </p>
-                  <p className="text-[10px] text-slate-400 uppercase tracking-wider font-bold">@{user?.username || 'rio_user'}</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wider font-bold">@{user?.username || 'rio_user'}</p>
                 </div>
               </div>
 
-              <div className="space-y-1.5 border-t border-slate-700 pt-3 opacity-80">
+              <div className="space-y-1.5 border-t border-slate-200 dark:border-slate-700 pt-3 opacity-80">
                 <div className="flex items-center justify-between text-[11px] mb-1">
                   <span className="text-slate-500 dark:text-slate-400 uppercase font-bold tracking-widest flex items-center">
                     <ShieldCheck size={10} className="mr-1" /> Security
                     {showPersonalDetails && (
-                      <span className="ml-2 flex items-center text-violet-400 animate-pulse">
+                      <span className="ml-2 flex items-center text-violet-500 dark:text-violet-400 animate-pulse">
                         <Clock size={8} className="mr-1" /> {Math.floor(timeLeft / 60)}:{(timeLeft % 60).toString().padStart(2, '0')}
                       </span>
                     )}
                   </span>
                   <button
                     onClick={handleRequestReveal}
-                    className="text-violet-400 hover:text-white transition-colors"
+                    className="text-violet-500 dark:text-violet-400 hover:text-violet-700 dark:hover:text-white transition-colors"
                   >
                     {showPersonalDetails ? <EyeOff size={14} /> : <Eye size={14} />}
                   </button>
                 </div>
-                <div className="flex items-center text-xs text-slate-300">
-                  <Mail size={12} className="mr-2 text-violet-400" />
+                <div className="flex items-center text-xs text-slate-600 dark:text-slate-300">
+                  <Mail size={12} className="mr-2 text-violet-500 dark:text-violet-400" />
                   <span className="truncate">{showPersonalDetails ? (user?.email || 'user@example.com') : maskEmail(user?.email || '')}</span>
                 </div>
-                <div className="flex items-center text-xs text-slate-300">
-                  <Smartphone size={12} className="mr-2 text-blue-400" />
+                <div className="flex items-center text-xs text-slate-600 dark:text-slate-300">
+                  <Smartphone size={12} className="mr-2 text-blue-500 dark:text-blue-400" />
                   <span>{showPersonalDetails ? (user?.phone_number || 'N/A') : maskPhone(user?.phone_number || '')}</span>
                 </div>
               </div>
@@ -228,11 +228,11 @@ export default function Sidebar() {
         )}
 
         {/* Logout & Footer */}
-        <div className="p-4 border-t border-slate-700 dark:border-white/10">
+        <div className="p-4 border-t border-slate-200 dark:border-white/10">
           <button
             onClick={logout}
             className={clsx(
-              "group flex w-full items-center rounded-xl px-4 py-3 text-sm font-semibold text-slate-300 hover:bg-red-500/10 hover:text-red-500 transition-all duration-300",
+              "group flex w-full items-center rounded-xl px-4 py-3 text-sm font-semibold text-slate-500 dark:text-slate-300 hover:bg-red-50 dark:hover:bg-red-500/10 hover:text-red-600 dark:hover:text-red-500 transition-all duration-300",
               isCollapsed ? "justify-center" : "space-x-3"
             )}
           >
@@ -241,9 +241,9 @@ export default function Sidebar() {
           </button>
         </div>
 
-        <div className="relative p-4 border-t border-slate-700 dark:border-white/10">
+        <div className="relative p-4 border-t border-slate-200 dark:border-white/10">
           <div className={clsx(
-            "rounded-xl bg-slate-800 dark:bg-gradient-to-br dark:from-violet-500/10 dark:to-blue-500/10 p-4 border border-slate-700 dark:border-violet-500/20",
+            "rounded-xl bg-slate-50 dark:bg-gradient-to-br dark:from-violet-500/10 dark:to-blue-500/10 p-4 border border-slate-200 dark:border-violet-500/20",
             isCollapsed ? "flex justify-center" : ""
           )}>
             <div className="flex items-center space-x-2">
@@ -252,8 +252,8 @@ export default function Sidebar() {
               </div>
               {!isCollapsed && (
                 <div>
-                  <p className="text-xs font-semibold text-slate-200 dark:text-slate-300">System Online</p>
-                  <p className="text-[10px] text-slate-400 dark:text-slate-500">All services active</p>
+                  <p className="text-xs font-semibold text-slate-700 dark:text-slate-300">System Online</p>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-500">All services active</p>
                 </div>
               )}
             </div>
@@ -263,26 +263,26 @@ export default function Sidebar() {
 
       {/* OTP Modal */}
       {isOtpModalOpen && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
-          <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl space-y-6 relative overflow-hidden animate-in zoom-in-95 duration-300">
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/60 dark:bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+          <div className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 shadow-2xl space-y-6 relative overflow-hidden animate-in zoom-in-95 duration-300">
             {/* Modal Background Decor */}
-            <div className="absolute -top-12 -right-12 h-32 w-32 bg-violet-600/20 rounded-full blur-3xl" />
+            <div className="absolute -top-12 -right-12 h-32 w-32 bg-violet-600/10 dark:bg-violet-600/20 rounded-full blur-3xl" />
 
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-bold text-white flex items-center gap-2">
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
                 <ShieldCheck className="text-violet-500" />
                 Identity Verification
               </h3>
               <button
                 onClick={() => setIsOtpModalOpen(false)}
-                className="text-slate-400 hover:text-white transition-colors"
+                className="text-slate-400 hover:text-slate-700 dark:hover:text-white transition-colors"
                 disabled={isVerifyingOtp}
               >
                 <X size={20} />
               </button>
             </div>
 
-            <p className="text-sm text-slate-400">
+            <p className="text-sm text-slate-500 dark:text-slate-400">
               We've sent a 6-digit verification code to <strong>{maskEmail(user?.email || '')}</strong>. Enter it below to reveal your sensitive details.
             </p>
 
@@ -294,12 +294,12 @@ export default function Sidebar() {
                   value={otpValue}
                   onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ""))}
                   placeholder="000000"
-                  className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-center text-3xl tracking-[0.4em] font-mono text-white focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all placeholder:text-slate-600"
+                  className="w-full bg-slate-50 dark:bg-slate-800/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-center text-3xl tracking-[0.4em] font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all placeholder:text-slate-300 dark:placeholder:text-slate-600"
                   disabled={isVerifyingOtp || isRequestingOtp}
                   autoFocus
                 />
                 {isRequestingOtp && (
-                  <div className="absolute inset-0 bg-slate-900/50 flex items-center justify-center rounded-xl">
+                  <div className="absolute inset-0 bg-white/50 dark:bg-slate-900/50 flex items-center justify-center rounded-xl">
                     <Loader2 className="animate-spin text-violet-500" />
                   </div>
                 )}
@@ -318,7 +318,7 @@ export default function Sidebar() {
               </button>
             </div>
 
-            <p className="text-[10px] text-center text-slate-500">
+            <p className="text-[10px] text-center text-slate-400 dark:text-slate-500">
               This code will expire in 10 minutes. Haven't received it? Check your spam folder.
             </p>
           </div>

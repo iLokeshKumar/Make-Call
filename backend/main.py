@@ -75,9 +75,25 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         interaction_id = f"session_{uuid.uuid4().hex[:8]}"
         logger.info(f"Assigning fallback Interaction ID: {interaction_id}")
     
-    # Load dynamic context
-    #settings_list = session.exec(select(SystemSettings)).all()
-    #all_settings = {s.key: s.value for s in settings_list}
+    # Pre-fetch lead context
+    lead_id = websocket.query_params.get("lead_id", "0")
+    lead_context = None
+    try:
+        lid = int(lead_id)
+        if lid > 0:
+            lead = session.get(Lead, lid)
+            if lead:
+                parts = [f"Name: {lead.name}, Phone: {lead.phone}"]
+                if lead.email:
+                    parts.append(f"Email: {lead.email}")
+                if lead.status:
+                    parts.append(f"Status: {lead.status}")
+                if lead.notes:
+                    parts.append(f"Notes: {lead.notes}")
+                lead_context = ", ".join(parts)
+                logger.info(f"📋 [Lead Pre-fetch] Loaded lead #{lid}: {lead.name}")
+    except (ValueError, TypeError):
+        pass
 
     # Use cached settings
     all_settings = settings_cache.get_all()
@@ -126,7 +142,8 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         llm_provider=llm_provider,
         tts_provider=tts_provider,
         company_name=company_name,
-        user=admin_user
+        user=admin_user,
+        lead_context=lead_context,
     )
     
     # 3. Handle specific telephony stream sid if present
@@ -148,6 +165,25 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
 
     interaction_id = websocket.query_params.get("interaction_id", f"exo_{uuid.uuid4().hex[:8]}")
     lead_id = websocket.query_params.get("lead_id", "0")
+
+    # Pre-fetch lead context
+    lead_context = None
+    try:
+        lid = int(lead_id)
+        if lid > 0:
+            lead = session.get(Lead, lid)
+            if lead:
+                parts = [f"Name: {lead.name}, Phone: {lead.phone}"]
+                if lead.email:
+                    parts.append(f"Email: {lead.email}")
+                if lead.status:
+                    parts.append(f"Status: {lead.status}")
+                if lead.notes:
+                    parts.append(f"Notes: {lead.notes}")
+                lead_context = ", ".join(parts)
+                logger.info(f"📋 [Lead Pre-fetch] Exotel: Loaded lead #{lid}: {lead.name}")
+    except (ValueError, TypeError):
+        pass
 
     all_settings = settings_cache.get_all()
     admin_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
@@ -176,8 +212,9 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
         tts_provider=tts_provider,
         company_name=company_name,
         user=admin_user,
+        lead_context=lead_context,
         audio_encoding="linear16",   # ← Exotel sends PCM not mulaw
-        audio_sample_rate=8000
+        audio_sample_rate=8000,
     )
 
     logger.info(f"📞 Exotel connection | Interaction: {interaction_id} | Lead: {lead_id}")

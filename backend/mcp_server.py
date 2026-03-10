@@ -94,11 +94,11 @@ def get_or_create_lead(name: str, phone: str, email: str = None) -> dict:
     
     with SessionLocal() as session:
         # 1. Search by phone
-        lead = session.exec(select(Lead).where(Lead.phone == normalized_phone)).first()
+        lead = session.execute(select(Lead).where(Lead.phone == normalized_phone)).scalars().first()
         
         # 2. Search by email if not found by phone
         if not lead and email:
-            lead = session.exec(select(Lead).where(Lead.email == email)).first()
+            lead = session.execute(select(Lead).where(Lead.email == email)).scalars().first()
             if lead:
                 logger.info(f"[get_or_create_lead] Found lead by email: {email}")
                 # Update phone if it was missing or different?

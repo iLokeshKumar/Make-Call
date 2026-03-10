@@ -37,7 +37,7 @@
 /* Light Mode (default) */
 body {
   font-family: var(--font-family-sans);
-  background: #f5f7fa;
+  background: linear-gradient(135deg, #f8f9fc 0%, #eef1f8 50%, #f0ecf9 100%);
   color: var(--color-text-primary);
   min-height: 100vh;
 }
@@ -53,11 +53,14 @@ body {
 
 /* Glass Effect - Light Mode */
 .glass {
-  background-color: rgba(255, 255, 255, 0.95);
+  background-color: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(24px);
   -webkit-backdrop-filter: blur(24px);
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.08), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow:
+    0 1px 3px rgba(0, 0, 0, 0.04),
+    0 4px 12px rgba(0, 0, 0, 0.03),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
 }
 
 /* Glass Effect - Dark Mode */
@@ -112,7 +115,7 @@ body {
   }
 }
 
-/* Scrollbar Styling */
+/* Scrollbar Styling - Light Mode */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -122,16 +125,25 @@ body {
   background-color: #f1f5f9;
 }
 
-.dark ::-webkit-scrollbar-track {
-  background-color: #1e293b;
-}
-
 ::-webkit-scrollbar-thumb {
-  background-image: linear-gradient(to bottom, var(--color-violet-500), var(--color-blue-500));
+  background-image: linear-gradient(to bottom, #c4b5fd, #93c5fd);
   border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
+  background-image: linear-gradient(to bottom, var(--color-violet-500), var(--color-blue-500));
+}
+
+/* Scrollbar Styling - Dark Mode */
+.dark ::-webkit-scrollbar-track {
+  background-color: #1e293b;
+}
+
+.dark ::-webkit-scrollbar-thumb {
+  background-image: linear-gradient(to bottom, var(--color-violet-500), var(--color-blue-500));
+}
+
+.dark ::-webkit-scrollbar-thumb:hover {
   background-image: linear-gradient(to bottom, var(--color-violet-600), var(--color-blue-600));
 }
 
@@ -140,23 +152,7 @@ body {
   background-color: rgba(255, 255, 255, 0.9);
 }
 
-.light .bg-slate-100 {
-  background-color: #f1f5f9 !important;
-}
-
-.light .text-slate-400 {
-  color: #94a3b8 !important;
-}
-
-.light .text-slate-500 {
-  color: #64748b !important;
-}
-
 /* Light Mode Hover States */
 .light button:hover {
   filter: brightness(0.98);
-}
-
-.light .dark\:bg-slate-700 {
-  background-color: #f1f5f9 !important;
 }

@@ -20,7 +20,7 @@ from models.models import Lead, Interaction, SystemSettings, Product, ApolloSear
 from utils.config import (
     DOMAIN, twilio_client, PHONE_NUMBER_FROM, 
     EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN,
-    ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE, EXOTEL_APP_ID
+    ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE, EXOTEL_APP_ID, ENABLEX_FROM_NUMBER,
 )
 from auth import RoleChecker
 
@@ -38,7 +38,7 @@ async def incoming_call(request: Request, lead_id: int = None):
         interaction = Interaction(
             lead_id=lead_id if lead_id else 0,
             type="call",
-            content="Incoming call",
+            content="Outbound call (Twilio)",
             timestamp=datetime.now(timezone.utc)
         )
         session.add(interaction)
@@ -61,6 +61,7 @@ async def incoming_call(request: Request, lead_id: int = None):
     connect = Connect()
     stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')
     stream.parameter(name="interaction_id", value=str(interaction.id))
+    stream.parameter(name="lead_id", value=str(lead_id or 0))
     response.append(connect)
     return HTMLResponse(content=str(response), media_type="application/xml")
 
@@ -99,7 +100,7 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
         
         elif active_telephony == "exotel":
             url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
-            exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id or 'default'}?lead_id={lead_id or 0}"
+            exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id or 'default'}?lead_id={lead_id or 0}&ngrok-skip-browser-warning=1"
             exotel_app_url = f"http://my.exotel.com/{EXOTEL_ACCOUNT_SID}/exoml/start/{EXOTEL_APP_ID}"
             logger.info(f"🔗 Exotel ExoML URL: {exoml_url}")
             logger.info(f"🔗 Exotel App URL: {exotel_app_url}")
@@ -107,7 +108,7 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
                 "From": to,
                 #"To": EXOPHONE,
                 "CallerId": EXOPHONE,
-                "Url": exotel_app_url,
+                "Url": exoml_url,
                 "CallType": "trans",
                 "TimeLimit": "3600",
                 "StatusCallback": f"https://{DOMAIN}/exotel-event"
@@ -119,6 +120,53 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
                     if resp.status not in [200, 201]:
                         raise Exception(f"Exotel Error: {result}")
                     return {"message": "Exotel Call initiated", "call_sid": result.get("Call", {}).get("Sid")}
+        
+        elif active_telephony == "enablex":
+            # EnableX Outbound
+            logger.info(f"Initiating EnableX Call to: {to}")
+            enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
+            headers = {
+                "Authorization": f"Basic {enablex_auth}",
+                "Content-Type": "application/json"
+            }
+            webhook_url = f"https://{DOMAIN}/enablex-event?ngrok-skip-browser-warning=1"
+            if lead_id:
+                 webhook_url += f"&lead_id={lead_id}"
+
+            # EnableX expects numbers without + prefix (e.g., 911169040030)
+            from_number = ENABLEX_FROM_NUMBER.strip().replace("+", "") if ENABLEX_FROM_NUMBER else "917550131495"
+            # EnableX expects 'to' number without + prefix as well
+            to_number = to.strip().replace("+", "")
+            
+            payload = {
+                "name": "Rio-Assistant-Call",
+                "from": from_number, 
+                "to": to_number,
+                "event_url": webhook_url
+            }
+            logger.info(f"📤 [EnableX Payload] {payload}")
+            
+            async with aiohttp.ClientSession() as http_session:
+                async with http_session.post("https://api.enablex.io/voice/v1/call", headers=headers, json=payload) as resp:
+                    result = await resp.json()
+                    logger.info(f"🔍 [EnableX Response] Status: {resp.status}, Body: {result}")
+                    if resp.status not in [200, 201]:
+                        raise Exception(f"EnableX API Error: {result}")
+                    
+                    # Create interaction record for Lead tracking
+                    with Session(engine) as db_session:
+                        interaction = Interaction(
+                            lead_id=lead_id if lead_id else 0,
+                            type="call",
+                            content="Outbound Call (EnableX)",
+                            timestamp=datetime.now(timezone.utc)
+                        )
+                        db_session.add(interaction)
+                        db_session.commit()
+                        db_session.refresh(interaction)
+                        interaction_id = interaction.id
+
+                    return {"message": "EnableX Call initiated", "voice_id": result.get("voice_id"), "interaction_id": interaction_id}
         
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported telephony: {active_telephony}")

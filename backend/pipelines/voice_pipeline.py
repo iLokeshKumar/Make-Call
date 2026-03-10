@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 class VoicePipeline:
     def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, 
                  stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
-                 company_name: str = "Yexis Electronics", user: User = None,
+                 company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
                  audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000): #made changes for exotel. specified audio_encoding and audio_sample_rate as str & int respectively.
         self.communicator = communicator
         self.interaction_id = interaction_id
@@ -31,6 +31,7 @@ class VoicePipeline:
         self.session = session
         self.company_name = company_name
         self.user = user
+        self.lead_context = lead_context
         
         self.stt_provider = stt_provider
         self.llm_provider = llm_provider
@@ -41,7 +42,18 @@ class VoicePipeline:
         # Inject current time into system prompt for relative date/time resolution
         now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
         time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
-        full_system_prompt = system_prompt + time_context
+        
+        # Inject pre-fetched lead/prospect context
+        prospect_context = ""
+        if lead_context:
+            prospect_context = (
+                f"\n\n[PROSPECT CONTEXT]: You are calling a prospect. Here is their info: {lead_context}. "
+                f"Use this context naturally — greet them by name, reference their interests or status. "
+                f"Do NOT ask for information you already have."
+            )
+            logger.info(f"📋 [Pipeline] Lead context injected into system prompt")
+        
+        full_system_prompt = system_prompt + time_context + prospect_context
         
         self.llm_service = get_llm_service(llm_provider, full_system_prompt)
         self.tts_service = get_tts_service(tts_provider)
@@ -80,7 +92,13 @@ class VoicePipeline:
             logger.error("❌ Timed out waiting for Twilio start event.")
             return
 
-        greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
+        # Personalized greeting if lead context is available
+        if self.lead_context:
+            # Extract name from "Name: XYZ, Phone: ..." format
+            lead_name = self.lead_context.split(",")[0].replace("Name: ", "").strip()
+            greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
+        else:
+            greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         await self.sentence_queue.put(greeting)
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
