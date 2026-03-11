@@ -20,10 +20,17 @@ class GeminiLLM(BaseLLM):
         """Convert OpenAI-style tools to Gemini format for the new SDK."""
         # The new SDK takes a list of types.Tool objects or function declaration dicts
         gemini_tools = []
-        for tool in mistral_tools:
-            if tool["type"] == "function":
-                f = tool["function"]
-                # New SDK accepts function declarations as dicts or types.FunctionDeclaration
+        for t in mistral_tools:
+            # Ensure we have a dict
+            if hasattr(t, "to_dict"):
+                tool_dict = t.to_dict()
+            elif isinstance(t, dict):
+                tool_dict = t
+            else:
+                continue
+
+            if tool_dict.get("type") == "function":
+                f = tool_dict["function"]
                 gemini_tools.append({
                     "name": f["name"],
                     "description": f["description"],

@@ -81,7 +81,7 @@ class Appointment(AuditMixin, table=True):
     appointment_time: datetime
     status: str = Field(default="Scheduled")
     notes: Optional[str] = None
-    meeting_link: Optional[str] = None
+    google_meet_link: Optional[str] = None
     calendar_event_id: Optional[str] = None
 
 class Outcome(AuditMixin, table=True):

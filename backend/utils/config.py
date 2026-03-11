@@ -22,6 +22,10 @@ ENABLEX_FROM_NUMBER = os.getenv("ENABLEX_FROM_NUMBER")
 # AI Services
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
+
+CEREBRAS_API_KEY = os.getenv("Cerebras_API_Key")
+CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "llama3.1-8b")
+
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DEEPGRAM_VOICE = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")

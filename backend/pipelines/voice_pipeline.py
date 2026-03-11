@@ -23,6 +23,7 @@ class VoicePipeline:
     def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, 
                  stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
                  company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
+                 company_website: str = None,
                  audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000): #made changes for exotel. specified audio_encoding and audio_sample_rate as str & int respectively.
         self.communicator = communicator
         self.interaction_id = interaction_id
@@ -32,7 +33,7 @@ class VoicePipeline:
         self.company_name = company_name
         self.user = user
         self.lead_context = lead_context
-        
+        self.company_website = company_website
         self.stt_provider = stt_provider
         self.llm_provider = llm_provider
         self.tts_provider = tts_provider
@@ -47,11 +48,15 @@ class VoicePipeline:
         prospect_context = ""
         if lead_context:
             prospect_context = (
-                f"\n\n[PROSPECT CONTEXT]: You are calling a prospect. Here is their info: {lead_context}. "
-                f"Use this context naturally — greet them by name, reference their interests or status. "
-                f"Do NOT ask for information you already have."
+                f"\n\n### [PROSPECT BACKGROUND - DO NOT RE-IDENTIFY]\n"
+                f"You are ALREADY speaking to an IDENTIFIED prospect. Here is their comprehensive record:\n\n"
+                f"{lead_context}\n"
+                f"--- \n"
+                f"CRITICAL: You KNOW who this is. Do NOT ask for their name, phone, or email. "
+                f"Do NOT call 'get_or_create_lead' as they are already in the system. "
+                f"Reference their status, past interactions, or appointments naturally."
             )
-            logger.info(f"📋 [Pipeline] Lead context injected into system prompt")
+            logger.info(f"📋 [Pipeline] Assertive lead context injected into system prompt")
         
         full_system_prompt = system_prompt + time_context + prospect_context
         
@@ -93,12 +98,17 @@ class VoicePipeline:
             return
 
         # Personalized greeting if lead context is available
+        greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         if self.lead_context:
-            # Extract name from "Name: XYZ, Phone: ..." format
-            lead_name = self.lead_context.split(",")[0].replace("Name: ", "").strip()
-            greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
-        else:
-            greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
+            try:
+                # Extract name from "Name: XYZ, Phone: ..." format
+                lead_name = self.lead_context.split(",")[0].replace("Name: ", "").strip()
+                if lead_name and lead_name.lower() not in ["unknown", "n/a", "none"]:
+                    greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
+                    logger.info(f"📞 [Personalized Greeting] Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?")
+            except Exception:
+                pass
+        
         await self.sentence_queue.put(greeting)
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
@@ -428,7 +438,10 @@ class VoicePipeline:
     async def _process_llm_response(self, user_input, stt_latency):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
         llm_start_time = time.time()
-        self.llm_service.add_user_message(user_input)
+        
+        # Only add user message if this is a fresh turn, not a tool recursion
+        if user_input:
+            self.llm_service.add_user_message(user_input)
         
         mistral_tools = get_mistral_tools()
         
@@ -437,16 +450,22 @@ class VoicePipeline:
         
         async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
-                logger.info(f"📤 [Mistral -> Queue] Sentence: '{chunk['content']}'")
+                logger.info(f"📤 [{self.llm_provider} -> Queue] Sentence: '{chunk['content']}'")
                 await self.sentence_queue.put(chunk["content"])
+            elif chunk["type"] == "error":
+                logger.error(f"❌ [{self.llm_provider}] Stream Error in Pipeline: {chunk.get('content')}")
+                return
             elif chunk["type"] == "finished":
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
                 llm_end_time = time.time()
                 llm_latency = llm_end_time - llm_start_time
                 
+                # CRITICAL: Add assistant message ONCE with both content AND tool_calls
+                # This follows OpenAI/Llama specs and prevents sequence errors
+                self.llm_service.add_assistant_message(full_reply, tool_calls=tool_calls)
+                
                 if full_reply:
-                    self.llm_service.add_assistant_message(full_reply)
                     self.transcript_accumulator.append(f"Rio: {full_reply}")
                     self.save_transcript()
                     self.save_latency(
@@ -463,8 +482,6 @@ class VoicePipeline:
                     )
                 
                 if tool_calls:
-                    self.llm_service.add_assistant_message(full_reply, tool_calls=tool_calls)
-                    
                     for tc in tool_calls:
                         tool_name = tc.function.name
                         tool_args = json.loads(tc.function.arguments)
@@ -497,7 +514,8 @@ class VoicePipeline:
                         self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
                     
                     logger.info("🔄 Tool results ready. Recursing for final LLM response.")
-                    await self._process_llm_response("Tool results ready.", 0)
+                    # Recurse with user_input=None to follow the correct tool result -> model response sequence
+                    await self._process_llm_response(None, 0)
 
     #async def _audio_generator(self, receiver):
     #    """Helper to yield audio chunks from the communicator."""

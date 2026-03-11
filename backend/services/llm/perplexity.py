@@ -17,21 +17,33 @@ class PerplexityLLM(BaseLLM):
             base_url="https://api.perplexity.ai"
         )
 
+    def _convert_tools(self, mistral_tools: List[Dict]) -> List[Dict]:
+        """Convert OpenAI-style tools to Perplexity (OpenAI compatible) format."""
+        formatted_tools = []
+        for t in mistral_tools:
+            if hasattr(t, "to_dict"):
+                formatted_tools.append(t.to_dict())
+            elif isinstance(t, dict):
+                formatted_tools.append(t)
+        return formatted_tools
+
     async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Perplexity currently has limited support for tool calling in their streaming API.
-        Implementing standard text streaming for now.
-        """
         try:
+            formatted_tools = self._convert_tools(tools) if tools else None
             accumulated_text = ""
             full_reply = ""
 
             # Perplexity uses OpenAI-compatible format
-            stream = await self.client.chat.completions.create(
-                model=self.model,
-                messages=self.messages,
-                stream=True
-            )
+            payload = {
+                "model": self.model,
+                "messages": self.messages,
+                "stream": True
+            }
+            if formatted_tools:
+                payload["tools"] = formatted_tools
+                payload["tool_choice"] = "auto"
+
+            stream = await self.client.chat.completions.create(**payload)
 
             async for chunk in stream:
                 if not chunk.choices: continue

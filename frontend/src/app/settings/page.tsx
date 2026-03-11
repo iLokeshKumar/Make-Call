@@ -271,6 +271,7 @@ export default function SettingsPage() {
                                         <option value="anthropic">Claude 3.5 Sonnet</option>
                                         <option value="google">Gemini 1.5 Flash</option>
                                         <option value="perplexity">Perplexity AI</option>
+                                        <option value="cerebras">Cerebras (Llama 3.1)</option>
                                     </select>
                                 </div>
 
@@ -379,7 +380,7 @@ export default function SettingsPage() {
                                 <p className="text-sm text-slate-600 dark:text-slate-400">India Voice Engine</p>
                             </div>
 
-                            <div className="rounded-xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 p-4 border border-blue-200/50 dark:border-blue-500/30 font-medium md:col-span-2 lg:col-span-1">
+                            <div className="rounded-xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 p-4 border border-blue-200/50 dark:border-blue-500/30 font-medium">
                                 <div className="flex items-center justify-between mb-2">
                                     <p className="text-slate-900 dark:text-slate-100 italic">Gemini AI</p>
                                     <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
@@ -387,6 +388,16 @@ export default function SettingsPage() {
                                     </span>
                                 </div>
                                 <p className="text-sm text-slate-600 dark:text-slate-400">Multimodal Assistant</p>
+                            </div>
+
+                            <div className="rounded-xl bg-gradient-to-br from-orange-500/10 to-red-500/10 p-4 border border-orange-200/50 dark:border-orange-500/30 font-medium">
+                                <div className="flex items-center justify-between mb-2">
+                                    <p className="text-slate-900 dark:text-slate-100 italic">Cerebras</p>
+                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
+                                        ● Fast Inference
+                                    </span>
+                                </div>
+                                <p className="text-sm text-slate-600 dark:text-slate-400">Low-Latency Voice Engine</p>
                             </div>
                         </div>
                     </div>

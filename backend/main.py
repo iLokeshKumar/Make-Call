@@ -11,7 +11,8 @@ from sqlmodel import Session, select
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from database import init_db, get_session, engine
-from models.models import SystemSettings, Interaction, Lead, Product, User
+from models.models import SystemSettings, Interaction, Lead, Product, User, Appointment, Demo
+from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import setup_logger
 from rag_service import sync_products_to_chroma
 from utils.config import PORT
@@ -81,18 +82,11 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     try:
         lid = int(lead_id)
         if lid > 0:
-            lead = session.get(Lead, lid)
-            if lead:
-                parts = [f"Name: {lead.name}, Phone: {lead.phone}"]
-                if lead.email:
-                    parts.append(f"Email: {lead.email}")
-                if lead.status:
-                    parts.append(f"Status: {lead.status}")
-                if lead.notes:
-                    parts.append(f"Notes: {lead.notes}")
-                lead_context = ", ".join(parts)
-                logger.info(f"📋 [Lead Pre-fetch] Loaded lead #{lid}: {lead.name}")
-    except (ValueError, TypeError):
+            lead_context = get_comprehensive_lead_context(session, lid)
+            if lead_context:
+                logger.info(f"📋 [Lead Pre-fetch] Loaded comprehensive context for lead #{lid}")
+    except (ValueError, TypeError) as e:
+        logger.error(f"❌ Error during lead pre-fetch: {e}")
         pass
 
     # Use cached settings
@@ -167,22 +161,16 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
     lead_id = websocket.query_params.get("lead_id", "0")
 
     # Pre-fetch lead context
+    lead_id = websocket.query_params.get("lead_id", "0")
     lead_context = None
     try:
         lid = int(lead_id)
         if lid > 0:
-            lead = session.get(Lead, lid)
-            if lead:
-                parts = [f"Name: {lead.name}, Phone: {lead.phone}"]
-                if lead.email:
-                    parts.append(f"Email: {lead.email}")
-                if lead.status:
-                    parts.append(f"Status: {lead.status}")
-                if lead.notes:
-                    parts.append(f"Notes: {lead.notes}")
-                lead_context = ", ".join(parts)
-                logger.info(f"📋 [Lead Pre-fetch] Exotel: Loaded lead #{lid}: {lead.name}")
-    except (ValueError, TypeError):
+            lead_context = get_comprehensive_lead_context(session, lid)
+            if lead_context:
+                logger.info(f"📋 [Lead Pre-fetch] Exotel: Loaded comprehensive context for lead #{lid}")
+    except (ValueError, TypeError) as e:
+        logger.error(f"❌ Error during exotel lead pre-fetch: {e}")
         pass
 
     all_settings = settings_cache.get_all()

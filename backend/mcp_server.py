@@ -563,14 +563,15 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
                     if meet_result.get("success"):
                         google_meet_link = meet_result.get("google_meet_link")
                         calendar_url = meet_result.get("calendar_link")
-                        logger.info(f"[book_meeting] Google Meet link created: {google_meet_link}")
+                        calendar_event_id = meet_result.get("calendar_event_id")
+                        logger.info(f"[book_meeting] Google Meet created: {google_meet_link}, Event ID: {calendar_event_id}")
                     else:
                         logger.warning(f"[book_meeting] Meet creation failed: {meet_result.get('error')}")
             
             # STEP 3: Create appointment record in database
             appointment_insert = text("""
-                INSERT INTO appointment (lead_id, appointment_time, status, google_meet_link)
-                VALUES (:lid, :atime, :status, :meet_link)
+                INSERT INTO appointment (lead_id, appointment_time, status, google_meet_link, calendar_event_id)
+                VALUES (:lid, :atime, :status, :meet_link, :event_id)
                 RETURNING id
             """)
             
@@ -580,7 +581,8 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
                     "lid": lead_id,
                     "atime": time_to_use,
                     "status": "scheduled",
-                    "meet_link": google_meet_link
+                    "meet_link": google_meet_link,
+                    "event_id": calendar_event_id if 'calendar_event_id' in locals() else None
                 }
             )
             session.commit()
@@ -796,7 +798,8 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
                 if meet_result.get("success"):
                     google_meet_link = meet_result.get("google_meet_link")
                     demo.google_meet_link = google_meet_link
-                    logger.info(f"[book_demo] Created Google Meet for online demo: {google_meet_link}")
+                    demo.calendar_event_id = meet_result.get("calendar_event_id")
+                    logger.info(f"[book_demo] Created Google Meet for online demo: {google_meet_link}, Event ID: {demo.calendar_event_id}")
 
         session.add(demo)
         session.commit()

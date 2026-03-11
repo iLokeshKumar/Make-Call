@@ -19,9 +19,32 @@ class BaseLLM(ABC):
         self.messages.append({"role": "user", "content": content})
 
     def add_assistant_message(self, content: str, tool_calls: Optional[List] = None):
-        msg = {"role": "assistant", "content": content}
+        if not content and not tool_calls:
+            logger.warning("⚠️ [BaseLLM] Attempted to add an empty assistant message (no content and no tools). Skipping.")
+            return
+
+        msg = {"role": "assistant", "content": content or ""}
         if tool_calls:
-            msg["tool_calls"] = tool_calls
+            # Sanitize tool_calls: Convert any non-dict objects (SimpleNamespace, SDK objects) to plain dicts
+            sanitized_calls = []
+            for tc in tool_calls:
+                if isinstance(tc, dict):
+                    sanitized_calls.append(tc)
+                else:
+                    # Convert object to dict (handles SimpleNamespace and type('tc', ...) objects)
+                    try:
+                        sanitized_calls.append({
+                            "id": getattr(tc, "id", None),
+                            "type": "function",
+                            "function": {
+                                "name": getattr(tc.function, "name", None),
+                                "arguments": getattr(tc.function, "arguments", None)
+                            }
+                        })
+                    except Exception as e:
+                        logger.warning(f"⚠️ [BaseLLM] Failed to sanitize tool call object: {e}")
+                        sanitized_calls.append(tc)
+            msg["tool_calls"] = sanitized_calls
         self.messages.append(msg)
 
     def add_tool_message(self, tool_call_id: str, name: str, content: str):

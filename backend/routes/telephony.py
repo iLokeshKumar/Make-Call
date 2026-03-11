@@ -22,6 +22,8 @@ from utils.config import (
     EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN,
     ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE, EXOTEL_APP_ID, ENABLEX_FROM_NUMBER,
 )
+from utils.phone import normalize_phone
+from utils.lead_utils import get_comprehensive_lead_context
 from auth import RoleChecker
 
 logger = logging.getLogger(__name__)
@@ -86,6 +88,26 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
             to = f"+{clean_number}" if not to.startswith("+") else to
             
         with Session(engine) as session:
+            # ROBUST LEAD LOOKUP: If lead_id is missing, search by normalized phone number
+            if not lead_id or lead_id == 0:
+                normalized_to = normalize_phone(to)
+                lead = session.exec(select(Lead).where(Lead.phone == normalized_to)).first()
+                if lead:
+                    lead_id = lead.id
+                    logger.info(f"📋 [telephony] Found lead #{lead_id} ('{lead.name}') by phone lookup for call to {to}")
+                    
+                    # Log comprehensive context for debugging/robustness
+                    ctx = get_comprehensive_lead_context(session, lead_id)
+                    if ctx:
+                        logger.info(f"📄 [telephony] Pre-call Lead Context ready for Lead #{lead_id}")
+                else:
+                    logger.info(f"❓ [telephony] No lead found for phone {to}. Proceeding with generic context.")
+            elif lead_id and lead_id > 0:
+                # If we have a lead_id, ensure we log its context
+                ctx = get_comprehensive_lead_context(session, lead_id)
+                if ctx:
+                    logger.info(f"📄 [telephony] Proactive context loaded for Lead #{lead_id}")
+
             settings = session.exec(select(SystemSettings)).all()
             settings_dict = {s.key: s.value for s in settings}
             active_telephony = settings_dict.get("telephony_engine", "twilio")
