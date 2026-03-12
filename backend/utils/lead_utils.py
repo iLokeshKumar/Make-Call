@@ -19,7 +19,8 @@ def get_comprehensive_lead_context(session: Session, lead_id: int) -> str:
             return None
 
         # 1. Basic Lead Info
-        parts = [f"Name: {lead.name}, Phone: {lead.phone}"]
+        parts = [f"Name: {lead.name}", f"Phone: {lead.phone}"]
+        id_part = f"[__META_ID__]: {lead.id}"
         if lead.email: parts.append(f"Email: {lead.email}")
         if lead.status: parts.append(f"Status: {lead.status}")
         if lead.notes: parts.append(f"Lead Notes: {lead.notes}")
@@ -50,7 +51,7 @@ def get_comprehensive_lead_context(session: Session, lead_id: int) -> str:
         demo_list = "\n".join([f"- {d.demo_date.strftime('%Y-%m-%d') if d.demo_date else 'N/A'}: {d.status} ({d.demo_type}) - Products: {d.products or 'N/A'}. Notes: {d.notes or 'No notes'}" for d in demos])
 
         # Build final context
-        context = f"[PROSPECT DATA]\n{lead_data_str}\n\n"
+        context = f"[PROSPECT DATA]\n{lead_data_str}\n{id_part}\n\n"
         if interaction_history: 
             context += f"[PAST INTERACTIONS]\n{interaction_history}\n\n"
         if appointment_list: 

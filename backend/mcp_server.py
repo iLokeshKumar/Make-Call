@@ -222,41 +222,65 @@ def get_product_info(product_name: str) -> dict:
     
     Returns: {"name": str, "price": str, "stock": int, "note": str, "status": str}
     """
-    logger.info(f"[get_product_info] Semantic search for: {product_name}")
-    
-    # Perform semantic search in ChromaDB
-    semantic_results = search_products(product_name, n_results=1)
+    # Perform multi-match semantic search in ChromaDB (top 3)
+    semantic_results = search_products(product_name, n_results=3)
     
     if not semantic_results:
         return {
-            "error": "Product not found in current catalog",
+            "error": "Product not found",
             "status": "Unavailable",
-            "message": "This item is currently out of stock or not in our active catalog. Please continue the call."
+            "message": "No matching products found in our catalog."
         }
     
-    best_match_name = semantic_results[0]["name"]
-    logger.info(f"[get_product_info] Best semantic match: {best_match_name}")
-    
-    # Retrieve full details from Postgres for the best match
+    # Process results to find best available and alternatives
     with SessionLocal() as session:
-        statement = select(Product).where(Product.name == best_match_name)
-        product = session.execute(statement).scalar_one_or_none()
+        main_product = None
+        alternatives = []
         
-        if not product:
-            return {
-                "error": "Product metadata mismatch",
-                "status": "Unavailable",
-                "message": "We found a match but couldn't retrieve details. Treated as unavailable."
+        for i, res in enumerate(semantic_results):
+            p_name = res["name"]
+            p_id = res.get("id")
+            
+            # Fetch from DB
+            db_product = None
+            if p_id:
+                db_product = session.get(Product, p_id)
+            if not db_product:
+                statement = select(Product).where(Product.name == p_name)
+                db_product = session.execute(statement).scalar_one_or_none()
+            
+            if not db_product:
+                logger.warning(f"⚠️ Stale index entry found: {p_name} (ID: {p_id}) - Missing in Postgres")
+                continue
+
+            prod_details = {
+                "name": db_product.name,
+                "price": db_product.price,
+                "stock": db_product.stock,
+                "status": "Available" if db_product.stock > 0 else "Out of Stock",
+                "note": db_product.note or "No additional notes"
             }
+
+            if not main_product:
+                main_product = prod_details
+            else:
+                alternatives.append(prod_details)
+
+        if not main_product:
+            return {
+                "error": "Database mismatch",
+                "status": "Unavailable",
+                "message": "We found semantic matches but they are missing from the primary database. Please try a different search or re-sync catalog."
+            }
+
+        response = main_product.copy()
+        if alternatives:
+            response["alternative_suggestions"] = alternatives
+            # Add a hint for the AI to mention alternatives if main is out of stock
+            if main_product["stock"] <= 0:
+                response["sales_hint"] = "The requested item is out of stock. PLEASE RECOMMEND one of the alternative suggestions below to the customer."
         
-        return {
-            "name": product.name,
-            "price": product.price,
-            "stock": product.stock,
-            "note": product.note or "No additional notes",
-            "status": "Available" if product.stock > 0 else "Out of Stock",
-            "in_stock": product.stock > 0
-        }
+        return response
 
 @mcp.tool()
 def sync_product_catalog() -> dict:

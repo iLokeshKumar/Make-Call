@@ -124,7 +124,7 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     # 1. Instantiate Communicator (Defaulting to Twilio for /media-stream)
     communicator = TwilioCommunicator(websocket)
     
-    # 2. Setup Voice Pipeline
+    # 2. Setup Voice Pipeline (Context will be loaded proactively if lead_id found in stream)
     transcript_accumulator = []
     pipeline = VoicePipeline(
         communicator, 
@@ -137,11 +137,8 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         tts_provider=tts_provider,
         company_name=company_name,
         user=admin_user,
-        lead_context=lead_context,
+        lead_context=None, # Loaded proactively by pipeline
     )
-    
-    # 3. Handle specific telephony stream sid if present
-    # pipeline.setup_sid(...) 
 
     logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Providers: STT={stt_provider}, LLM={llm_provider}, TTS={tts_provider} | Company: {company_name}")
     
@@ -155,7 +152,12 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
 @app.websocket("/exotel-media-stream")
 async def handle_exotel_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
     """Exotel media-stream handler — PCM s16le 8kHz, stream_sid at root."""
-    await websocket.accept()
+    # Attempt to bypass ngrok browser warning by sending the header in the handshake
+    try:
+        await websocket.accept(headers=[(b"ngrok-skip-browser-warning", b"true")])
+    except TypeError:
+        # Fallback for FastAPI versions that don't support headers in accept()
+        await websocket.accept()
 
     interaction_id = websocket.query_params.get("interaction_id", f"exo_{uuid.uuid4().hex[:8]}")
     lead_id = websocket.query_params.get("lead_id", "0")
@@ -201,7 +203,7 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
         company_name=company_name,
         user=admin_user,
         lead_context=lead_context,
-        audio_encoding="linear16",   # ← Exotel sends PCM not mulaw
+        audio_encoding="linear16",   # Exotel sends PCM not mulaw
         audio_sample_rate=8000,
     )
 
@@ -216,4 +218,4 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)

@@ -1,4 +1,5 @@
 import asyncio
+import re
 from datetime import datetime, timezone
 import base64
 import logging
@@ -15,7 +16,8 @@ from utils.audio import clean_voice_text
 from utils.config import mistral_client
 from tool_adapter import get_mistral_tools, execute_mcp_tool
 from sqlmodel import Session
-from models.models import Interaction, LatencyLog, User
+from models.models import Interaction, LatencyLog, User, Lead
+from utils.lead_utils import get_comprehensive_lead_context
 
 logger = logging.getLogger(__name__)
 
@@ -38,38 +40,64 @@ class VoicePipeline:
         self.llm_provider = llm_provider
         self.tts_provider = tts_provider
         self.audio_encoding = audio_encoding
+        self.audio_encoding = audio_encoding
         self.audio_sample_rate = audio_sample_rate
         
-        # Inject current time into system prompt for relative date/time resolution
-        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
-        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
-        
-        # Inject pre-fetched lead/prospect context
-        prospect_context = ""
-        if lead_context:
-            prospect_context = (
-                f"\n\n### [PROSPECT BACKGROUND - DO NOT RE-IDENTIFY]\n"
-                f"You are ALREADY speaking to an IDENTIFIED prospect. Here is their comprehensive record:\n\n"
-                f"{lead_context}\n"
-                f"--- \n"
-                f"CRITICAL: You KNOW who this is. Do NOT ask for their name, phone, or email. "
-                f"Do NOT call 'get_or_create_lead' as they are already in the system. "
-                f"Reference their status, past interactions, or appointments naturally."
-            )
-            logger.info(f"📋 [Pipeline] Assertive lead context injected into system prompt")
-        
-        full_system_prompt = system_prompt + time_context + prospect_context
-        
-        self.llm_service = get_llm_service(llm_provider, full_system_prompt)
-        self.tts_service = get_tts_service(tts_provider)
-        self.stt_service = get_stt_service(stt_provider)
-        
+        # 1. Basic Initialization (Core loop attributes)
         self.sentence_queue = asyncio.Queue()
         self.current_tts_task = None
         self.current_llm_task = None
         self.is_rio_speaking = False
         self.tts_first_byte_time = 0.0
         self.last_tts_start_time = 0.0
+
+        # 2. Service Initialization (LLM, TTS, STT)
+        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        
+        full_system_prompt = system_prompt + time_context
+        self.llm_service = get_llm_service(llm_provider, full_system_prompt)
+        self.tts_service = get_tts_service(tts_provider)
+        self.stt_service = get_stt_service(stt_provider)
+
+        # 3. Inject pre-fetched lead/prospect context if provided at start
+        if lead_context:
+            self._apply_context_to_prompt(lead_context)
+        
+    def _apply_context_to_prompt(self, context: str):
+        """Helper to structure and inject lead context into the LLM service."""
+        prospect_context = (
+            f"\n\n### [PROSPECT BACKGROUND]\n"
+            f"You are ALREADY speaking to an IDENTIFIED prospect. Here is their comprehensive record:\n\n"
+            f"{context}\n"
+            f"--- \n"
+            f"CRITICAL SALES INSTRUCTIONS:\n"
+            f"1. Use only the numeric `[__META_ID__]` for backend tool calls. Do NOT mention this ID in speech.\n"
+            f"2. You are 'Rio', a helpful human representative. NEVER say you have a 'record', 'lead info', or 'ID' for them.\n"
+            f"3. Greet them by name naturally (e.g., 'Hi Lokesh'). Do NOT report what you know about them.\n"
+            f"4. Focus on the value of our products and solving their needs, not database operations."
+        )
+        
+        # Re-build full system prompt
+        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        
+        full_system_prompt = self.system_prompt + time_context + prospect_context
+        # Ensure llm_service is already initialized before calling this
+        if hasattr(self, 'llm_service') and self.llm_service:
+            self.llm_service.update_system_prompt(full_system_prompt)
+        self.lead_context = context
+        logger.info(f"📋 [Pipeline] Assertive lead context injected into system prompt")
+
+    async def _load_lead_context(self, lead_id: int):
+        """Proactively loads lead context from DB and updates prompt."""
+        if not lead_id or lead_id <= 0:
+            return
+            
+        logger.info(f"🔍 [Pipeline] Proactively loading context for Lead #{lead_id}...")
+        context = get_comprehensive_lead_context(self.session, lead_id)
+        if context:
+            self._apply_context_to_prompt(context)
 
     async def run(self):
         speaker_task = asyncio.create_task(self._speaker_loop())
@@ -87,27 +115,49 @@ class VoicePipeline:
             while True:
                 data = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                 if data.get("event") == "start":
-                    self.communicator.stream_sid = data["start"]["streamSid"]
-                    logger.info(f"🚀 [Twilio] Stream started. Sid: {self.communicator.stream_sid}")
+                    start_msg = data.get("start", {})
+                    self.communicator.stream_sid = start_msg.get("streamSid")
+                    
+                    # 1. Proactively check for lead_id/interaction_id in start parameters (Twilio specific)
+                    params = start_msg.get("customParameters", {})
+                    stream_lead_id = params.get("lead_id")
+                    stream_int_id = params.get("interaction_id")
+                    
+                    if stream_lead_id:
+                        try:
+                            lid = int(stream_lead_id)
+                            # Only load if we don't already have context
+                            if not self.lead_context:
+                                await self._load_lead_context(lid)
+                        except (ValueError, TypeError):
+                            pass
+                            
+                    if stream_int_id:
+                        self.interaction_id = stream_int_id
+
+                    logger.info(f"🚀 [Telephony] Stream started. Sid: {self.communicator.stream_sid} | Interaction: {self.interaction_id}")
                     break
                 elif data.get("event") == "stop":
                     logger.error("❌ Got stop before start. Exiting.")
                     return
         except asyncio.TimeoutError:
-            logger.error("❌ Timed out waiting for Twilio start event.")
+            logger.error("❌ Timed out waiting for start event.")
             return
 
         # Personalized greeting if lead context is available
         greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         if self.lead_context:
             try:
-                # Extract name from "Name: XYZ, Phone: ..." format
-                lead_name = self.lead_context.split(",")[0].replace("Name: ", "").strip()
-                if lead_name and lead_name.lower() not in ["unknown", "n/a", "none"]:
-                    greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
-                    logger.info(f"📞 [Personalized Greeting] Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?")
-            except Exception:
-                pass
+                # Extract name from "[PROSPECT DATA]\nName: XYZ, Phone: ..." format or self.lead_context
+                # Since lead_utils.py builds it as "Name: {lead.name}, Phone: {lead.phone}"
+                name_line = [l for l in self.lead_context.split("\n") if "Name:" in l]
+                if name_line:
+                    lead_name = name_line[0].split(",")[0].replace("Name: ", "").replace("[PROSPECT DATA]", "").strip()
+                    if lead_name and lead_name.lower() not in ["unknown", "n/a", "none"]:
+                        greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
+                        logger.info(f"📞 [Personalized Greeting] Sent to {lead_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to parse lead name for greeting: {e}")
         
         await self.sentence_queue.put(greeting)
         self.transcript_accumulator.append(f"Rio: {greeting}")
@@ -435,6 +485,18 @@ class VoicePipeline:
         except Exception as e:
             logger.error(f"❌ Error saving transcript: {e}")
 
+    def _strip_markdown(self, text: str) -> str:
+        """Removes markdown formatting like **bold**, *italics*, and bullet points for TTS."""
+        if not text:
+            return ""
+        # Remove bold/italics markers
+        text = re.sub(r'[*_]{1,3}', '', text)
+        # Remove bullet points/list markers at start of lines
+        text = re.sub(r'^[\s]*[-+*][\s]+', '', text, flags=re.MULTILINE)
+        # Remove hashtags for headers
+        text = re.sub(r'#+\s+', '', text)
+        return text.strip()
+
     async def _process_llm_response(self, user_input, stt_latency):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
         llm_start_time = time.time()
@@ -450,8 +512,21 @@ class VoicePipeline:
         
         async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
-                logger.info(f"📤 [{self.llm_provider} -> Queue] Sentence: '{chunk['content']}'")
-                await self.sentence_queue.put(chunk["content"])
+                sentence = chunk["content"]
+                # Skip sentences that are obviously raw JSON or tool call artifacts
+                if sentence.strip().startswith("{") or '"arguments":' in sentence or '"name":' in sentence:
+                    logger.warning(f"🚫 [VoicePipeline] Discarding JSON-leaked sentence: {sentence[:30]}...")
+                    continue
+                
+                # Strip markdown and technical leaks before queuing for TTS
+                clean_sentence = self._strip_markdown(sentence)
+                clean_sentence = self._filter_technical_speech(clean_sentence)
+                
+                if not clean_sentence or len(clean_sentence.strip()) < 2:
+                    continue
+
+                logger.info(f"📤 [{self.llm_provider} -> Queue] Sentence: '{clean_sentence}'")
+                await self.sentence_queue.put(clean_sentence)
             elif chunk["type"] == "error":
                 logger.error(f"❌ [{self.llm_provider}] Stream Error in Pipeline: {chunk.get('content')}")
                 return
@@ -517,14 +592,28 @@ class VoicePipeline:
                     # Recurse with user_input=None to follow the correct tool result -> model response sequence
                     await self._process_llm_response(None, 0)
 
-    #async def _audio_generator(self, receiver):
-    #    """Helper to yield audio chunks from the communicator."""
-    #    async for data in receiver:
-    #        event = data.get("event")
-    #        if event == "media":
-    #            yield base64.b64decode(data["media"]["payload"])
-    #        elif event == "stop":
-    #            logger.info("🛑 [Twilio] Stream stopped.")
+    def _filter_technical_speech(self, text: str) -> str:
+        """Regex-based safety layer to strip technical leakages from the voice stream."""
+        import re
+        # Catch: "lead ID 47", "ID of 47", "INTERNAL_ID", "ID is 47", "__META_ID__", etc.
+        patterns = [
+            r"(?i)lead\s+id\s+(?:of\s+)?\d+",
+            r"(?i)internal\s+id\s+(?:of\s+)?\d+",
+            r"(?i)id\s+is\s+\d+",
+            r"(?i)id\s+\d+",
+            r"(?i)internal\s+id",
+            r"(?i)system\s+record",
+            r"(?i)database\s+id",
+            r"__META_ID__"
+        ]
+        for pattern in patterns:
+            text = re.sub(pattern, "", text)
+        
+        # Clean up awkward double spaces or trailing conjunctions left by stripping
+        text = re.sub(r"\s+", " ", text).strip()
+        # Remove trailing "with a" or "and" if they were part of an ID phrase
+        text = re.sub(r"\b(with a|and|for)\s*$", "", text, flags=re.IGNORECASE).strip()
+        return text
     #            break
 
     async def _audio_generator(self, receiver):

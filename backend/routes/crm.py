@@ -237,3 +237,69 @@ async def reload_settings_cache(session: Session = Depends(get_session)):
     settings_cache.load(session)
     return {"message": f"Settings cache reloaded. Cache reloaded with {len(settings_cache.get_all())} keys"}
 
+@router.post("/inventory", response_model=Product)
+async def add_product(
+    product: Product, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Smart Upsert: Create if no ID provided, else update existing."""
+    if product.id and product.id > 0:
+        db_product = session.get(Product, product.id)
+        if db_product:
+            # Map incoming model to dict and update fields
+            product_data = product.model_dump(exclude_unset=True)
+            for key, value in product_data.items():
+                if key != "id":
+                    setattr(db_product, key, value)
+
+            db_product.updated_by = current_user.username
+            session.add(db_product)
+            session.commit()
+            session.refresh(db_product)
+            return db_product
+
+    # Create new record if ID is 0, None, or not found
+    product.id = None 
+    product.created_by = current_user.username
+    session.add(product)
+    session.commit()
+    session.refresh(product)
+    return product
+
+@router.put("/inventory/{product_id}", response_model=Product)
+async def update_product(
+    product_id: int, 
+    data: dict, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Update an inventory item (Standard REST PUT)."""
+    db_product = session.get(Product, product_id)
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    for key, value in data.items():
+        if hasattr(db_product, key) and key != "id":
+            setattr(db_product, key, value)
+            
+    db_product.updated_by = current_user.username
+    session.add(db_product)
+    session.commit()
+    session.refresh(db_product)
+    return db_product
+
+@router.delete("/inventory/{product_id}")
+async def delete_product(
+    product_id: int, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Delete an inventory item."""
+    db_product = session.get(Product, product_id)
+    if not db_product:
+        raise HTTPException(status_code=404, detail="Product not found")
+    
+    session.delete(db_product)
+    session.commit()
+    return {"message": "Product deleted successfully"}

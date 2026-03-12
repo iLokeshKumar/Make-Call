@@ -204,7 +204,7 @@ async def exoml_start(request: Request, interaction_id: str = "default", lead_id
     # Strip any http/https prefix from DOMAIN — wss:// needs bare domain
     bare_domain = DOMAIN.replace("https://", "").replace("http://", "").rstrip("/")
     
-    ws_url = f"wss://{bare_domain}/exotel-media-stream?interaction_id={interaction_id}&lead_id={lead_id or 0}"
+    ws_url = f"wss://{bare_domain}/exotel-media-stream?interaction_id={interaction_id}&lead_id={lead_id or 0}&ngrok-skip-browser-warning=1"
 
     # Exotel ExoML — Stream is directly under Response, NOT inside <Connect>
     exoml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -230,11 +230,14 @@ async def enablex_event(request: Request, lead_id: int = None):
         enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
         headers = {"Authorization": f"Basic {enablex_auth}", "Content-Type": "application/json"}
         
-        payload = {"action": "streaming", "url": ws_url, "stream_type": "both", "play_on_connect": True}
+        # payload = {"action": "streaming", "url": ws_url, "stream_type": "both", "play_on_connect": True}
+        payload = {"url": ws_url}
         async with aiohttp.ClientSession() as session:
-            url = f"https://api.enablex.io/voice/v1/call/{voice_id}/action"
-            async with session.post(url, headers=headers, json=payload) as resp:
-                logger.info(f"EnableX Stream Initiation: {resp.status}")
+            url = f"https://api.enablex.io/voice/v1/call/{voice_id}/stream"
+            # async with session.post(url, headers=headers, json=payload) as resp:
+            async with session.put(url, headers=headers, json=payload) as resp:
+                result = await resp.json()
+                logger.info(f"EnableX Stream Initiation: {resp.status} | {result}")
                 
     return {"status": "ok"}
 

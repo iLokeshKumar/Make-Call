@@ -13,7 +13,14 @@ class BaseLLM(ABC):
         self.system_prompt = system_prompt
         self.messages = [{"role": "system", "content": system_prompt}]
         self.provider = "Unknown"
-        self.model = "Unknown"
+    def update_system_prompt(self, new_prompt: str):
+        """Updates the system prompt and the first message in the history."""
+        self.system_prompt = new_prompt
+        if self.messages and self.messages[0]["role"] == "system":
+            self.messages[0]["content"] = new_prompt
+        else:
+            self.messages.insert(0, {"role": "system", "content": new_prompt})
+        logger.info("📝 [BaseLLM] System prompt updated dynamically")
 
     def add_user_message(self, content: str):
         self.messages.append({"role": "user", "content": content})

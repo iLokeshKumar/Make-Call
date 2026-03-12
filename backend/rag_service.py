@@ -47,8 +47,8 @@ def search_knowledge_base(query: str, n_results: int = 2) -> list[str]:
         return results["documents"][0]
     return []
 
-def search_products(query: str, n_results: int = 1) -> list[dict]:
-    """Searches the product collection for relevant items."""
+def search_products(query: str, n_results: int = 3) -> list[dict]:
+    """Searches the product collection for relevant items (top N)."""
     print(f"Semantic search (Local) for product: {query}")
     query_embedding = get_embedding(query)
     
@@ -63,13 +63,20 @@ def search_products(query: str, n_results: int = 1) -> list[dict]:
         for i in range(len(results["documents"][0])):
             formatted_results.append({
                 "name": results["metadatas"][0][i]["name"],
+                "id": results["metadatas"][0][i].get("id"),
                 "content": results["documents"][0][i]
             })
     return formatted_results
 
 def sync_products_to_chroma(products: list):
-    """Syncs list of product objects from DB to ChromaDB."""
-    print(f"Syncing {len(products)} products to ChromaDB (Local)...")
+    """Syncs list of product objects from DB to ChromaDB. Performs hard clear first."""
+    print(f"Hard-syncing {len(products)} products to ChromaDB (Local)...")
+    
+    # 1. Clear existing collection to remove orphaned/deleted IDs
+    existing_ids = product_collection.get()["ids"]
+    if existing_ids:
+        product_collection.delete(ids=existing_ids)
+        print(f"Cleared {len(existing_ids)} stale entries.")
     
     ids = []
     documents = []
