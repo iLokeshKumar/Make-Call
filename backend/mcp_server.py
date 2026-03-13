@@ -562,14 +562,15 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
 
             if GOOGLE_CALENDAR_AVAILABLE:
                 from google_calendar_service import GoogleMeetGenerator
-                generator = GoogleMeetGenerator(user=user)
-                if not generator.authenticate():
-                    auth_needed = True
+                generator = GoogleMeetGenerator(user=user, session=session)
+                is_valid, auth_message = generator.validate_authentication()
+                
+                if not is_valid:
                     auth_url = generator.get_auth_url()
-                    logger.warning("[book_meeting] Re-authentication required for Google Calendar")
+                    logger.warning(f"[book_meeting] Auth issue: {auth_message}")
                     return {
                         "confirmed": False,
-                        "message": "Google Calendar integration requires authentication. Please use 'get_google_auth_url' and 'submit_google_auth_code'.",
+                        "message": f"⚠️ {auth_message} Please use 'get_google_auth_url' to reconnect.",
                         "auth_url": auth_url
                     }
                 else:
@@ -594,7 +595,7 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             
             # STEP 3: Create appointment record in database
             appointment_insert = text("""
-                INSERT INTO appointment (lead_id, appointment_time, status, google_meet_link, calendar_event_id)
+                INSERT INTO appointment (lead_id, appointment_time, status, meeting_link, calendar_event_id)
                 VALUES (:lid, :atime, :status, :meet_link, :event_id)
                 RETURNING id
             """)
@@ -740,7 +741,7 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             }
 
 @mcp.tool()
-async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, pincode: str, demo_date: str, products: str, demo_type: str = "Offline", email: str = None, notes: str = None, user: User = None) -> dict:
+async def book_demo(lead_id: int, name: str, phone: str, demo_date: str, products: str, city: str = None, state: str = None, pincode: str = None, demo_type: str = "Online", email: str = None, notes: str = None, user: User = None) -> dict:
     """
     Records a demo request with contact information, location, and product interest.
     Use this when a lead wants to schedule a demo for specific products.
@@ -758,43 +759,43 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
     - notes: Any additional requirements for the demo.
     """
     normalized_phone = normalize_phone(phone)
-    logger.info(f"[book_demo] Recording demo for {name} ({normalized_phone}) at {city}, {state} on {demo_date}. Interest: {products}")
+    logger.info(f"[book_demo] Recording demo for {name} ({phone}) at {city or 'Online'}, {state or ''} on {demo_date}. Type: {demo_type}")
     
-    # Parse demo date
-    try:
-        # Detailed logging for debugging
-        logger.info(f"[book_demo] Attempting to parse date string: '{demo_date}'")
-        
-        # Pre-process natural language strings for better parsing
-        processed_date = demo_date.lower().strip()
-        processed_date = re.sub(r'\b(coming|next)\b\s*', '', processed_date)
-        
-        # 3-Tier Parsing: 1. dateparser -> 2. AI Normalization -> 3. Fallback to now
-        parsed_date = dateparser.parse(
-            processed_date, 
-            settings={'PREFER_DATES_FROM': 'future', 'RELATIVE_BASE': datetime.now()}
-        )
-        
-        if not parsed_date:
-            logger.info(f"[book_demo] dateparser failed for '{demo_date}', invoking AI Normalizer")
-            parsed_date = await normalize_date_ai(demo_date)
-            
-        if not parsed_date:
-            raise ValueError(f"AI could not resolve demo_date: '{demo_date}'")
-            
-        if parsed_date.tzinfo is None:
-            parsed_date = parsed_date.replace(tzinfo=timezone.utc)
-        logger.info(f"[book_demo] Successfully parsed '{demo_date}' to: {parsed_date}")
-    except Exception as e:
-        logger.warning(f"[book_demo] Date parsing failed for '{demo_date}': {e}. Using current time as fallback.")
-        parsed_date = datetime.now(timezone.utc)
-
+    # Lead check - reuse get_or_create_lead logic or just verify lead_id
     with SessionLocal() as session:
+        # Normalize phone
+        normalized_phone = normalize_phone(phone)
+        
+        # Verify lead exists
+        lead = session.get(Lead, lead_id)
+        if not lead:
+            # Fallback: search by phone
+            lead = session.execute(select(Lead).where(Lead.phone == normalized_phone)).scalars().first()
+            if not lead:
+                # Create if absolutely missing
+                lead = Lead(name=name, phone=normalized_phone, email=email, status="New", source="Demo Request")
+                session.add(lead)
+                session.commit()
+                session.refresh(lead)
+        
+        # Parse date
+        try:
+            parsed_date = dateparser.parse(demo_date)
+            if parsed_date.tzinfo is None:
+                parsed_date = parsed_date.replace(tzinfo=timezone.utc)
+        except Exception:
+            # AI normalizer fallback if simple parse fails
+            from utils.date_normalizer import normalize_date_ai
+            parsed_date = await normalize_date_ai(demo_date)
+            if not parsed_date:
+                parsed_date = datetime.now(timezone.utc)
+            
+        # Create Demo record
         demo = Demo(
-            lead_id=lead_id,
-            name=name,
-            phone=normalized_phone,
-            email=email,
+            lead_id=lead.id,
+            name=name, # Added name back as it's a required field for Demo model
+            phone=normalized_phone, # Added phone back
+            email=email, # Added email back
             city=city,
             state=state,
             pincode=pincode,
@@ -807,23 +808,31 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
 
         # Handle Online Demo with Google Meet link
         google_meet_link = None
+        auth_error_msg = None
         if demo_type.lower() == "online" and GOOGLE_CALENDAR_AVAILABLE:
             from google_calendar_service import GoogleMeetGenerator
-            generator = GoogleMeetGenerator(user=user)
-            if generator.authenticate():
+            generator = GoogleMeetGenerator(user=user, session=session)
+            auth_result = generator.validate_authentication()
+            
+            if auth_result["status"] == "valid":
                 # Extract clean meeting type from products
                 meeting_title = f"{products} Demo"
                 meet_result = await generator.create_google_meet_event(
                     lead_name=name,
-                    lead_email=email or "customer@example.com",
+                    lead_email=email or lead.email or "customer@example.com",
                     proposed_time=parsed_date.isoformat(),
                     meeting_type=meeting_title
                 )
                 if meet_result.get("success"):
                     google_meet_link = meet_result.get("google_meet_link")
-                    demo.google_meet_link = google_meet_link
+                    demo.meeting_link = google_meet_link
                     demo.calendar_event_id = meet_result.get("calendar_event_id")
-                    logger.info(f"[book_demo] Created Google Meet for online demo: {google_meet_link}, Event ID: {demo.calendar_event_id}")
+                    logger.info(f"[book_demo] Created Google Meet: {google_meet_link}, Event ID: {demo.calendar_event_id}")
+                else:
+                    auth_error_msg = f"Meet creation failed: {meet_result.get('error')}"
+            else:
+                auth_error_msg = f"Google Calendar connection expired: {auth_result['message']}"
+                logger.warning(f"[book_demo] {auth_error_msg}")
 
         session.add(demo)
         session.commit()
@@ -868,8 +877,9 @@ async def book_demo(lead_id: int, name: str, phone: str, city: str, state: str, 
             "products": products,
             "google_meet_link": google_meet_link,
             "email_sent": email_sent,
-            "message": f"✅ {demo_type} Demo for {products} successfully recorded for {name} on {demo_date}." + 
+            "message": f"✅ {demo_type} Demo for {products} recorded for {name} on {demo_date}." + 
                       (f" | Google Meet: {google_meet_link}" if google_meet_link else "") +
+                      (f" | {auth_error_msg}" if auth_error_msg else "") +
                       (" | Confirmation email sent." if email_sent else "")
         }
 

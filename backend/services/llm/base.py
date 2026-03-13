@@ -62,6 +62,43 @@ class BaseLLM(ABC):
             "tool_call_id": tool_call_id
         })
 
+    def get_safe_history(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """
+        Returns a truncated message history that is safe for tool-calling models.
+        Ensures that 'tool' messages are never orphaned from their parent 'assistant' tool_calls.
+        """
+        if len(self.messages) <= 1:
+            return self.messages
+
+        # Separate system prompt
+        system_msgs = [m for m in self.messages if m.get("role") == "system"]
+        other_msgs = [m for m in self.messages if m.get("role") != "system"]
+
+        if len(other_msgs) <= limit:
+            return system_msgs + other_msgs
+
+        # Initial slice
+        truncated = other_msgs[-limit:]
+        
+        # Check if we started in the middle of a tool chain
+        # 1. If first message is 'tool', we MUST go back to find the assistant message
+        # 2. If first message is 'assistant' with tool_calls, we are okay
+        
+        while truncated and truncated[0].get("role") == "tool":
+            # Find how many more messages we need to reach the previous one
+            current_len = len(truncated)
+            target_len = current_len + 1
+            if target_len > len(other_msgs):
+                break
+            truncated = other_msgs[-target_len:]
+            
+        # Re-check: Even if we found an assistant message, was it a tool_call message?
+        # If the first message is 'assistant' but it's part of a sequence that ends in a tool result we already have,
+        # we are technically safe, but some models prefer the user message too.
+        # For now, ensuring no orphaned 'tool' roles is the primary fix for 422.
+        
+        return system_msgs + truncated
+
     @abstractmethod
     async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
         """

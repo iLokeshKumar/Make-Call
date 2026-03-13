@@ -19,12 +19,21 @@ interface User {
     google_account_email?: string;
 }
 
+export interface GoogleStatus {
+    status: "valid" | "expiring_soon" | "expired" | "disconnected";
+    email: string | null;
+    expiry: string | null;
+    message: string;
+}
+
 interface AuthContextType {
     user: User | null;
     token: string | null;
+    googleStatus: GoogleStatus | null;
     login: (token: string) => void;
     logout: () => void;
     refreshUser: () => Promise<void>;
+    refreshGoogleStatus: () => Promise<void>;
     isLoading: boolean;
     isSessionExpired: boolean;
     sessionTimeout: () => void;
@@ -37,9 +46,11 @@ interface AuthContextType {
 const AuthContext = createContext<AuthContextType>({
     user: null,
     token: null,
+    googleStatus: null,
     login: () => { },
     logout: () => { },
     refreshUser: async () => { },
+    refreshGoogleStatus: async () => { },
     isLoading: true,
     isSessionExpired: false,
     sessionTimeout: () => { },
@@ -52,6 +63,7 @@ const AuthContext = createContext<AuthContextType>({
 export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     const [user, setUser] = useState<User | null>(null);
     const [token, setToken] = useState<string | null>(null);
+    const [googleStatus, setGoogleStatus] = useState<GoogleStatus | null>(null);
     const [isLoading, setIsLoading] = useState(true);
     const [isSessionExpired, setIsSessionExpired] = useState(false);
     const [showPersonalDetails, setShowPersonalDetails] = useState(false);
@@ -140,12 +152,30 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
     };
 
     const refreshUser = async () => {
-        if (token) await fetchUser(token);
+        if (token) {
+            await fetchUser(token);
+            await refreshGoogleStatus();
+        }
+    };
+
+    const refreshGoogleStatus = async () => {
+        if (!token) return;
+        try {
+            const res = await fetch("http://localhost:6060/auth/google/status", {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                const status = await res.json();
+                setGoogleStatus(status);
+            }
+        } catch (err) {
+            console.error("Failed to fetch Google status:", err);
+        }
     };
 
     return (
         <AuthContext.Provider value={{
-            user, token, login, logout, refreshUser, isLoading, isSessionExpired, sessionTimeout,
+            user, token, googleStatus, login, logout, refreshUser, refreshGoogleStatus, isLoading, isSessionExpired, sessionTimeout,
             showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft
         }}>
             {children}

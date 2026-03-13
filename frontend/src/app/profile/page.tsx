@@ -15,7 +15,7 @@ import { useSearchParams, useRouter } from "next/navigation";
 import { maskEmail, maskPhone } from "@/utils/security";
 
 export default function ProfilePage() {
-    const { user, token, refreshUser, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    const { user, token, refreshUser, googleStatus, refreshGoogleStatus, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
     const [isSaving, setIsSaving] = useState(false);
     const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
@@ -100,11 +100,18 @@ export default function ProfilePage() {
                     setMessage({ type: 'error', text: "An error occurred during Google connection." });
                 } finally {
                     setIsConnectingGoogle(false);
+                    await refreshGoogleStatus();
                 }
             };
             finalizeGoogleAuth();
         }
     }, [searchParams, token]); // ← remove refreshUser and router from deps
+
+    useEffect(() => {
+        if (token) {
+            refreshGoogleStatus();
+        }
+    }, [token]);
 
     const handleConnectGoogle = async () => {
         setIsConnectingGoogle(true);
@@ -123,6 +130,7 @@ export default function ProfilePage() {
                         clearInterval(checkWindow);
                         setIsConnectingGoogle(false);
                         await refreshUser();
+                        await refreshGoogleStatus();
                     }
                 }, 1000);
             }
@@ -143,6 +151,7 @@ export default function ProfilePage() {
             if (res.ok) {
                 setMessage({ type: 'success', text: "Google account disconnected." });
                 await refreshUser();
+                await refreshGoogleStatus();
             }
         } catch (err) {
             setMessage({ type: 'error', text: "Failed to disconnect." });
@@ -475,14 +484,51 @@ export default function ProfilePage() {
                                 <span className="text-xs font-bold uppercase tracking-wider">Connected Accounts</span>
                             </div>
 
-                            <div className="grid grid-cols-1 gap-4">
+                            <div className="grid grid-cols-1 gap-6">
+                                {/* Proactive Warning Banner */}
+                                {googleStatus && googleStatus.status !== "valid" && googleStatus.status !== "disconnected" && (
+                                    <div className={clsx(
+                                        "p-4 rounded-2xl border flex items-start gap-3 animate-in fade-in slide-in-from-top-2",
+                                        googleStatus.status === "expiring_soon" ? "bg-amber-500/10 border-amber-500/20 text-amber-200" : "bg-red-500/10 border-red-500/20 text-red-200"
+                                    )}>
+                                        <AlertCircle className={googleStatus.status === "expiring_soon" ? "text-amber-500" : "text-red-500"} size={20} />
+                                        <div className="space-y-1">
+                                            <p className="text-sm font-bold">
+                                                {googleStatus.status === "expiring_soon" ? "Connection Expiring Soon" : "Connection Expired"}
+                                            </p>
+                                            <p className="text-xs opacity-80 leading-relaxed">
+                                                {googleStatus.message} Reconnect now to ensure your Google Meet links are generated without issues.
+                                            </p>
+                                            <button 
+                                                onClick={handleConnectGoogle}
+                                                className="mt-2 text-xs font-black uppercase tracking-widest py-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/20 transition-all border border-white/10"
+                                            >
+                                                Reconnect Now
+                                            </button>
+                                        </div>
+                                    </div>
+                                )}
+
                                 <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-violet-500/30 transition-all group">
                                     <div className="flex items-center space-x-4">
                                         <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-white text-slate-900 font-bold shadow-lg">
                                             G
                                         </div>
                                         <div>
-                                            <p className="font-bold text-white">Google Account</p>
+                                            <div className="flex items-center gap-2">
+                                                <p className="font-bold text-white">Google Calendar</p>
+                                                {googleStatus && (
+                                                    <span className={clsx(
+                                                        "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-tighter",
+                                                        googleStatus.status === "valid" ? "bg-emerald-500/20 text-emerald-400" :
+                                                        googleStatus.status === "expiring_soon" ? "bg-amber-500/20 text-amber-400" :
+                                                        googleStatus.status === "expired" ? "bg-red-500/20 text-red-400" :
+                                                        "bg-slate-500/20 text-slate-400"
+                                                    )}>
+                                                        {googleStatus.status.replace("_", " ")}
+                                                    </span>
+                                                )}
+                                            </div>
                                             <p className="text-xs text-slate-500">
                                                 {user?.google_account_email ? `Connected: ${user.google_account_email}` : "For Google Meet integration"}
                                             </p>

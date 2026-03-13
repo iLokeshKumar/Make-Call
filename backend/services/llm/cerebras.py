@@ -43,16 +43,13 @@ class CerebrasLLM(BaseLLM):
                 }
             return str(obj)
 
-        # Context Truncation: Keep System Prompt + last 6 messages (lowers context usage)
-        system_msg = [m for m in self.messages if m["role"] == "system"][:1]
+        # Context Truncation: Use tool-safe history to preventing orphan tool messages
+        final_history = self.get_safe_history(limit=8)
         
         # Strengthen Cerebras instructions against JSON speech
+        system_msg = [m for m in final_history if m["role"] == "system"]
         if system_msg:
             system_msg[0]["content"] += "\n\nCRITICAL: Never output tool calls, JSON, or markdown in your speech. Always use the provided tool-calling interface."
-            
-        other_msgs = [m for m in self.messages if m["role"] != "system"]
-        truncated_msgs = other_msgs[-6:] if len(other_msgs) > 6 else other_msgs
-        final_history = system_msg + truncated_msgs
 
         sanitized_messages = sanitize_obj(final_history)
 
@@ -149,9 +146,9 @@ class CerebrasLLM(BaseLLM):
                                     if 'content' in delta and delta['content']:
                                         content = delta['content']
                                         
-                                        # JSON Speech Filter: Suppress metadata leak
-                                        if '"arguments":' in content or '{"name":' in content or '"name":' in content:
-                                            logger.warning(f"🚫 [CerebrasLLM] Filtered JSON leakage from speech: {content[:20]}...")
+                                        # Enhanced JSON Speech Filter: Suppress metadata leak
+                                        if any(p in content for p in ['"arguments":', '{"name":', '"name":', '"id":', '": "']):
+                                            logger.warning(f"🚫 [CerebrasLLM] Filtered JSON leakage from speech token: {content[:20]}...")
                                             continue
 
                                         accumulated_text += content

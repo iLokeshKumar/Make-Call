@@ -321,6 +321,15 @@ async def get_google_auth_url(current_user: User = Depends(get_current_active_us
     auth_url = generator.get_auth_url()
     return {"auth_url": auth_url}
 
+@router.get("/auth/google/status")
+async def get_google_auth_status(
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    """Returns the current status of the Google Calendar connection."""
+    generator = GoogleMeetGenerator(user=current_user, session=session)
+    return generator.validate_authentication()
+
 @router.post("/auth/google/callback")
 async def google_auth_callback(
     data: dict, 

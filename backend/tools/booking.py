@@ -59,7 +59,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", n
             )
             
             if meet_result.get("success"):
-                appointment.google_meet_link = meet_result.get("google_meet_link")
+                appointment.meeting_link = meet_result.get("google_meet_link")
                 appointment.calendar_event_id = meet_result.get("calendar_event_id")
                 # Use real calendar link if available
                 calendar_url = meet_result.get("calendar_link") or f"https://rio-crm.example.com/appointment/{appointment.id}"
@@ -74,10 +74,10 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", n
                 "confirmed": True,
                 "appointment_id": appointment.id,
                 "calendar_url": calendar_url,
-                "google_meet_link": appointment.google_meet_link,
+                "google_meet_link": appointment.meeting_link,
                 "lead_name": lead.name,
                 "lead_email": lead.email,
-                "message": f"✓ {meeting_type.capitalize()} scheduled! Google Meet: {appointment.google_meet_link}"
+                "message": f"✓ {meeting_type.capitalize()} scheduled! Google Meet: {appointment.meeting_link}"
             }
         except Exception as e:
             return {

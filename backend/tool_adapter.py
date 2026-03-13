@@ -194,19 +194,19 @@ def get_mistral_tools():
                         "lead_id": {"type": "integer", "description": "Lead ID"},
                         "name": {"type": "string", "description": "Name of the person"},
                         "phone": {"type": "string", "description": "Phone number"},
-                        "city": {"type": "string", "description": "City"},
-                        "state": {"type": "string", "description": "State"},
-                        "pincode": {"type": "string", "description": "Pincode"},
                         "demo_date": {
                             "type": "string", 
                             "description": "The date and time requested for the demo. Preferred format: ISO-8601 (e.g., '2026-03-30T15:00:00'). If unsure, use the raw natural language string (e.g., 'Tomorrow at 2 PM')."
                         },
                         "products": {"type": "string", "description": "The specific products or services the lead is interested in"},
-                        "demo_type": {"type": "string", "enum": ["Online", "Offline"], "description": "Whether the demo is 'Online' (virtual) or 'Offline' (at customer's place)"},
+                        "demo_type": {"type": "string", "enum": ["Online", "Offline"], "description": "Whether the demo is 'Online' (virtual) or 'Offline' (at customer's place). Defaults to 'Offline'."},
+                        "city": {"type": "string", "description": "City (optional for Online demos)"},
+                        "state": {"type": "string", "description": "State (optional for Online demos)"},
+                        "pincode": {"type": "string", "description": "Pincode (optional for Online demos)"},
                         "email": {"type": "string", "description": "Email address (optional)"},
                         "notes": {"type": "string", "description": "Additional requirements (optional)"}
                     },
-                    "required": ["lead_id", "name", "phone", "city", "state", "pincode", "demo_date", "products", "demo_type"]
+                    "required": ["lead_id", "name", "phone", "demo_date", "products", "demo_type"]
                 }
             }
         },

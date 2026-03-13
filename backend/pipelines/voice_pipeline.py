@@ -513,9 +513,10 @@ class VoicePipeline:
         async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
                 sentence = chunk["content"]
-                # Skip sentences that are obviously raw JSON or tool call artifacts
-                if sentence.strip().startswith("{") or '"arguments":' in sentence or '"name":' in sentence:
-                    logger.warning(f"🚫 [VoicePipeline] Discarding JSON-leaked sentence: {sentence[:30]}...")
+                
+                # Robust technical leakage check
+                if self._is_technical_leakage(sentence):
+                    logger.warning(f"🚫 [VoicePipeline] Discarding JSON-leaked sentence: {sentence[:40]}...")
                     continue
                 
                 # Strip markdown and technical leaks before queuing for TTS
@@ -592,6 +593,32 @@ class VoicePipeline:
                     # Recurse with user_input=None to follow the correct tool result -> model response sequence
                     await self._process_llm_response(None, 0)
 
+    def _is_technical_leakage(self, text: str) -> bool:
+        """Detects if a string looks like raw JSON, tool call fragments, or technical metadata."""
+        if not text:
+            return False
+        
+        trimmed = text.strip()
+        # 1. Starts with JSON braces/brackets
+        if trimmed.startswith(("{", "[", '{"', '["')):
+            return True
+        
+        # 2. Contains key-value pair pattern (e.g. "key": "value" or "key": 123)
+        if re.search(r'["\']\w+["\']\s*:\s*', trimmed):
+            return True
+        
+        # 3. Contains tool call artifacts
+        technical_terms = ['"arguments":', '"name":', '"id":', 'function_call', 'tool_calls', 'call_id']
+        if any(term in trimmed for term in technical_terms):
+            return True
+            
+        # 4. Excessive technical characters
+        technical_chars = trimmed.count("{") + trimmed.count("}") + trimmed.count(":") + trimmed.count("[") + trimmed.count("]")
+        if technical_chars > 3 and (":" in trimmed or "{" in trimmed):
+            return True
+
+        return False
+
     def _filter_technical_speech(self, text: str) -> str:
         """Regex-based safety layer to strip technical leakages from the voice stream."""
         import re
@@ -614,7 +641,6 @@ class VoicePipeline:
         # Remove trailing "with a" or "and" if they were part of an ID phrase
         text = re.sub(r"\b(with a|and|for)\s*$", "", text, flags=re.IGNORECASE).strip()
         return text
-    #            break
 
     async def _audio_generator(self, receiver):
         chunk_count = 0
