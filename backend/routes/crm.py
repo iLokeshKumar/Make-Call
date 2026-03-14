@@ -212,24 +212,56 @@ async def get_inventory(session: Session = Depends(get_session)):
     return session.exec(select(Product)).all()
 
 @router.get("/settings")
-async def get_settings(session: Session = Depends(get_session)):
-    """Fetch all system settings."""
-    settings = session.exec(select(SystemSettings)).all()
-    return {s.key: s.value for s in settings}
+async def get_settings(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Fetch all system settings for the current user."""
+    # First get global settings
+    global_settings = session.exec(select(SystemSettings).where(SystemSettings.user_id == None)).all()
+    settings_dict = {s.key: s.value for s in global_settings}
+    
+    # Then overwrite with user-specific settings if they exist
+    user_settings = session.exec(select(SystemSettings).where(SystemSettings.user_id == current_user.id)).all()
+    for s in user_settings:
+        settings_dict[s.key] = s.value
+        
+    return settings_dict
 
-@router.patch("/settings", dependencies=[Depends(RoleChecker(["admin"]))])
-async def update_settings(data: dict, session: Session = Depends(get_session)):
-    """Update system settings."""
+@router.patch("/settings")
+async def update_settings(
+    data: dict, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Update system settings for the current user."""
     for key, value in data.items():
-        db_s = session.exec(select(SystemSettings).where(SystemSettings.key == key)).first()
+        db_s = session.exec(
+            select(SystemSettings).where(
+                SystemSettings.key == key, 
+                SystemSettings.user_id == current_user.id
+            )
+        ).first()
+        
         if not db_s:
-            db_s = SystemSettings(key=key, value=str(value))
+            db_s = SystemSettings(
+                key=key, 
+                value=str(value), 
+                user_id=current_user.id,
+                created_by=current_user.username,
+                updated_by=current_user.username
+            )
         else:
             db_s.value = str(value)
+            db_s.updated_by = current_user.username
+            
         session.add(db_s)
+        
     session.commit()
-    settings_cache.update({key: str(value) for key, value in data.items()})
-    return {"message": "Settings updated"}
+    # Cache management would normally need to be user-aware depending on architecture.
+    # For now, we update the cache but note it's globally shared in pipeline currently
+    settings_cache.update({key: str(value) for key, value in data.items()}) 
+    return {"message": "User settings updated"}
 
 @router.get("/settings/reload_cache", dependencies=[Depends(RoleChecker(["admin"]))])
 async def reload_settings_cache(session: Session = Depends(get_session)):

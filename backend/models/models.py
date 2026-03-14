@@ -72,7 +72,8 @@ class Product(AuditMixin, table=True):
 
 class SystemSettings(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
-    key: str = Field(unique=True, index=True)
+    user_id: Optional[int] = Field(default=None, index=True) # None = global default, int = specific user
+    key: str = Field(index=True)
     value: str
 
 class Appointment(AuditMixin, table=True):

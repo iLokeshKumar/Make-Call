@@ -10,6 +10,7 @@ class LLMProvider(Enum):
     CLAUDE = "claude"
     OPENAI = "openai"
     LLAMA = "llama"
+    OPENROUTER = "openrouter"
 
 class LLMClient:
     """Universal LLM client interface"""
@@ -29,6 +30,7 @@ class LLMClient:
             LLMProvider.CLAUDE: "CLAUDE_API_KEY",
             LLMProvider.OPENAI: "OPENAI_API_KEY",
             LLMProvider.LLAMA: "LLAMA_API_KEY",
+            LLMProvider.OPENROUTER: "OPENROUTER_API_KEY",
         }
         env_var = key_map.get(self.provider)
         return os.getenv(env_var, "")
@@ -97,6 +99,9 @@ class LLMClient:
         
         elif provider == LLMProvider.LLAMA:
             return get_llama_tools()
+        
+        elif provider == LLMProvider.OPENROUTER:
+            return get_openai_tools()
         
         else:
             raise ValueError(f"Unsupported provider: {provider}")

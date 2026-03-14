@@ -25,12 +25,16 @@ class BaseLLM(ABC):
     def add_user_message(self, content: str):
         self.messages.append({"role": "user", "content": content})
 
-    def add_assistant_message(self, content: str, tool_calls: Optional[List] = None):
+    def add_assistant_message(self, content: str, tool_calls: Optional[List] = None, reasoning_details: Optional[str] = None):
         if not content and not tool_calls:
             logger.warning("⚠️ [BaseLLM] Attempted to add an empty assistant message (no content and no tools). Skipping.")
             return
 
         msg = {"role": "assistant", "content": content or ""}
+        
+        if reasoning_details:
+            msg["reasoning_details"] = reasoning_details
+            
         if tool_calls:
             # Sanitize tool_calls: Convert any non-dict objects (SimpleNamespace, SDK objects) to plain dicts
             sanitized_calls = []

@@ -3,6 +3,7 @@ from .claude import ClaudeLLM
 from .gemini import GeminiLLM
 from .perplexity import PerplexityLLM
 from .cerebras import CerebrasLLM
+from .openrouter import OpenRouterLLM
 
 def get_llm_service(provider: str, system_prompt: str):
     """Factory to get the requested LLM service."""
@@ -17,6 +18,8 @@ def get_llm_service(provider: str, system_prompt: str):
         return PerplexityLLM(system_prompt)
     elif provider == "cerebras":
         return CerebrasLLM(system_prompt)
+    elif provider == "openrouter":
+        return OpenRouterLLM(system_prompt)
     else:
         # Default fallback
         return MistralLLM(system_prompt)

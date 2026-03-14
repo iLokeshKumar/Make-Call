@@ -24,7 +24,11 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
 
 CEREBRAS_API_KEY = os.getenv("Cerebras_API_Key")
-CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL") # gpt-oss-120b
+CEREBRAS_MODEL = os.getenv("CEREBRAS_MODEL", "gpt-oss-120b") # gpt-oss-120b
+print(f"DEBUG CEREBRAS_MODEL = '{CEREBRAS_MODEL}'")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL") # openrouter/free
+print(f"DEBUG OPENROUTER_MODEL = '{OPENROUTER_MODEL}'")
 
 DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
 DEEPGRAM_VOICE = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")

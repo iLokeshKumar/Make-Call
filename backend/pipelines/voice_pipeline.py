@@ -534,12 +534,17 @@ class VoicePipeline:
             elif chunk["type"] == "finished":
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
+                reasoning_details = chunk.get("reasoning_details")
                 llm_end_time = time.time()
                 llm_latency = llm_end_time - llm_start_time
                 
                 # CRITICAL: Add assistant message ONCE with both content AND tool_calls
                 # This follows OpenAI/Llama specs and prevents sequence errors
-                self.llm_service.add_assistant_message(full_reply, tool_calls=tool_calls)
+                self.llm_service.add_assistant_message(
+                    full_reply, 
+                    tool_calls=tool_calls, 
+                    reasoning_details=reasoning_details
+                )
                 
                 if full_reply:
                     self.transcript_accumulator.append(f"Rio: {full_reply}")

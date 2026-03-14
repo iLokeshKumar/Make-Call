@@ -271,7 +271,8 @@ export default function SettingsPage() {
                                         <option value="anthropic">Claude 3.5 Sonnet</option>
                                         <option value="google">Gemini 1.5 Flash</option>
                                         <option value="perplexity">Perplexity AI</option>
-                                        <option value="cerebras">Cerebras (Llama 3.1)</option>
+                                        <option value="openrouter">OpenRouter (Inference)</option>
+                                        <option value="cerebras">Cerebras (Inference)</option>
                                     </select>
                                 </div>
 
@@ -397,7 +398,17 @@ export default function SettingsPage() {
                                         ● Fast Inference
                                     </span>
                                 </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">Low-Latency Voice Engine</p>
+                                <p className="text-sm text-slate-600 dark:text-slate-400">Fast Inference Engine</p>
+                            </div>
+
+                            <div className="rounded-xl bg-gradient-to-br from-emerald-500/10 to-teal-500/10 p-4 border border-emerald-200/50 dark:border-emerald-500/30 font-medium">
+                                <div className="flex items-center justify-between mb-2">
+                                    <p className="text-slate-900 dark:text-slate-100 italic">OpenRouter</p>
+                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
+                                        ● Inference
+                                    </span>
+                                </div>
+                                <p className="text-sm text-slate-600 dark:text-slate-400">Inference Engine</p>
                             </div>
                         </div>
                     </div>
