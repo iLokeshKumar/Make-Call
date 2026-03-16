@@ -5,27 +5,38 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Initialize Local Embedding Model (SentenceTransformers)
+# Lazy-loaded components
+_embed_model = None
+_chroma_client = None
+_collection = None
+_product_collection = None
 
-print("Loading local embedding model (all-MiniLM-L6-v2)...")
-embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+def get_embed_model():
+    global _embed_model
+    if _embed_model is None:
+        print("Loading local embedding model (all-MiniLM-L6-v2)...")
+        _embed_model = SentenceTransformer("all-MiniLM-L6-v2")
+    return _embed_model
 
-# Initialize ChromaDB (Persistent)
-chroma_client = chromadb.PersistentClient(path="./knowledge_base")
-
-# Note: We use "_local" suffix because local embeddings (384) 
-# have different dimensionality than Gemini (768).
-collection = chroma_client.get_or_create_collection(name="yexis_docs_local")
-product_collection = chroma_client.get_or_create_collection(name="yexis_products_local")
+def get_chroma_collections():
+    global _chroma_client, _collection, _product_collection
+    if _chroma_client is None:
+        print("Initializing ChromaDB (Persistent)...")
+        _chroma_client = chromadb.PersistentClient(path="./knowledge_base")
+        _collection = _chroma_client.get_or_create_collection(name="yexis_docs_local")
+        _product_collection = _chroma_client.get_or_create_collection(name="yexis_products_local")
+    return _collection, _product_collection
 
 def get_embedding(text: str) -> list[float]:
     """Generates vector embedding for the given text using local SentenceTransformer."""
-    embedding = embed_model.encode(text)
+    model = get_embed_model()
+    embedding = model.encode(text)
     return embedding.tolist()
 
 def add_document(doc_id: str, text: str):
     """Adds a document to the ChromaDB collection."""
     embedding = get_embedding(text)
+    collection, _ = get_chroma_collections()
     collection.add(
         documents=[text],
         embeddings=[embedding],
@@ -37,6 +48,7 @@ def search_knowledge_base(query: str, n_results: int = 2) -> list[str]:
     """Searches the knowledge base for relevant context."""
     print(f"Searching KB (Local) for: {query}")
     query_embedding = get_embedding(query)
+    collection, _ = get_chroma_collections()
     
     results = collection.query(
         query_embeddings=[query_embedding],
@@ -51,6 +63,7 @@ def search_products(query: str, n_results: int = 3) -> list[dict]:
     """Searches the product collection for relevant items (top N)."""
     print(f"Semantic search (Local) for product: {query}")
     query_embedding = get_embedding(query)
+    _, product_collection = get_chroma_collections()
     
     results = product_collection.query(
         query_embeddings=[query_embedding],
@@ -71,6 +84,7 @@ def search_products(query: str, n_results: int = 3) -> list[dict]:
 def sync_products_to_chroma(products: list):
     """Syncs list of product objects from DB to ChromaDB. Performs hard clear first."""
     print(f"Hard-syncing {len(products)} products to ChromaDB (Local)...")
+    _, product_collection = get_chroma_collections()
     
     # 1. Clear existing collection to remove orphaned/deleted IDs
     existing_ids = product_collection.get()["ids"]
@@ -99,16 +113,18 @@ def sync_products_to_chroma(products: list):
         )
     print("Product sync complete.")
 
-# Seed initial knowledge if empty
-if collection.count() == 0:
-    print("Seeding initial knowledge base (Local)...")
-    docs = {
-        "vrf_warranty": "The Samsung VRF System usually comes with a 1-year comprehensive warranty and 5 years on the compressor. AMC options are available.",
-        "return_policy": "{company_name} allows returns for defective items within 7 days of delivery. Original packaging is required.",
-        "support_hours": "Our support team is available Mon-Sat from 9 AM to 6 PM IST. Emergency support is available for contract customers."
-    }
-    for doc_id, text in docs.items():
-        try:
-            add_document(doc_id, text)
-        except Exception as e:
-            print(f"Failed to seed {doc_id}: {e}")
+# Seed initial knowledge if empty (Move to a helper to avoid top-level block)
+def seed_knowledge_if_empty():
+    collection, _ = get_chroma_collections()
+    if collection.count() == 0:
+        print("Seeding initial knowledge base (Local)...")
+        docs = {
+            "vrf_warranty": "The Samsung VRF System usually comes with a 1-year comprehensive warranty and 5 years on the compressor. AMC options are available.",
+            "return_policy": "{company_name} allows returns for defective items within 7 days of delivery. Original packaging is required.",
+            "support_hours": "Our support team is available Mon-Sat from 9 AM to 6 PM IST. Emergency support is available for contract customers."
+        }
+        for doc_id, text in docs.items():
+            try:
+                add_document(doc_id, text)
+            except Exception as e:
+                print(f"Failed to seed {doc_id}: {e}")

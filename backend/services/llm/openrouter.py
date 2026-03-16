@@ -5,20 +5,28 @@ import asyncio
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
-from utils.config import OPENROUTER_API_KEY, OPENROUTER_MODEL
+from utils.config import OPENROUTER_MODEL
 
 logger = logging.getLogger(__name__)
 
 class OpenRouterLLM(BaseLLM):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "OpenRouter"
-        self.model = OPENROUTER_MODEL
+        self.model = model or OPENROUTER_MODEL
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("OpenRouterLLM initialized without an API key! Streams will fail.")
 
     async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
+        if not self.api_key:
+            yield {"type": "error", "content": "Missing OpenRouter API Key in user settings"}
+            return
+            
         url = "https://openrouter.ai/api/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
             "HTTP-Referer": "https://rio-voice.local",
             "X-Title": "Rio Voice Agent"
@@ -30,37 +38,31 @@ class OpenRouterLLM(BaseLLM):
                 return [sanitize_obj(i) for i in obj]
             if isinstance(obj, dict):
                 return {k: sanitize_obj(v) for k, v in obj.items()}
-            if hasattr(obj, "__dict__"):
-                return sanitize_obj(obj.__dict__)
-            if hasattr(obj, "id") and hasattr(obj, "function"):
-                return {
-                    "id": obj.id,
-                    "type": "function",
-                    "function": {
-                        "name": obj.function.name,
-                        "arguments": obj.function.arguments
-                    }
-                }
             return str(obj)
 
         final_history = self.get_safe_history(limit=10)
         sanitized_messages = sanitize_obj(final_history)
 
-        # Prepare payload with reasoning tokens enabled
+        # Prepare payload
         payload = {
             "model": self.model,
             "messages": sanitized_messages,
             "stream": True,
             "temperature": 0.7,
-            "max_tokens": 2048,
-            "reasoning": {"enabled": True}  # Vital for Trinity/DeepSeek models
+            "max_tokens": 2048
         }
+        
+        # Only enable reasoning for specific models known to support it via this field
+        # Most models will throw a 500 if they don't recognize the 'reasoning' block
+        if any(m in self.model.lower() for m in ["trinity", "deepseek-r1"]):
+            payload["reasoning"] = {"enabled": True}
         
         if tools:
             payload["tools"] = sanitize_obj(tools)
             payload["tool_choice"] = "auto"
 
-        logger.info(f"🧠 [OpenRouterLLM] Sending Payload. Messages: {len(sanitized_messages)} | Tools: {bool(tools)}")
+        logger.info(f"🧠 [OpenRouterLLM] Sending Payload. Messages: {len(sanitized_messages)} | Tools: {bool(tools)} | Model: {self.model}")
+        logger.debug(f"📡 [OpenRouterLLM] Payload: {json.dumps(payload, indent=2)[:500]}...")
 
         timeout = aiohttp.ClientTimeout(total=60, connect=10, sock_read=30)
         

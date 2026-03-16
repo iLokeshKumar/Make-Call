@@ -13,6 +13,7 @@ from auth import RoleChecker, get_current_active_user
 from enrichment_service import enrich_lead_cascade
 from utils.phone import normalize_phone
 from utils import settings_cache
+from utils.encryption import encrypt_value, decrypt_value
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["CRM & Settings"])
@@ -261,7 +262,80 @@ async def update_settings(
     # Cache management would normally need to be user-aware depending on architecture.
     # For now, we update the cache but note it's globally shared in pipeline currently
     settings_cache.update({key: str(value) for key, value in data.items()}) 
-    return {"message": "User settings updated"}
+    return {"message": "Settings updated"}
+
+@router.get("/integrations/keys")
+async def get_integration_keys(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Fetch user's API keys securely (returns masked)."""
+    settings = session.exec(
+        select(SystemSettings).where(
+            SystemSettings.user_id == current_user.id,
+            (SystemSettings.key.like("%_API_KEY")) | 
+            (SystemSettings.key.like("%_SID")) | 
+            (SystemSettings.key.like("%_TOKEN")) |
+            (SystemSettings.key.like("%_MODEL")) |
+            (SystemSettings.key.like("%_VOICE_ID")) |
+            (SystemSettings.key.like("%_VOICE")) |
+            (SystemSettings.key.in_(["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]))
+        )
+    ).all()
+    
+    # Return masked representation (e.g. sk-****123)
+    masked = {}
+    for s in settings:
+        decrypted = decrypt_value(s.value)
+        if decrypted and len(decrypted) > 8:
+            masked[s.key] = decrypted[:3] + "..." + decrypted[-4:]
+        elif decrypted:
+            masked[s.key] = "***"
+        else:
+            masked[s.key] = ""
+            
+    return masked
+
+@router.patch("/integrations/keys")
+async def update_integration_keys(
+    data: dict, 
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user)
+):
+    """Securely encrypt and update user integration keys."""
+    for key, value in data.items():
+        if not (key.endswith("_API_KEY") or key.endswith("_SID") or key.endswith("_TOKEN") or key.endswith("_MODEL") or key.endswith("_VOICE_ID") or key.endswith("_VOICE") or key in ["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]):
+             continue # Only handle sensitive keys here
+             
+        db_s = session.exec(
+            select(SystemSettings).where(
+                SystemSettings.key == key, 
+                SystemSettings.user_id == current_user.id
+            )
+        ).first()
+        
+        # Don't save if it's masked (meaning the user didn't change it in the UI)
+        if str(value).startswith("***") or "..." in str(value):
+            continue
+            
+        encrypted_val = encrypt_value(str(value))
+        
+        if not db_s:
+            db_s = SystemSettings(
+                key=key, 
+                value=encrypted_val, 
+                user_id=current_user.id,
+                created_by=current_user.username,
+                updated_by=current_user.username
+            )
+        else:
+            db_s.value = encrypted_val
+            db_s.updated_by = current_user.username
+            
+        session.add(db_s)
+        
+    session.commit()
+    return {"message": "Integration keys updated securely"}
 
 @router.get("/settings/reload_cache", dependencies=[Depends(RoleChecker(["admin"]))])
 async def reload_settings_cache(session: Session = Depends(get_session)):

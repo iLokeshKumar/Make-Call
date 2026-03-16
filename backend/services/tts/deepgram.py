@@ -3,25 +3,29 @@ import base64
 import logging
 import time
 import aiohttp
-from utils.config import DEEPGRAM_API_KEY, DEEPGRAM_VOICE
+from utils.config import DEEPGRAM_VOICE
 
 logger = logging.getLogger(__name__)
 
 class DeepgramTTS:
-    def __init__(self):
+    def __init__(self, api_key: str = None, voice_id: str = None):
         self.provider = "Deepgram"
-        self.model = DEEPGRAM_VOICE
+        self.model = voice_id or DEEPGRAM_VOICE
+        self.api_key = api_key
         self.last_latency = 0
+        
+        if not self.api_key:
+            logger.warning("DeepgramTTS initialized without an API key! Streams will fail.")
 
     async def speak(self, text: str, communicator, ws_to_use=None, aiohttp_session=None, **kwargs):
-        if not DEEPGRAM_API_KEY:
+        if not self.api_key:
             logger.error("❌ [DeepgramTTS] API Key missing!")
             return
 
         start_time = time.time()
         first_byte_time = 0
         url = f"wss://api.deepgram.com/v1/speak?model={self.model}&encoding=mulaw&sample_rate=8000"
-        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        headers = {"Authorization": f"Token {self.api_key}"}
         
         async def _stream_on_ws(ws):
             nonlocal first_byte_time

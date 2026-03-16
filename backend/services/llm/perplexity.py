@@ -8,14 +8,19 @@ from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 logger = logging.getLogger(__name__)
 
 class PerplexityLLM(BaseLLM):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Perplexity"
-        self.model = "sonar-reasoning-pro" # Standard top-tier model
+        self.model = model or "sonar-reasoning-pro" # Standard top-tier model
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("PerplexityLLM initialized without an API key! Streams will fail.")
+
         self.client = AsyncOpenAI(
-            api_key=os.getenv("PERPLEXITY_API_KEY"),
+            api_key=self.api_key,
             base_url="https://api.perplexity.ai"
-        )
+        ) if self.api_key else None
 
     def _convert_tools(self, mistral_tools: List[Dict]) -> List[Dict]:
         """Convert OpenAI-style tools to Perplexity (OpenAI compatible) format."""

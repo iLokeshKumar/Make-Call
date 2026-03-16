@@ -68,8 +68,11 @@ async def incoming_call(request: Request, lead_id: int = None):
     return HTMLResponse(content=str(response), media_type="application/xml")
 
 @router.post("/make-call")
-async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "mistral-cartesia", interaction_id: Optional[str] = None):
+async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "mistral-cartesia", interaction_id: Optional[str] = None, current_user: User = Depends(RoleChecker(["admin", "user"]))):
     """Initiates an outbound call via selected telephony engine."""
+    from utils.encryption import decrypt_value
+    from twilio.rest import Client as TwilioClient
+    
     try:
         # Standardize number (Handle Indian numbers specifically)
         clean_number = "".join(filter(str.isdigit, to))
@@ -88,6 +91,21 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
             to = f"+{clean_number}" if not to.startswith("+") else to
             
         with Session(engine) as session:
+            # Fetch user keys
+            user_keys = session.exec(
+                select(SystemSettings).where(
+                    SystemSettings.user_id == current_user.id,
+                    SystemSettings.key.in_(["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", 
+                                            "EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"])
+                )
+            ).all()
+            keys = {s.key: decrypt_value(s.value) for s in user_keys}
+
+            # Fallback to defaults from env if missing in DB
+            sid = keys.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+            token = keys.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+            from_number = keys.get("PHONE_NUMBER_FROM") or os.getenv("PHONE_NUMBER_FROM")
+
             # ROBUST LEAD LOOKUP: If lead_id is missing, search by normalized phone number
             if not lead_id or lead_id == 0:
                 normalized_to = normalize_phone(to)
@@ -113,29 +131,34 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
             active_telephony = settings_dict.get("telephony_engine", "twilio")
 
         if active_telephony == "twilio":
-            call = twilio_client.calls.create(
+            client = TwilioClient(sid, token)
+            call = client.calls.create(
                 url=f"https://{DOMAIN}/incoming-call?lead_id={lead_id or 0}",
                 to=to,
-                from_=PHONE_NUMBER_FROM
+                from_=from_number
             )
             return {"message": "Twilio Call initiated", "call_sid": call.sid}
         
         elif active_telephony == "exotel":
-            url = f"https://api.exotel.com/v1/Accounts/{EXOTEL_ACCOUNT_SID}/Calls/connect.json"
+            exotel_sid = keys.get("EXOTEL_ACCOUNT_SID") or os.getenv("EXOTEL_ACCOUNT_SID")
+            exotel_key = keys.get("EXOTEL_API_KEY") or os.getenv("EXOTEL_API_KEY")
+            exotel_token = keys.get("EXOTEL_API_TOKEN") or os.getenv("EXOTEL_API_TOKEN")
+            exophone = keys.get("EXOPHONE") or os.getenv("EXOPHONE")
+            app_id = keys.get("EXOTEL_APP_ID") or os.getenv("EXOTEL_APP_ID")
+
+            url = f"https://api.exotel.com/v1/Accounts/{exotel_sid}/Calls/connect.json"
             exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id or 'default'}?lead_id={lead_id or 0}&ngrok-skip-browser-warning=1"
-            exotel_app_url = f"http://my.exotel.com/{EXOTEL_ACCOUNT_SID}/exoml/start/{EXOTEL_APP_ID}"
             logger.info(f"🔗 Exotel ExoML URL: {exoml_url}")
-            logger.info(f"🔗 Exotel App URL: {exotel_app_url}")
             data = {
                 "From": to,
                 #"To": EXOPHONE,
-                "CallerId": EXOPHONE,
+                "CallerId": exophone,
                 "Url": exoml_url,
                 "CallType": "trans",
                 "TimeLimit": "3600",
                 "StatusCallback": f"https://{DOMAIN}/exotel-event"
             }
-            auth = aiohttp.BasicAuth(EXOTEL_API_KEY, EXOTEL_API_TOKEN)
+            auth = aiohttp.BasicAuth(exotel_key, exotel_token)
             async with aiohttp.ClientSession() as http_session:
                 async with http_session.post(url, data=data, auth=auth) as resp:
                     result = await resp.json()
@@ -145,8 +168,12 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
         
         elif active_telephony == "enablex":
             # EnableX Outbound
+            enablex_id = keys.get("ENABLEX_APP_ID") or os.getenv("ENABLEX_APP_ID")
+            enablex_key = keys.get("ENABLEX_APP_KEY") or os.getenv("ENABLEX_APP_KEY")
+            enablex_from = keys.get("ENABLEX_FROM_NUMBER") or os.getenv("ENABLEX_FROM_NUMBER")
+
             logger.info(f"Initiating EnableX Call to: {to}")
-            enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
+            enablex_auth = base64.b64encode(f"{enablex_id}:{enablex_key}".encode()).decode()
             headers = {
                 "Authorization": f"Basic {enablex_auth}",
                 "Content-Type": "application/json"
@@ -156,7 +183,7 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
                  webhook_url += f"&lead_id={lead_id}"
 
             # EnableX expects numbers without + prefix (e.g., 911169040030)
-            from_number = ENABLEX_FROM_NUMBER.strip().replace("+", "") if ENABLEX_FROM_NUMBER else "917550131495"
+            from_number = enablex_from.strip().replace("+", "") if enablex_from else "917550131495"
             # EnableX expects 'to' number without + prefix as well
             to_number = to.strip().replace("+", "")
             
@@ -247,9 +274,25 @@ async def exotel_event(request: Request):
     return "OK"
 
 @router.post("/send-sms")
-async def send_sms(to: str, message: str):
+async def send_sms(to: str, message: str, current_user: User = Depends(RoleChecker(["admin", "user"]))):
+    from utils.encryption import decrypt_value
+    from twilio.rest import Client as TwilioClient
     try:
-        msg = twilio_client.messages.create(to=to, from_=PHONE_NUMBER_FROM, body=message)
-        return {"message": "SMS sent", "sid": msg.sid}
+        with Session(engine) as session:
+            user_keys = session.exec(
+                select(SystemSettings).where(
+                    SystemSettings.user_id == current_user.id,
+                    SystemSettings.key.in_(["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM"])
+                )
+            ).all()
+            keys = {s.key: decrypt_value(s.value) for s in user_keys}
+            
+            sid = keys.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+            token = keys.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+            from_num = keys.get("PHONE_NUMBER_FROM") or os.getenv("PHONE_NUMBER_FROM")
+            
+            client = TwilioClient(sid, token)
+            msg = client.messages.create(to=to, from_=from_num, body=message)
+            return {"message": "SMS sent", "sid": msg.sid}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

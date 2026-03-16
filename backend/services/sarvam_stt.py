@@ -17,9 +17,10 @@ class SarvamSTT:
     SILENCE_FRAMES_NEEDED = 20    # ~400ms at 20ms frames
     MIN_SPEECH_FRAMES = 5         # ~100ms minimum
 
-    def __init__(self, api_key: str, language: str = "en-IN"):
+    def __init__(self, api_key: str, language: str = "en-IN", model: str = None):
         self.api_key = api_key
         self.language = language
+        self.model = model or "saaras:v3"
         self._incoming = b""
         self._speech_buffer = b""
         self.silence_counter = 0
@@ -102,7 +103,7 @@ class SarvamSTT:
                     files={"file": ("audio.wav", wav_bytes, "audio/wav")},
                     data={
                         "language_code": self.language,
-                        "model": "saarika:v2.5",
+                        "model": self.model,
                         "with_timestamps": "false",
                     }
                 )

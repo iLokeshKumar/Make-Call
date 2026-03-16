@@ -16,8 +16,10 @@ from utils.audio import clean_voice_text
 from utils.config import mistral_client
 from tool_adapter import get_mistral_tools, execute_mcp_tool
 from sqlmodel import Session
-from models.models import Interaction, LatencyLog, User, Lead
+from models.models import Interaction, LatencyLog, User, Lead, SystemSettings
+from sqlmodel import select
 from utils.lead_utils import get_comprehensive_lead_context
+from utils.encryption import decrypt_value
 
 logger = logging.getLogger(__name__)
 
@@ -50,20 +52,64 @@ class VoicePipeline:
         self.is_rio_speaking = False
         self.tts_first_byte_time = 0.0
         self.last_tts_start_time = 0.0
+        self.llm_error_count = 0  # Track consecutive failures for smart fallback
 
-        # 2. Service Initialization (LLM, TTS, STT)
+        # 2. Extract and Decrypt API Keys for current user
+        keys = self._get_decrypted_integration_keys()
+        
+        # Determine specific LLM, TTS, STT keys based on provider
+        llm_api_key = keys.get(f"{llm_provider.upper()}_API_KEY")
+        tts_api_key = keys.get(f"{tts_provider.upper()}_API_KEY")
+        stt_api_key = keys.get(f"{stt_provider.upper()}_API_KEY")
+        # STT provider names might be slightly different depending on DB, but follow convention:
+        llm_model = keys.get(f"{llm_provider.upper()}_MODEL")
+        tts_voice = keys.get(f"{tts_provider.upper()}_VOICE_ID") or keys.get(f"{tts_provider.upper()}_VOICE")
+        stt_model = keys.get(f"{stt_provider.upper()}_MODEL")
+
         now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
         time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
         
         full_system_prompt = system_prompt + time_context
-        self.llm_service = get_llm_service(llm_provider, full_system_prompt)
-        self.tts_service = get_tts_service(tts_provider)
-        self.stt_service = get_stt_service(stt_provider)
+        self.llm_service = get_llm_service(llm_provider, full_system_prompt, api_key=llm_api_key, model=llm_model)
+        self.tts_service = get_tts_service(tts_provider, api_key=tts_api_key, voice_id=tts_voice)
+        self.stt_service = get_stt_service(stt_provider, api_key=stt_api_key, model=stt_model)
+        
+        # Store keys globally on instance for TTS/STT loop logic later
+        self.integration_keys = keys
 
         # 3. Inject pre-fetched lead/prospect context if provided at start
         if lead_context:
             self._apply_context_to_prompt(lead_context)
+            
+    def _get_decrypted_integration_keys(self) -> Dict[str, str]:
+        """Safely fetch and decrypt system integration keys for the current assigned user."""
+        db_keys_list = ["DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_API_KEY", "SARVAM_API_KEY",
+                        "OPENAI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
+                        "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "APOLLO_API_KEY",
+                        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM",
+                        "ELEVENLABS_VOICE_ID", "CARTESIA_VOICE_ID", "DEEPGRAM_VOICE", "SARVAM_VOICE_ID",
+                        "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL",
+                        "DEEPGRAM_MODEL", "SARVAM_MODEL", "CARTESIA_MODEL"]
+        decrypted_keys = {}
         
+        if not self.user:
+            logger.warning("Pipeline instantiated without a User. Cannot fetch specific encrypted keys!")
+            return decrypted_keys
+            
+        settings = self.session.exec(
+            select(SystemSettings).where(
+                SystemSettings.user_id == self.user.id,
+                SystemSettings.key.in_(db_keys_list)
+            )
+        ).all()
+        
+        for s in settings:
+            d = decrypt_value(s.value)
+            if d:
+                decrypted_keys[s.key] = d
+                
+        return decrypted_keys
+
     def _apply_context_to_prompt(self, context: str):
         """Helper to structure and inject lead context into the LLM service."""
         prospect_context = (
@@ -298,23 +344,25 @@ class VoicePipeline:
             try:
                 # 1. Setup persistent connections if needed
                 if self.tts_provider == "deepgram":
-                    from utils.config import DEEPGRAM_API_KEY, DEEPGRAM_VOICE
+                    dg_api_key = self.integration_keys.get("DEEPGRAM_API_KEY")
+                    from utils.config import DEEPGRAM_VOICE
                     dg_url = f"wss://api.deepgram.com/v1/speak?model={DEEPGRAM_VOICE}&encoding=mulaw&sample_rate=8000"
-                    dg_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+                    dg_headers = {"Authorization": f"Token {dg_api_key}"}
                     dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
                     logger.info("🎯 Deepgram TTS Persistent WebSocket Connected")
                 
                 elif self.tts_provider == "elevenlabs":
-                    from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+                    el_api_key = self.integration_keys.get("ELEVENLABS_API_KEY")
+                    from utils.config import ELEVENLABS_VOICE_ID
                     el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
-                    el_headers = {"xi-api-key": ELEVENLABS_API_KEY}
+                    el_headers = {"xi-api-key": el_api_key}
                     el_ws = await session.ws_connect(el_url, headers=el_headers)
                     logger.info("🎯 ElevenLabs TTS Persistent WebSocket Connected")
                 
                 # Setup Cartesia Persistent Connection if using it
                 if self.tts_provider == "cartesia":
-                    from utils.config import CARTESIA_API_KEY
-                    c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
+                    c_api_key = self.integration_keys.get("CARTESIA_API_KEY")
+                    c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={c_api_key}&cartesia_version=2025-04-16"
                     c_ws = await session.ws_connect(c_url)
                     logger.info("🎯 Cartesia TTS Persistent WebSocket Connected (aiohttp)")
 
@@ -330,8 +378,8 @@ class VoicePipeline:
 
                     if self.tts_provider == "cartesia":
                         if not c_ws or c_ws.closed:
-                            from utils.config import CARTESIA_API_KEY
-                            c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
+                            c_api_key = self.integration_keys.get("CARTESIA_API_KEY")
+                            c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={c_api_key}&cartesia_version=2025-04-16"
                             c_ws = await session.ws_connect(c_url)
                             logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
 
@@ -528,10 +576,22 @@ class VoicePipeline:
 
                 logger.info(f"📤 [{self.llm_provider} -> Queue] Sentence: '{clean_sentence}'")
                 await self.sentence_queue.put(clean_sentence)
-            elif chunk["type"] == "error":
-                logger.error(f"❌ [{self.llm_provider}] Stream Error in Pipeline: {chunk.get('content')}")
+                # FALLBACK: Inform the user of the connection trouble instead of staying silent
+                self.llm_error_count += 1
+                
+                if self.llm_error_count >= 3:
+                    fallback_sentence = "I'm sorry, I'm experiencing persistent technical difficulties. Please try calling back in a few minutes."
+                    logger.warning(f"🚨 [Smart Fallback] 3 consecutive failures. Queuing final error message.")
+                else:
+                    fallback_sentence = "I'm sorry, I'm having a bit of trouble with my connection. Could you repeat that?"
+                    logger.info(f"🔄 [Smart Fallback] Failure #{self.llm_error_count}. Queuing retry message.")
+                
+                await self.sentence_queue.put(fallback_sentence)
                 return
             elif chunk["type"] == "finished":
+                # Success! Reset consecutive error count
+                self.llm_error_count = 0
+                
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
                 reasoning_details = chunk.get("reasoning_details")

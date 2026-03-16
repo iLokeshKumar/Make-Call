@@ -3,19 +3,22 @@ import json
 import logging
 import aiohttp
 from typing import AsyncGenerator, Dict, Any
-from utils.config import DEEPGRAM_API_KEY
 
 logger = logging.getLogger(__name__)
 
 class DeepgramSTT:
-    def __init__(self):
+    def __init__(self, api_key: str = None, model: str = None):
         self.provider = "Deepgram"
-        self.model = "nova-2"
+        self.model = model or "nova-2"
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("DeepgramSTT initialized without an API key! Transcription will fail.")
 
     async def transcribe(self, audio_generator, encoding: str = "linear16", sample_rate: int = 8000) -> AsyncGenerator[Dict[str, Any], None]:
         dg_encoding = "mulaw" if "mulaw" in encoding else encoding
         url = f"wss://api.deepgram.com/v1/listen?model={self.model}&encoding={dg_encoding}&sample_rate={sample_rate}&interim_results=true"
-        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        headers = {"Authorization": f"Token {self.api_key}"}
         
         async with aiohttp.ClientSession() as session:
             try:

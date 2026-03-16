@@ -8,11 +8,16 @@ from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 logger = logging.getLogger(__name__)
 
 class ClaudeLLM(BaseLLM):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Anthropic"
-        self.model = os.getenv("Claude_API_ID", "claude-haiku-4-5-20251001")
-        self.client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
+        self.model = model or os.getenv("Claude_API_ID", "claude-haiku-4-5-20251001")
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("ClaudeLLM initialized without an API key! Streams will fail.")
+            
+        self.client = AsyncAnthropic(api_key=self.api_key) if self.api_key else None
 
     def _convert_tools(self, mistral_tools: List[Dict]) -> List[Dict]:
         """Convert OpenAI-style tools to Anthropic format."""

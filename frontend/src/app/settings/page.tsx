@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Save, Brain, Bell, Shield, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded } from "lucide-react";
+import { Save, Brain, Bell, Shield, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
@@ -20,15 +20,23 @@ export default function SettingsPage() {
     const [ttsProvider, setTtsProvider] = useState("cartesia");
     const [telephonyEngine, setTelephonyEngine] = useState("twilio");
     const [aiVerbosity, setAiVerbosity] = useState("2");
+    
+    // API Keys State
+    const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
+    
+    // UI State
+    const [activeTab, setActiveTab] = useState("general");
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
+    const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
 
     const API_BASE = "http://localhost:6060";
 
     useEffect(() => {
-        const fetchSettings = async () => {
+        const fetchSettingsAndKeys = async () => {
             try {
+                // Fetch General Settings
                 const res = await fetch(`${API_BASE}/settings`, {
                     headers: { "Authorization": `Bearer ${token}` }
                 });
@@ -43,13 +51,61 @@ export default function SettingsPage() {
                 setTtsProvider(data.tts_provider || "cartesia");
                 setTelephonyEngine(data.telephony_engine || "twilio");
                 setAiVerbosity(data.ai_verbosity || "2");
+                
+                // Fetch Encrypted Integration Keys
+                const keysRes = await fetch(`${API_BASE}/integrations/keys`, {
+                    headers: { "Authorization": `Bearer ${token}` }
+                });
+                if (keysRes.ok) {
+                    const keysData = await keysRes.json();
+                    
+                    // Initialize with defaults if empty, but merge in whatever the server sent
+                    const defaultKeys = {
+                        DEEPGRAM_API_KEY: "",
+                        ELEVENLABS_API_KEY: "",
+                        CARTESIA_API_KEY: "",
+                        SARVAM_API_KEY: "",
+                        OPENAI_API_KEY: "",
+                        MISTRAL_API_KEY: "",
+                        ANTHROPIC_API_KEY: "",
+                        GEMINI_API_KEY: "",
+                        PERPLEXITY_API_KEY: "",
+                        CEREBRAS_API_KEY: "",
+                        OPENROUTER_API_KEY: "",
+                        APOLLO_API_KEY: "",
+                        TWILIO_ACCOUNT_SID: "",
+                        TWILIO_AUTH_TOKEN: "",
+                        PHONE_NUMBER_FROM: "",
+                        WHATSAPP_NUMBER_FROM: "",
+                        EXOTEL_ACCOUNT_SID: "",
+                        EXOTEL_API_KEY: "",
+                        EXOTEL_API_TOKEN: "",
+                        EXOPHONE: "",
+                        EXOTEL_APP_ID: "",
+                        ENABLEX_APP_ID: "",
+                        ENABLEX_APP_KEY: "",
+                        ENABLEX_FROM_NUMBER: "",
+                        ELEVENLABS_VOICE_ID: "",
+                        CARTESIA_VOICE_ID: "",
+                        DEEPGRAM_VOICE: "",
+                        MISTRAL_MODEL: "",
+                        OPENAI_MODEL: "",
+                        GEMINI_MODEL: "",
+                        ANTHROPIC_MODEL: "",
+                        PERPLEXITY_MODEL: "",
+                        OPENROUTER_MODEL: "",
+                        CEREBRAS_MODEL: ""
+                    };
+                    setApiKeys({ ...defaultKeys, ...keysData });
+                }
+
             } catch (error) {
                 console.error("Error fetching settings:", error);
             } finally {
                 setLoading(false);
             }
         };
-        fetchSettings();
+        fetchSettingsAndKeys();
     }, [token, sessionTimeout]);
 
 
@@ -57,6 +113,7 @@ export default function SettingsPage() {
         setSaving(true);
         setSaveSuccess(false);
         try {
+            // Save General Settings
             const res = await fetch(`${API_BASE}/settings`, {
                 method: "PATCH",
                 headers: {
@@ -76,7 +133,18 @@ export default function SettingsPage() {
                 sessionTimeout();
                 return;
             }
-            if (res.ok) {
+            
+            // Save Integration Keys
+            const keysRes = await fetch(`${API_BASE}/integrations/keys`, {
+                method: "PATCH",
+                headers: {
+                    "Content-Type": "application/json",
+                    "Authorization": `Bearer ${token}`
+                },
+                body: JSON.stringify(apiKeys),
+            });
+
+            if (res.ok && keysRes.ok) {
                 setSaveSuccess(true);
                 setTimeout(() => setSaveSuccess(false), 3000);
             }
@@ -85,6 +153,14 @@ export default function SettingsPage() {
         } finally {
             setSaving(false);
         }
+    };
+
+    const handleKeyChange = (key: string, value: string) => {
+        setApiKeys(prev => ({ ...prev, [key]: value }));
+    };
+
+    const toggleKeyVisibility = (key: string) => {
+        setVisibleKeys(prev => ({ ...prev, [key]: !prev[key] }));
     };
 
     return (
@@ -107,8 +183,36 @@ export default function SettingsPage() {
                 )}
             </div>
 
+            {/* Tabs */}
+            <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+                {[
+                    { id: "general", label: "General & Appearance", icon: Settings },
+                    { id: "persona", label: "Voice & AI Engine", icon: Brain },
+                    { id: "keys", label: "Integration Keys", icon: KeyRound },
+                ].map((tab) => {
+                    const Icon = tab.icon;
+                    return (
+                        <button
+                            key={tab.id}
+                            onClick={() => setActiveTab(tab.id)}
+                            className={`flex items-center space-x-2 px-4 py-2 rounded-xl font-bold transition-all ${
+                                activeTab === tab.id 
+                                ? "bg-violet-600 text-white shadow-md" 
+                                : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                            }`}
+                        >
+                            <Icon className="h-4 w-4" />
+                            <span>{tab.label}</span>
+                        </button>
+                    )
+                })}
+            </div>
+
             <div className="space-y-6">
-                {/* Theme Settings */}
+                {/* General Tab */}
+                {activeTab === "general" && (
+                    <div className="space-y-6">
+                        {/* Theme Settings */}
                 <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                     <div className="flex items-center space-x-3 mb-6">
                         <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-yellow-500 to-orange-500">
@@ -228,9 +332,11 @@ export default function SettingsPage() {
                         </div>
                     </div>
                 )}
+                    </div>
+                )}
 
-                {/* AI Configuration */}
-                {user?.role === "admin" && (
+                {/* AI Configuration Tab */}
+                {activeTab === "persona" && user?.role === "admin" && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
@@ -347,69 +453,61 @@ export default function SettingsPage() {
                 )}
 
 
-                {/* Integrations */}
-                {user?.role === "admin" && (
+                {/* Integrations Keys Tab */}
+                {activeTab === "keys" && user?.role === "admin" && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
-                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500">
-                                <Zap className="h-5 w-5 text-white" />
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-green-400 to-emerald-600">
+                                <KeyRound className="h-5 w-5 text-white" />
                             </div>
                             <div>
-                                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">Integrations</h3>
-                                <p className="text-sm text-slate-500 dark:text-slate-400">Connected services status</p>
+                                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">API Credentials</h3>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">Securely store your provider keys in the encrypted database</p>
                             </div>
                         </div>
 
-                        <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-                            <div className="rounded-xl bg-gradient-to-br from-purple-500/10 to-pink-500/10 p-4 border border-purple-200/50 dark:border-purple-500/30 font-medium">
-                                <div className="flex items-center justify-between mb-2">
-                                    <p className="text-slate-900 dark:text-slate-100 italic">Twilio</p>
-                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
-                                        ● Active
-                                    </span>
+                        <div className="grid gap-6 md:grid-cols-2">
+                            {Object.entries({
+                                "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
+                                "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
+                                "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_VOICE"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID"],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL"],
+                                "Enrichment": ["APOLLO_API_KEY"]
+                            }).map(([groupName, keys]) => (
+                                <div key={groupName} className="space-y-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                                    <h4 className="font-bold text-slate-700 dark:text-slate-300">{groupName}</h4>
+                                    
+                                    {keys.map((keyName) => (
+                                        <div key={keyName} className="space-y-1">
+                                            <label className="text-xs font-semibold text-slate-500 uppercase">{keyName.replace(/_/g, " ")}</label>
+                                            <div className="relative group/key">
+                                                <input
+                                                    type={visibleKeys[keyName] || String(apiKeys[keyName]).startsWith("***") ? "text" : "password"}
+                                                    placeholder="sk-..."
+                                                    value={apiKeys[keyName] || ""}
+                                                    onChange={(e) => handleKeyChange(keyName, e.target.value)}
+                                                    onFocus={() => {
+                                                        if (String(apiKeys[keyName]).indexOf("*") !== -1) {
+                                                            handleKeyChange(keyName, "");
+                                                        }
+                                                    }}
+                                                    className="w-full p-2.5 pr-10 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-500 font-mono text-sm"
+                                                />
+                                                <button
+                                                    type="button"
+                                                    onClick={() => toggleKeyVisibility(keyName)}
+                                                    className="absolute right-2.5 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-violet-500 transition-colors"
+                                                    title={visibleKeys[keyName] ? "Hide Key" : "Show Key"}
+                                                >
+                                                    {visibleKeys[keyName] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
                                 </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">Voice & SMS Gateway</p>
-                            </div>
-
-                            <div className="rounded-xl bg-gradient-to-br from-indigo-500/10 to-blue-500/10 p-4 border border-indigo-200/50 dark:border-indigo-500/30 font-medium">
-                                <div className="flex items-center justify-between mb-2">
-                                    <p className="text-slate-900 dark:text-slate-100 italic">EnableX</p>
-                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
-                                        ● Connected
-                                    </span>
-                                </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">India Voice Engine</p>
-                            </div>
-
-                            <div className="rounded-xl bg-gradient-to-br from-blue-500/10 to-cyan-500/10 p-4 border border-blue-200/50 dark:border-blue-500/30 font-medium">
-                                <div className="flex items-center justify-between mb-2">
-                                    <p className="text-slate-900 dark:text-slate-100 italic">Gemini AI</p>
-                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
-                                        ● Active
-                                    </span>
-                                </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">Multimodal Assistant</p>
-                            </div>
-
-                            <div className="rounded-xl bg-gradient-to-br from-orange-500/10 to-red-500/10 p-4 border border-orange-200/50 dark:border-orange-500/30 font-medium">
-                                <div className="flex items-center justify-between mb-2">
-                                    <p className="text-slate-900 dark:text-slate-100 italic">Cerebras</p>
-                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
-                                        ● Fast Inference
-                                    </span>
-                                </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">Fast Inference Engine</p>
-                            </div>
-
-                            <div className="rounded-xl bg-gradient-to-br from-emerald-500/10 to-teal-500/10 p-4 border border-emerald-200/50 dark:border-emerald-500/30 font-medium">
-                                <div className="flex items-center justify-between mb-2">
-                                    <p className="text-slate-900 dark:text-slate-100 italic">OpenRouter</p>
-                                    <span className="inline-flex items-center rounded-full bg-green-50 dark:bg-green-900/30 px-2 py-1 text-xs font-semibold text-green-700 dark:text-green-400 ring-1 ring-green-600/20">
-                                        ● Inference
-                                    </span>
-                                </div>
-                                <p className="text-sm text-slate-600 dark:text-slate-400">Inference Engine</p>
-                            </div>
+                            ))}
                         </div>
                     </div>
                 )}

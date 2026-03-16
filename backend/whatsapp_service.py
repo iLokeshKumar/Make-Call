@@ -8,16 +8,19 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def send_whatsapp_message(to_phone: str, body: str):
+def send_whatsapp_message(to_phone: str, body: str, account_sid: str = None, auth_token: str = None, from_whatsapp_number: str = None):
     """
     Sends a WhatsApp message using Twilio.
     Args:
     - to_phone: The recipient's phone number (e.g., '+919876543210').
     - body: The message content.
+    - account_sid: Optional Twilio SID (fallback to env)
+    - auth_token: Optional Twilio Token (fallback to env)
+    - from_whatsapp_number: Optional sender number (fallback to env)
     """
-    account_sid = os.getenv("TWILIO_ACCOUNT_SID")
-    auth_token = os.getenv("TWILIO_AUTH_TOKEN")
-    from_whatsapp_number = os.getenv("WHATSAPP_NUMBER_FROM", "whatsapp:+14155238886") # Twilio Sandbox default if not set
+    account_sid = account_sid or os.getenv("TWILIO_ACCOUNT_SID")
+    auth_token = auth_token or os.getenv("TWILIO_AUTH_TOKEN")
+    from_whatsapp_number = from_whatsapp_number or os.getenv("WHATSAPP_NUMBER_FROM", "whatsapp:+14155238886")
 
     if not all([account_sid, auth_token, from_whatsapp_number]):
         logger.error("Missing Twilio/WhatsApp configuration in .env.")

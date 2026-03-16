@@ -18,8 +18,9 @@ class CartesiaSTT:
     SILENCE_FRAMES_NEEDED = 15    # consecutive silent frames to end utterance (~450ms at 30ms frames)
     MIN_SPEECH_FRAMES = 5         # minimum speech frames before we'll transcribe (~150ms)
 
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, model: str = None):
         self.api_key = api_key
+        self.model = model or "ink-whisper"
         self._incoming = b""
         self._speech_buffer = b""
         self.silence_counter = 0
@@ -104,7 +105,7 @@ class CartesiaSTT:
                 response = await client.post(
                     "https://api.cartesia.ai/stt",
                     files={"file": ("audio.wav", wav_io.getvalue(), "audio/wav")},
-                    data={"model": "ink-whisper", "language": "en"},
+                    data={"model": self.model, "language": "en"},
                     headers={
                         "X-API-Key": self.api_key,
                         "Cartesia-Version": "2025-04-16"

@@ -11,15 +11,19 @@ from utils.config import CEREBRAS_API_KEY, CEREBRAS_MODEL
 logger = logging.getLogger(__name__)
 
 class CerebrasLLM(BaseLLM):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Cerebras"
-        self.model = CEREBRAS_MODEL
+        self.model = model or CEREBRAS_MODEL
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("CerebrasLLM initialized without an API key! Streams will fail.")
 
     async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
         url = "https://api.cerebras.ai/v1/chat/completions"
         headers = {
-            "Authorization": f"Bearer {CEREBRAS_API_KEY}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
         }
         

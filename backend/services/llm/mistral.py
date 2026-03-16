@@ -1,24 +1,33 @@
 import json
 import logging
+from mistralai import Mistral
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
-from utils.config import mistral_client
 
 logger = logging.getLogger(__name__)
 
 class MistralLLM(BaseLLM):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Mistral"
-        self.model = "mistral-large-latest"
+        self.model = model or "mistral-large-latest"
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("MistralLLM initialized without an API key! Streams will fail.")
+            
+        self.client = Mistral(api_key=self.api_key) if self.api_key else None
 
-    async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
+    async def stream(self, tools: Optional[List[Dict[str, Any]]] = None) -> AsyncGenerator[Dict[str, Any], None]:
         try:
             accumulated_text = ""
             full_reply = ""
             tool_calls_dict = {}
 
-            stream = await mistral_client.chat.stream_async(
+            if not self.client:
+                raise ValueError("Mistral Client is not initialized due to missing API key")
+
+            stream = await self.client.chat.stream_async(
                 model=self.model,
                 messages=self.messages,
                 tools=tools,

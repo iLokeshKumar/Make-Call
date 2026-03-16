@@ -4,15 +4,20 @@ import logging
 import time
 import aiohttp
 import audioop
-from utils.config import CARTESIA_API_KEY, CARTESIA_VOICE_ID
+from utils.config import CARTESIA_VOICE_ID
 
 logger = logging.getLogger(__name__)
 
 class CartesiaTTS:
-    def __init__(self):
+    def __init__(self, api_key: str = None, voice_id: str = None):
         self.provider = "Cartesia"
         self.model = "sonic-3"
+        self.api_key = api_key
+        self.voice_id = voice_id or CARTESIA_VOICE_ID
         self.last_latency = 0
+        
+        if not self.api_key:
+            logger.warning("CartesiaTTS initialized without an API key! Streams will fail.")
 
     async def speak(self, text: str, communicator, ws_to_use=None, context_id=None, **kwargs):
         try:
@@ -23,7 +28,7 @@ class CartesiaTTS:
             payload = {
                 "model_id": self.model,
                 "transcript": text,
-                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
+                "voice": {"mode": "id", "id": self.voice_id},
                 "output_format": {
                     "container": "raw",
                     "encoding": "pcm_s16le",
@@ -61,7 +66,7 @@ class CartesiaTTS:
             if ws_to_use:
                 await _stream_on_ws(ws_to_use)
             else:
-                url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
+                url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2025-04-16"
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(url) as ws:
                         await _stream_on_ws(ws)

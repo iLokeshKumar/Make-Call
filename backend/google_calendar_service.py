@@ -272,7 +272,7 @@ class GoogleMeetGenerator:
                 calendarId='primary',
                 body=event,
                 conferenceDataVersion=1,
-                sendUpdates='eventCreators'
+                sendUpdates='all'
             ).execute()
             
             google_meet_link = created_event.get('conferenceData', {}).get('entryPoints', [{}])[0].get('uri')
@@ -330,7 +330,7 @@ class GoogleMeetGenerator:
                 logger.error(f"❌ Token refresh failed: {e}")
                 raise
         
-        return build('calendar', 'v3', credentials=self.credentials)
+        return build('calendar', 'v3', credentials=self.credentials, cache_discovery=False)
     
     async def _parse_time_string(self, time_str: str) -> datetime:
         """

@@ -10,11 +10,16 @@ from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 logger = logging.getLogger(__name__)
 
 class GeminiLLM(BaseLLM):
-    def __init__(self, system_prompt: str):
+    def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Google"
-        self.model = "gemini-1.5-flash"
-        self.client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+        self.model = model or "gemini-1.5-flash"
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("GeminiLLM initialized without an API key! Streams will fail.")
+            
+        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
 
     def _convert_tools(self, mistral_tools: List[Dict]) -> List:
         """Convert OpenAI-style tools to Gemini format for the new SDK."""

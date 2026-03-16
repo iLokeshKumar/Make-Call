@@ -1,23 +1,26 @@
 import logging
 import audioop
 from typing import AsyncGenerator, Dict, Any
-from utils.config import CARTESIA_API_KEY
 from services.cartesia_stt import CartesiaSTT as CartesiaSTTHelper
 
 logger = logging.getLogger(__name__)
 
 class CartesiaSTT:
-    def __init__(self):
+    def __init__(self, api_key: str = None, model: str = None):
         self.provider = "Cartesia"
-        self.model = "sonic-3"
+        self.model = model or "ink-whisper"
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("CartesiaSTT initialized without an API key! Transcription will fail.")
 
     async def transcribe(self, audio_generator, encoding: str = "pcm_mulaw", sample_rate: int = 8000) -> AsyncGenerator[Dict[str, Any], None]:
-        if not CARTESIA_API_KEY:
+        if not self.api_key:
             logger.error("❌ [CartesiaSTT] API Key missing.")
             yield {"transcript": "[Error: Cartesia API Key Missing]", "is_final": True}
             return
 
-        stt_helper = CartesiaSTTHelper(api_key=CARTESIA_API_KEY)
+        stt_helper = CartesiaSTTHelper(api_key=self.api_key, model=self.model)
         resample_state = None
         
         try:

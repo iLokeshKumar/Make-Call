@@ -8,11 +8,12 @@ load_dotenv()
 
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
 
-def enrich_lead_cascade(lead_id: int):
+def enrich_lead_cascade(lead_id: int, apollo_key: str = None):
     """
     Sequentially enrich a lead using the waterfall logic:
     Local -> Apollo -> Lusha (Stub)
     """
+    key_to_use = apollo_key or APOLLO_API_KEY
     with Session(engine) as session:
         lead = session.get(Lead, lead_id)
         if not lead:
@@ -32,7 +33,7 @@ def enrich_lead_cascade(lead_id: int):
                 if domain:
                     url = "https://api.apollo.io/v1/organizations/enrich"
                     headers = {
-                        "X-Api-Key": APOLLO_API_KEY,
+                        "X-Api-Key": key_to_use,
                         "Content-Type": "application/json"
                     }
                     resp = requests.post(url, headers=headers, json={"domain": domain})

@@ -30,10 +30,23 @@ async def lifespan(app: FastAPI):
     init_db()
     logger.info("✓ Database initialized")
     
-    # Sync products on startup
+    # Heavy startup tasks in background
+    async def startup_tasks():
+        try:
+            from rag_service import seed_knowledge_if_empty
+            seed_knowledge_if_empty()
+            with Session(engine) as session:
+                products = session.exec(select(Product)).all()
+                sync_products_to_chroma(products)
+            logger.info("✓ Background startup tasks (RAG sync) complete")
+        except Exception as e:
+            logger.error(f"❌ Error in background startup tasks: {e}")
+
+    import asyncio
+    asyncio.create_task(startup_tasks())
+    
+    # Fast startup tasks
     with Session(engine) as session:
-        products = session.exec(select(Product)).all()
-        sync_products_to_chroma(products)
         settings_cache.load(session)
     
     yield
@@ -68,6 +81,7 @@ async def index():
 @app.websocket("/media-stream")
 async def handle_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
     """Unified media-stream handler using VoicePipeline."""
+    logger.info("⚡ [WS] Incoming connection to /media-stream")
     await websocket.accept()
     
     # Robust Interaction ID parsing
@@ -126,21 +140,25 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     
     # 2. Setup Voice Pipeline (Context will be loaded proactively if lead_id found in stream)
     transcript_accumulator = []
-    pipeline = VoicePipeline(
-        communicator, 
-        interaction_id, 
-        system_prompt, 
-        transcript_accumulator, 
-        session,
-        stt_provider=stt_provider,
-        llm_provider=llm_provider,
-        tts_provider=tts_provider,
-        company_name=company_name,
-        user=admin_user,
-        lead_context=None, # Loaded proactively by pipeline
-    )
-
-    logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Providers: STT={stt_provider}, LLM={llm_provider}, TTS={tts_provider} | Company: {company_name}")
+    try:
+        pipeline = VoicePipeline(
+            communicator, 
+            interaction_id, 
+            system_prompt, 
+            transcript_accumulator, 
+            session,
+            stt_provider=stt_provider,
+            llm_provider=llm_provider,
+            tts_provider=tts_provider,
+            company_name=company_name,
+            user=admin_user,
+            lead_context=None, # Loaded proactively by pipeline
+        )
+        logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Providers: STT={stt_provider}, LLM={llm_provider}, TTS={tts_provider} | Company: {company_name}")
+    except Exception as e:
+        logger.error(f"❌ [WS] Failed to initialize VoicePipeline: {e}")
+        await websocket.close()
+        return
     
     try:
         await pipeline.run()
@@ -152,6 +170,7 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
 @app.websocket("/exotel-media-stream")
 async def handle_exotel_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
     """Exotel media-stream handler — PCM s16le 8kHz, stream_sid at root."""
+    logger.info("⚡ [WS] Incoming connection to /exotel-media-stream")
     # Attempt to bypass ngrok browser warning by sending the header in the handshake
     try:
         await websocket.accept(headers=[(b"ngrok-skip-browser-warning", b"true")])
@@ -203,7 +222,7 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
         company_name=company_name,
         user=admin_user,
         lead_context=lead_context,
-        audio_encoding="linear16",   # Exotel sends PCM not mulaw
+        audio_encoding="linear16",
         audio_sample_rate=8000,
     )
 

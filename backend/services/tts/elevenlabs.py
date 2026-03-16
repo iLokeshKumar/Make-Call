@@ -4,24 +4,29 @@ import logging
 import time
 import aiohttp
 import audioop
-from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
+from utils.config import ELEVENLABS_VOICE_ID
 
 logger = logging.getLogger(__name__)
 
 class ElevenLabsTTS:
-    def __init__(self):
+    def __init__(self, api_key: str = None, voice_id: str = None):
         self.provider = "ElevenLabs"
         self.model = "eleven_turbo_v2_5"
+        self.api_key = api_key
+        self.voice_id = voice_id or ELEVENLABS_VOICE_ID
         self.last_latency = 0
+        
+        if not self.api_key:
+            logger.warning("ElevenLabsTTS initialized without an API key! Streams will fail.")
 
     async def speak(self, text: str, communicator, ws_to_use=None, aiohttp_session=None, **kwargs):
-        if not ELEVENLABS_API_KEY:
+        if not self.api_key:
             logger.error("❌ [ElevenLabsTTS] API Key missing!")
             return
 
         start_time = time.time()
         first_byte_time = 0
-        url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id={self.model}&output_format=pcm_16000"
+        url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model}&output_format=pcm_16000"
         
         async def _stream_on_ws(ws):
             nonlocal first_byte_time
@@ -29,7 +34,7 @@ class ElevenLabsTTS:
             await ws.send_json({
                 "text": " ",
                 "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
-                "xi_api_key": ELEVENLABS_API_KEY
+                "xi_api_key": self.api_key
             })
             await ws.send_json({"text": text, "try_trigger_generation": True})
             await ws.send_json({"text": ""})
@@ -51,7 +56,7 @@ class ElevenLabsTTS:
                 elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                     break
 
-        headers = {"xi-api-key": ELEVENLABS_API_KEY}
+        headers = {"xi-api-key": self.api_key}
         try:
             if ws_to_use:
                 await _stream_on_ws(ws_to_use)

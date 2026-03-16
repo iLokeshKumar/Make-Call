@@ -2,15 +2,15 @@ from .deepgram import DeepgramSTT
 from .sarvam import SarvamSTT
 from .cartesia import CartesiaSTT
 
-def get_stt_service(provider: str):
+def get_stt_service(provider: str, api_key: str = None, model: str = None):
     """Factory to get the requested STT service."""
     provider = provider.lower()
     if provider == "deepgram":
-        return DeepgramSTT()
+        return DeepgramSTT(api_key=api_key, model=model)
     elif provider == "sarvam":
-        return SarvamSTT()
+        return SarvamSTT(api_key=api_key, model=model)
     elif provider == "cartesia":
-        return CartesiaSTT()
+        return CartesiaSTT(api_key=api_key, model=model)
     else:
         # Default fallback
-        return DeepgramSTT()
+        return DeepgramSTT(api_key=api_key, model=model)

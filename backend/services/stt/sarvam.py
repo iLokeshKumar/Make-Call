@@ -1,24 +1,27 @@
 import logging
 import audioop
 from typing import AsyncGenerator, Dict, Any
-from utils.config import SARVAM_API_KEY
 from services.sarvam_stt import SarvamSTT as SarvamSTTHelper
 
 logger = logging.getLogger(__name__)
 
 class SarvamSTT:
-    def __init__(self, language: str = "en-IN"):
+    def __init__(self, api_key: str = None, language: str = "en-IN", model: str = None):
         self.provider = "Sarvam"
-        self.model = "bulbul:v3"
+        self.model = model or "saaras:v3"
         self.language = language
+        self.api_key = api_key
+        
+        if not self.api_key:
+            logger.warning("SarvamSTT initialized without an API key! Transcription will fail.")
 
     async def transcribe(self, audio_generator, encoding: str = "pcm_mulaw", sample_rate: int = 8000) -> AsyncGenerator[Dict[str, Any], None]:
-        if not SARVAM_API_KEY:
+        if not self.api_key:
             logger.error("❌ [SarvamSTT] API Key missing.")
             yield {"transcript": "[Error: Sarvam API Key Missing]", "is_final": True}
             return
 
-        stt_helper = SarvamSTTHelper(api_key=SARVAM_API_KEY, language=self.language)
+        stt_helper = SarvamSTTHelper(api_key=self.api_key, language=self.language, model=self.model)
         resample_state = None
         
         try:
