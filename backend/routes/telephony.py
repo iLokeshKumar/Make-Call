@@ -16,7 +16,7 @@ from twilio.twiml.voice_response import VoiceResponse, Connect, Say
 from twilio.twiml.messaging_response import MessagingResponse
 
 from database import get_session, engine
-from models.models import Lead, Interaction, SystemSettings, Product, ApolloSearch
+from models.models import Lead, Interaction, SystemSettings, Product, ApolloSearch, User
 from utils.config import (
     DOMAIN, twilio_client, PHONE_NUMBER_FROM, 
     EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN,
@@ -48,12 +48,15 @@ async def incoming_call(request: Request, lead_id: int = None):
         engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
         active_engine = (engine_setting.value if engine_setting else "gemini").strip().lower()
 
+        admin = session.exec(select(User).where(User.role == "admin")).first()
+        company_name = admin.company_name if admin and admin.company_name else "Yexis Electronics"
+
     if active_engine == "mistral":
-        response.say("Connected to AI assistant from Yexis Electronics by Mistral. Please start speaking.")
+        response.say(f"Connected to Digital Sales Representative from {company_name} by Mistral. Please start speaking.")
     elif active_engine == "gemini":
-        response.say("Connected to AI assistant from Yexis Electronics by Google. Please start speaking.")
+        response.say(f"Connected to Digital Sales Representative from {company_name} by Google. Please start speaking.")
     else:
-        response.say("Connected to Yexis Electronics AI assistant. Please start speaking.")
+        response.say(f"Connected to {company_name} Digital Sales Representative. Please start speaking.")
     
     connect = Connect()
     stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')

@@ -5,24 +5,25 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut,
-  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock
+  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
+import { maskEmail, maskPhone } from "@/utils/security";
 
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Leads", href: "/leads", icon: Users },
   { name: "Inventory", href: "/inventory", icon: Package, adminOnly: true },
   { name: "Calls", href: "/calls", icon: Phone },
+  { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Settings", href: "/settings", icon: Settings, adminOnly: true },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { user, token, logout } = useAuth();
+  const { user, token, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  const [showPersonalDetails, setShowPersonalDetails] = useState(false);
 
   // OTP Reveal State
   const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
@@ -32,40 +33,13 @@ export default function Sidebar() {
   const [otpError, setOtpError] = useState("");
 
   // Timer State
-  const [timeLeft, setTimeLeft] = useState(0);
   const REVEAL_DURATION = 120; // 2 minutes in seconds
 
   const filteredItems = navItems.filter(item => !item.adminOnly || user?.role === 'admin');
 
-  // Auto-hide effect
-  useEffect(() => {
-    let interval: NodeJS.Timeout;
-    if (showPersonalDetails && timeLeft > 0) {
-      interval = setInterval(() => {
-        setTimeLeft((prev) => prev - 1);
-      }, 1000);
-    } else if (timeLeft === 0 && showPersonalDetails) {
-      setShowPersonalDetails(false);
-    }
-    return () => clearInterval(interval);
-  }, [showPersonalDetails, timeLeft]);
-
-  // Helper to mask sensitive data
-  const maskEmail = (email: string) => {
-    if (!email) return "••••@••••.•••";
-    const [name, domain] = email.split("@");
-    return `${name[0]}••••@${domain}`;
-  };
-
-  const maskPhone = (phone: string) => {
-    if (!phone) return "•••••••000";
-    return `•••••••${phone.slice(-3)}`;
-  };
-
   const handleRequestReveal = async () => {
     if (showPersonalDetails) {
-      setShowPersonalDetails(false);
-      setTimeLeft(0);
+      hidePersonalDetails();
       return;
     }
 
@@ -101,8 +75,7 @@ export default function Sidebar() {
       });
 
       if (res.ok) {
-        setShowPersonalDetails(true);
-        setTimeLeft(REVEAL_DURATION);
+        revealPersonalDetails();
         setIsOtpModalOpen(false);
         setOtpValue("");
       } else {
@@ -146,11 +119,11 @@ export default function Sidebar() {
             </div>
             {!isCollapsed && (
               <div className="animate-in fade-in slide-in-from-left-2 duration-300">
-                <h1 className="text-2xl font-bold tracking-tight">
-                  <span className="gradient-text">Rio</span>
+                <h1 className="text-xl font-bold tracking-tight truncate max-w-[180px]">
+                  <span className="gradient-text">{user?.company_name || "Rio"}</span>
                   <span className="text-slate-200 dark:text-slate-200 ml-1">CRM</span>
                 </h1>
-                <p className="text-xs text-slate-400 dark:text-slate-400 font-medium">AI Sales Assistant</p>
+                <p className="text-[10px] text-slate-400 dark:text-slate-400 font-medium uppercase tracking-tighter">Digital Sales Representative</p>
               </div>
             )}
           </div>

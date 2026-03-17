@@ -1,69 +1,42 @@
-import asyncio
-import logging
-import time
 import json
-import re
+import logging
 from typing import Optional, List, Dict, Any, AsyncGenerator
+from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 from utils.config import mistral_client
 
 logger = logging.getLogger(__name__)
 
-# Sentence splitting regex for low-latency streaming
-SENTENCE_SPLIT_REGEX = re.compile(r'([.?!,;])\s+')
-
-class LLMService:
+class MistralLLM(BaseLLM):
     def __init__(self, system_prompt: str):
-        self.system_prompt = system_prompt
-        self.messages = [{"role": "system", "content": system_prompt}]
+        super().__init__(system_prompt)
         self.provider = "Mistral"
         self.model = "mistral-large-latest"
 
-    def add_user_message(self, content: str):
-        self.messages.append({"role": "user", "content": content})
-
-    def add_assistant_message(self, content: str, tool_calls: Optional[List] = None):
-        msg = {"role": "assistant", "content": content}
-        if tool_calls:
-            msg["tool_calls"] = tool_calls
-        self.messages.append(msg)
-
-    def add_tool_message(self, tool_call_id: str, name: str, content: str):
-        self.messages.append({
-            "role": "tool",
-            "name": name,
-            "content": content,
-            "tool_call_id": tool_call_id
-        })
-
-    async def stream_mistral(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
-        """
-        Streams response from Mistral. Yields either 'sentence', 'token', or 'tool_calls'.
-        """
+    async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
         try:
             accumulated_text = ""
             full_reply = ""
             tool_calls_dict = {}
 
             stream = await mistral_client.chat.stream_async(
-                model="mistral-large-latest",
+                model=self.model,
                 messages=self.messages,
                 tools=tools,
-                max_tokens=2048, # Configurable
+                max_tokens=2048,
                 temperature=0.7
             )
 
             async for chunk in stream:
                 delta = chunk.data.choices[0].delta
                 
-                # 1. Handle Content
+                # 1. Content
                 if delta.content:
                     content = delta.content
                     accumulated_text += content
                     full_reply += content
-                    # logger.debug(f"[Mistral Token] {content}") # Too noisy
                     yield {"type": "token", "content": content}
 
-                    # Sentence boundary detection for TTS
+                    # Sentence boundary detection
                     parts = SENTENCE_SPLIT_REGEX.split(accumulated_text)
                     if len(parts) > 1:
                         sentence = parts[0] + parts[1]
@@ -71,7 +44,7 @@ class LLMService:
                         if sentence.strip():
                             yield {"type": "sentence", "content": sentence.strip()}
 
-                # 2. Handle Tool Calls
+                # 2. Tool Calls
                 if delta.tool_calls:
                     for tc in delta.tool_calls:
                         idx = tc.index
@@ -82,11 +55,9 @@ class LLMService:
 
             # Final remaining chunk
             if accumulated_text.strip():
-                logger.info(f"📤 [Mistral -> Queue] Final sentence: '{accumulated_text.strip()}'")
                 yield {"type": "sentence", "content": accumulated_text.strip()}
 
             # End of stream metadata
-            logger.info(f"✨ [Mistral Stream Finished] Full Reply: '{full_reply[:50]}...' Calls: {bool(tool_calls_dict)}")
             yield {
                 "type": "finished", 
                 "full_reply": full_reply, 
@@ -94,5 +65,5 @@ class LLMService:
             }
 
         except Exception as e:
-            logger.error(f"❌ [LLMService] Mistral Stream Error: {e}")
+            logger.error(f"❌ [MistralLLM] Stream Error: {e}")
             yield {"type": "error", "content": str(e)}

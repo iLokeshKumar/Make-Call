@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Initialize Local Embedding Model (SentenceTransformers)
-# This replaces Gemini API to avoid quota issues and 404s.
+
 print("Loading local embedding model (all-MiniLM-L6-v2)...")
 embed_model = SentenceTransformer("all-MiniLM-L6-v2")
 
@@ -97,7 +97,7 @@ if collection.count() == 0:
     print("Seeding initial knowledge base (Local)...")
     docs = {
         "vrf_warranty": "The Samsung VRF System usually comes with a 1-year comprehensive warranty and 5 years on the compressor. AMC options are available.",
-        "return_policy": "Yexis Electronics allows returns for defective items within 7 days of delivery. Original packaging is required.",
+        "return_policy": "{company_name} allows returns for defective items within 7 days of delivery. Original packaging is required.",
         "support_hours": "Our support team is available Mon-Sat from 9 AM to 6 PM IST. Emergency support is available for contract customers."
     }
     for doc_id, text in docs.items():

@@ -25,6 +25,36 @@ class LeadCreate(SQLModel):
     status: Optional[str] = "New"
     notes: Optional[str] = None
 
+class Demo(AuditMixin, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    lead_id: int = Field(foreign_key="lead.id", index=True)
+    name: str
+    phone: str
+    email: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    demo_date: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    status: str = Field(default="Scheduled")
+    products: Optional[str] = None
+    demo_type: str = Field(default="Offline")
+    notes: Optional[str] = None
+    google_meet_link: Optional[str] = None
+
+class DemoCreate(SQLModel):
+    lead_id: int
+    name: str
+    phone: str
+    email: Optional[str] = None
+    city: str
+    state: str
+    pincode: str
+    demo_date: Optional[datetime] = None
+    products: Optional[str] = None
+    demo_type: Optional[str] = "Offline"
+    notes: Optional[str] = None
+    google_meet_link: Optional[str] = None
+
 class Interaction(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     lead_id: int
@@ -99,6 +129,14 @@ class User(AuditMixin, table=True):
     profile_picture_url: Optional[str] = None
     reveal_otp: Optional[str] = None
     reveal_otp_expires_at: Optional[datetime] = None
+    company_name: Optional[str] = Field(default="Rio CRM")
+    company_website: Optional[str] = Field(default="https://rio-crm.example.com/")
+    
+    # Google OAuth Fields
+    google_access_token: Optional[str] = None
+    google_refresh_token: Optional[str] = None
+    google_token_expiry: Optional[datetime] = None
+    google_account_email: Optional[str] = None
 
 class UserCreate(SQLModel):
     username: str
@@ -108,6 +146,16 @@ class UserCreate(SQLModel):
     last_name: Optional[str] = None
     phone_number: Optional[str] = None
     role: Optional[str] = "sales_rep"
+    company_name: Optional[str] = Field(default="Rio CRM")
+    company_website: Optional[str] = Field(default="https://rio-crm.example.com/")
+
+class UserUpdate(SQLModel):
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    phone_number: Optional[str] = None
+    profile_picture_url: Optional[str] = None
+    company_name: Optional[str] = None
+    company_website: Optional[str] = None
 
 class Token(SQLModel):
     access_token: str

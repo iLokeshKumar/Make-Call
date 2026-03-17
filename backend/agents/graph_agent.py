@@ -126,7 +126,7 @@ def chatbot(state: GraphState):
         instr_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
         verbosity_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
         
-        system_base = instr_setting.value if instr_setting else "You are Rio, a helpful AI sales assistant."
+        system_base = instr_setting.value if instr_setting else "You are Rio, a helpful Digital Sales Representative."
         verbosity_level = verbosity_setting.value if verbosity_setting else "2"
         
         # 2. Apply Verbosity Rules

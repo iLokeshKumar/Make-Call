@@ -17,7 +17,7 @@ interface Lead {
 
 export default function LeadsPage() {
     const [leads, setLeads] = useState<Lead[]>([]);
-    const { token } = useAuth();
+    const { token, sessionTimeout } = useAuth();
     const [loading, setLoading] = useState(true);
     const [uploading, setUploading] = useState(false);
     const [file, setFile] = useState<File | null>(null);
@@ -35,6 +35,10 @@ export default function LeadsPage() {
                     "Authorization": `Bearer ${token}`
                 }
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             const data = await res.json();
             setLeads(data);
         } catch (error) {
@@ -71,6 +75,10 @@ export default function LeadsPage() {
                 },
                 body: formData,
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             const data = await res.json();
 
             if (res.ok) {
@@ -90,12 +98,16 @@ export default function LeadsPage() {
 
     const handleCall = async (phone: string, id: number) => {
         try {
-            await fetch(`${API_BASE}/make-call?to=${encodeURIComponent(phone)}&lead_id=${id}`, {
+            const res = await fetch(`${API_BASE}/make-call?to=${encodeURIComponent(phone)}&lead_id=${id}`, {
                 method: 'POST',
                 headers: {
                     "Authorization": `Bearer ${token}`
                 }
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             alert(`Initiating call to ${phone}...`);
         } catch (e) {
             alert("Failed to initiate call");
@@ -116,6 +128,10 @@ export default function LeadsPage() {
                     "Authorization": `Bearer ${token}`
                 }
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             if (res.ok) {
                 fetchLeads();
             } else {

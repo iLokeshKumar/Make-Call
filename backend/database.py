@@ -42,7 +42,7 @@ def init_db():
     with Session(engine) as session:
         # Seed System Settings if empty
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first():
-            default_instruction = """You are Rio, a professional AI sales assistant for Yexis Electronics (Chennai).
+            default_instruction = """You are Rio, a professional Digital Sales Representative for {company_name}.
 Your goal is to identify leads, answer product queries, and book demos.
 
 CORE CAPABILITIES & TOOLS:

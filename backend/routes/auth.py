@@ -3,19 +3,21 @@ import uuid
 from datetime import timedelta, datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, File, UploadFile
 from fastapi.responses import JSONResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlmodel import Session, select
 
 from database import get_session
-from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification, RevealOTPVerify
+from models.models import User, UserCreate, Token, MFAVerify, MFADisableRequest, ResendVerification, RevealOTPVerify, UserUpdate
+from services.user_service import save_avatar
 from auth import (
     verify_password, create_access_token, get_password_hash,
     get_current_active_user, generate_mfa_secret, get_mfa_provisioning_uri,
     generate_mfa_qr_base64, verify_mfa_token, ACCESS_TOKEN_EXPIRE_MINUTES
 )
 from email_service import send_smtp_email, get_styled_html
+from google_calendar_service import GoogleMeetGenerator
 
 router = APIRouter(tags=["Authentication"])
 
@@ -229,6 +231,24 @@ async def resend_verification(data: ResendVerification, session: Session = Depen
 async def read_users_me(current_user: User = Depends(get_current_active_user)):
     return current_user
 
+@router.patch("/users/me", response_model=User)
+async def update_users_me(
+    user_update: UserUpdate,
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    update_data = user_update.model_dump(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(current_user, key, value)
+    
+    current_user.updated_at = datetime.now(timezone.utc)
+    current_user.updated_by = current_user.username
+    
+    session.add(current_user)
+    session.commit()
+    session.refresh(current_user)
+    return current_user
+
 @router.post("/auth/reveal/request")
 async def request_reveal_otp(current_user: User = Depends(get_current_active_user), session: Session = Depends(get_session)):
     otp = "".join([str(random.randint(0, 9)) for _ in range(6)])
@@ -276,3 +296,60 @@ async def verify_reveal_otp(verify: RevealOTPVerify, current_user: User = Depend
     session.commit()
     
     return {"message": "Verification successful", "email": current_user.email, "phone_number": current_user.phone_number}
+
+@router.post("/auth/upload-avatar")
+async def upload_avatar(
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_active_user),
+    session: Session = Depends(get_session)
+):
+    """Uploads a user avatar and updates the profile picture URL."""
+    try:
+        url = save_avatar(file)
+        current_user.profile_picture_url = f"http://localhost:6060{url}"
+        session.add(current_user)
+        session.commit()
+        session.refresh(current_user)
+        return {"url": current_user.profile_picture_url}
+    except Exception as e:
+        logger.error(f"❌ Avatar Upload Error: {e}")
+        raise HTTPException(status_code=500, detail="Failed to upload avatar")
+@router.get("/auth/google/url")
+async def get_google_auth_url(current_user: User = Depends(get_current_active_user)):
+    """Returns the URL for the user to visit and authorize Google Calendar."""
+    generator = GoogleMeetGenerator(user=current_user)
+    auth_url = generator.get_auth_url()
+    return {"auth_url": auth_url}
+
+@router.post("/auth/google/callback")
+async def google_auth_callback(
+    data: dict, 
+    current_user: User = Depends(get_current_active_user), 
+    session: Session = Depends(get_session)
+):
+    """Exchanges the authorization code for tokens and saves them for the user."""
+    code = data.get("code")
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing authorization code")
+    
+    generator = GoogleMeetGenerator(user=current_user)
+    success = generator.finalize_auth(code=code, user=current_user, session=session)
+    
+    if success:
+        return {"message": "Google account connected successfully! 📅"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to connect Google account")
+
+@router.delete("/auth/google/disconnect")
+async def google_auth_disconnect(
+    current_user: User = Depends(get_current_active_user), 
+    session: Session = Depends(get_session)
+):
+    """Disconnects and clears Google OAuth tokens for the current user."""
+    current_user.google_access_token = None
+    current_user.google_refresh_token = None
+    current_user.google_token_expiry = None
+    current_user.google_account_email = None
+    session.add(current_user)
+    session.commit()
+    return {"message": "Google account disconnected."}

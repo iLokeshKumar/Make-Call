@@ -14,7 +14,7 @@ interface Product {
 }
 
 export default function InventoryPage() {
-    const { user, token, isLoading } = useAuth();
+    const { user, token, isLoading, sessionTimeout } = useAuth();
     const router = useRouter();
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
@@ -29,6 +29,10 @@ export default function InventoryPage() {
             const res = await fetch(`${API_BASE}/inventory`, {
                 headers: { "Authorization": `Bearer ${token}` }
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             const data = await res.json();
             setProducts(data);
         } catch (error) {
@@ -64,10 +68,14 @@ export default function InventoryPage() {
     const handleDelete = async (id: number) => {
         if (!confirm("Are you sure you want to delete this product?")) return;
         try {
-            await fetch(`${API_BASE}/inventory/${id}`, {
+            const res = await fetch(`${API_BASE}/inventory/${id}`, {
                 method: "DELETE",
                 headers: { "Authorization": `Bearer ${token}` }
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             fetchInventory();
         } catch (error) {
             console.error("Error deleting product:", error);
@@ -85,6 +93,10 @@ export default function InventoryPage() {
                 },
                 body: JSON.stringify(formData),
             });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
             if (res.ok) {
                 setIsModalOpen(false);
                 fetchInventory();
@@ -103,7 +115,7 @@ export default function InventoryPage() {
                         <span className="gradient-text">Inventory</span>
                     </h1>
                     <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
-                        Manage products, stock levels, and pricing for the AI assistant
+                        Manage products, stock levels, and pricing for the Digital Sales Representative
                     </p>
                 </div>
                 <button

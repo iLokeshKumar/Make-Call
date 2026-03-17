@@ -10,7 +10,7 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer"):
+def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer", company_name: str = "Rio CRM", company_website: str = "https://rio-crm.example.com/"):
     """
     Wraps the body in a premium, modern HTML template.
     """
@@ -39,10 +39,10 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer")
                 <div style="font-size: 16px; color: #475569;">
                     {body.replace('\\n', '<br>')}
                 </div>
-                <p style="margin-top: 30px;">Best regards,<br><strong>Rio AI Assistant</strong><br>Yexis Electronics Team</p>
+                <p style="margin-top: 30px;">Best regards,<br><strong>Rio Digital Sales Representative</strong><br>{company_name} Team</p>
             </div>
             <div class="footer">
-                &copy; 2026 Yexis Electronics. All rights reserved.<br>
+                &copy; 2026 {company_name}. All rights reserved.<br>
                 Powered by Advanced Agentic Voice AI
             </div>
         </div>
@@ -50,7 +50,7 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer")
     </html>
     """
 
-def send_smtp_email(to_email: str, subject: str, body: str, html_body: str = None):
+def send_smtp_email(to_email: str, subject: str, body: str, html_body: str = None, company_name: str = "Yexis Electronics"):
     """
     Sends an email using SMTP settings from .env file.
     Supports both plain text and HTML.
@@ -67,7 +67,7 @@ def send_smtp_email(to_email: str, subject: str, body: str, html_body: str = Non
 
     try:
         msg = MIMEMultipart("alternative")
-        msg['From'] = f"Rio from Yexis <{sender_email}>"
+        msg['From'] = f"Rio from {company_name} <{sender_email}>"
         msg['To'] = to_email
         msg['Subject'] = subject
 

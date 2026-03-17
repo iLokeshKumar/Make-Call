@@ -16,16 +16,26 @@ export default function Home() {
   });
 
   const [activities, setActivities] = useState<any[]>([]);
-  const { token } = useAuth();
+  const { user, token, sessionTimeout } = useAuth();
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
     async function fetchData() {
+      if (!token || token.split('.').length !== 3) {
+        setLoading(false);
+        return;
+      }
       try {
         // Fetch Stats
         const statsRes = await fetch("http://localhost:6060/dashboard/stats", {
           headers: { "Authorization": `Bearer ${token}` }
         });
+
+        if (statsRes.status === 401) {
+          sessionTimeout();
+          return;
+        }
+
         if (statsRes.ok) {
           const data = await statsRes.json();
           setStatsData(data);
@@ -35,6 +45,11 @@ export default function Home() {
         const leadsRes = await fetch("http://localhost:6060/leads", {
           headers: { "Authorization": `Bearer ${token}` }
         });
+
+        if (leadsRes.status === 401) {
+          sessionTimeout();
+          return;
+        }
         if (leadsRes.ok) {
           const leads = await leadsRes.json();
           // Map latest 5 leads to activity format
@@ -54,7 +69,7 @@ export default function Home() {
     }
 
     fetchData();
-  }, []);
+  }, [token]);
 
   const stats = [
     {
@@ -103,7 +118,7 @@ export default function Home() {
                 <span className="gradient-text">Dashboard</span>
               </h1>
               <p className="mt-2 text-slate-600 dark:text-slate-300 font-medium">
-                Welcome back! Here's what's happening with your sales today.
+                Welcome back, {user?.first_name || user?.username || 'User'}! Here's what's happening with your sales today.
               </p>
             </div>
             <div className="hidden md:flex items-center space-x-2 glass rounded-2xl px-6 py-3 border border-white/40 dark:border-white/10">

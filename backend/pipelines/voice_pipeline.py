@@ -8,28 +8,41 @@ import aiohttp
 import audioop
 from typing import List, Dict, Any, Optional
 
-from services.llm_service import LLMService
-from services.tts_service import TTSService
-from services.stt_service import STTService
+from services.llm import get_llm_service
+from services.tts import get_tts_service
+from services.stt import get_stt_service
 from utils.audio import clean_voice_text
 from utils.config import mistral_client
 from tool_adapter import get_mistral_tools, execute_mcp_tool
 from sqlmodel import Session
-from models.models import Interaction, LatencyLog
+from models.models import Interaction, LatencyLog, User
 
 logger = logging.getLogger(__name__)
 
 class VoicePipeline:
-    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session):
+    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session, 
+                 stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
+                 company_name: str = "Yexis Electronics", user: User = None):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
         self.transcript_accumulator = transcript_accumulator
         self.session = session
+        self.company_name = company_name
+        self.user = user
         
-        self.llm_service = LLMService(system_prompt)
-        self.tts_service = TTSService()
-        self.stt_service = STTService()
+        self.stt_provider = stt_provider
+        self.llm_provider = llm_provider
+        self.tts_provider = tts_provider
+        
+        # Inject current time into system prompt for relative date/time resolution
+        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        full_system_prompt = system_prompt + time_context
+        
+        self.llm_service = get_llm_service(llm_provider, full_system_prompt)
+        self.tts_service = get_tts_service(tts_provider)
+        self.stt_service = get_stt_service(stt_provider)
         
         self.sentence_queue = asyncio.Queue()
         self.current_tts_task = None
@@ -38,8 +51,8 @@ class VoicePipeline:
         self.tts_first_byte_time = 0.0
         self.last_tts_start_time = 0.0
 
-    async def run(self, engine_type: str = "mistral-cartesia"):
-        speaker_task = asyncio.create_task(self._speaker_loop(engine_type))
+    async def run(self):
+        speaker_task = asyncio.create_task(self._speaker_loop())
         audio_queue = asyncio.Queue()
 
         async def _ingest():
@@ -64,59 +77,121 @@ class VoicePipeline:
             logger.error("❌ Timed out waiting for Twilio start event.")
             return
 
-        greeting = "Hello, I'm Rio from Yexis Electronics! How can I help you today?"
+        greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         await self.sentence_queue.put(greeting)
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
 
         async def _audio_gen_from_queue():
-            chunk_count = 0
             while True:
                 data = await audio_queue.get()
                 event = data.get("event")
                 if event == "media":
-                    chunk_count += 1
-                    if chunk_count == 1:
-                        logger.info("🎤 First audio chunk received from Twilio")
                     yield base64.b64decode(data["media"]["payload"])
                 elif event == "stop":
-                    logger.info(f"🛑 [Twilio] Stream stopped. Total chunks: {chunk_count}")
                     break
+
+        # ── Two consumers of audio: barge-in detector + STT ──────────────
+        # We can't use the same generator twice, so we fan-out via a second queue
+        stt_queue = asyncio.Queue()
+        barge_queue = asyncio.Queue()
+
+        async def _fan_out():
+            """Read raw audio once, copy to both queues."""
+            async for chunk in _audio_gen_from_queue():
+                await stt_queue.put(chunk)
+                await barge_queue.put(chunk)
+            await stt_queue.put(None)   # sentinel
+            await barge_queue.put(None)
+
+        async def _stt_gen():
+            """Feed STT from stt_queue."""
+            while True:
+                chunk = await stt_queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+
+        async def _barge_in_detector():
+            """
+            Runs parallel to STT. Detects speech onset from raw mulaw audio.
+            Uses RMS energy — no API, no latency. Fires the moment customer speaks.
+            """
+            import audioop, struct, math
+            SPEECH_RMS = 400          # tune up if echo triggers, down if misses speech
+            SPEECH_FRAMES_NEEDED = 3  # ~3 consecutive 20ms frames = 60ms of speech
+            SILENCE_RESET_FRAMES = 15 # frames of silence before resetting counter
+            
+            speech_counter = 0
+            silence_counter = 0
+
+            while True:
+                chunk = await barge_queue.get()
+                if chunk is None:
+                    break
+
+                # mulaw → linear16 for RMS
+                try:
+                    pcm = audioop.ulaw2lin(chunk, 2)
+                except Exception:
+                    pcm = chunk
+
+                samples = struct.unpack(f"<{len(pcm)//2}h", pcm)
+                rms = math.sqrt(sum(s*s for s in samples) / len(samples)) if samples else 0
+
+                if rms > SPEECH_RMS:
+                    silence_counter = 0
+                    speech_counter += 1
+                    if speech_counter >= SPEECH_FRAMES_NEEDED:
+                        # Customer is speaking — interrupt Rio if she's talking
+                        if self.is_rio_speaking or not self.sentence_queue.empty():
+                            logger.info(f"⚡ [Barge-in] Customer speaking (RMS:{rms:.0f}) — interrupting")
+                            await self._handle_barge_in(reason="customer_speaking")
+                            speech_counter = 0  # reset after firing
+                else:
+                    silence_counter += 1
+                    if silence_counter > SILENCE_RESET_FRAMES:
+                        speech_counter = 0
 
         encoding, rate = "pcm_mulaw", "8000"
         stt_start_time = time.time()
         last_final_transcript = ""
         current_turn_transcript = ""
 
+        fan_out_task = asyncio.create_task(_fan_out())
+        barge_task = asyncio.create_task(_barge_in_detector())
+
         try:
-            async for result in self.stt_service.transcribe(
-                _audio_gen_from_queue(), engine_type, encoding, rate
-            ):
+            async for result in self.stt_service.transcribe(_stt_gen(), encoding, rate):
                 transcript = result.get("transcript", "")
                 is_final = result.get("is_final", False)
                 res_type = result.get("type", "transcript")
 
                 if transcript:
+                    logger.debug(f"🎤 {'FINAL' if is_final else 'Interim'}: {transcript}")
                     current_turn_transcript = transcript
 
                 if is_final or res_type == "end_of_turn":
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
                         continue
 
-                    last_final_transcript = current_turn_transcript
-                    logger.info(f"🎤 [STT] {'🎯 EOT' if res_type == 'end_of_turn' else '✅ FINAL'}: {current_turn_transcript}")
-                    latency = time.time() - stt_start_time
-                    self.transcript_accumulator.append(f"User: {current_turn_transcript}")
-
+                    # Gate: discard echo while Rio is speaking
                     if self.is_rio_speaking or not self.sentence_queue.empty():
-                        await self._handle_barge_in(reason=current_turn_transcript)
+                        logger.info(f"🔇 Echo ignored: '{current_turn_transcript}'")
+                        current_turn_transcript = ""
+                        continue
+
+                    last_final_transcript = current_turn_transcript
+                    logger.info(f"🎤 [STT] FINAL: {current_turn_transcript}")
+                    latency = time.time() - stt_start_time
+
+                    self.transcript_accumulator.append(f"User: {current_turn_transcript}")
 
                     if self.current_llm_task and not self.current_llm_task.done():
                         self.current_llm_task.cancel()
-                        logger.info("♻️ Cancelled previous LLM task for new turn.")
 
                     self.current_llm_task = asyncio.create_task(
-                        self._process_llm_response(current_turn_transcript, latency, engine_type)
+                        self._process_llm_response(current_turn_transcript, latency)
                     )
                     stt_start_time = time.time()
                     current_turn_transcript = ""
@@ -126,9 +201,11 @@ class VoicePipeline:
         finally:
             await self.sentence_queue.put(None)
             await speaker_task
+            fan_out_task.cancel()
+            barge_task.cancel()
             ingest_task.cancel()
 
-    async def _speaker_loop(self, engine_type: str):
+    async def _speaker_loop(self):
         """Continuously pulls sentences from the queue and speaks them."""
         async with aiohttp.ClientSession() as session:
             # Persistent WebSockets for specific providers
@@ -138,14 +215,14 @@ class VoicePipeline:
             
             try:
                 # 1. Setup persistent connections if needed
-                if engine_type == "mistral-deepgram":
+                if self.tts_provider == "deepgram":
                     from utils.config import DEEPGRAM_API_KEY, DEEPGRAM_VOICE
                     dg_url = f"wss://api.deepgram.com/v1/speak?model={DEEPGRAM_VOICE}&encoding=mulaw&sample_rate=8000"
                     dg_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
                     dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
                     logger.info("🎯 Deepgram TTS Persistent WebSocket Connected")
                 
-                elif engine_type == "mistral-elevenlabs":
+                elif self.tts_provider == "elevenlabs":
                     from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
                     el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
                     el_headers = {"xi-api-key": ELEVENLABS_API_KEY}
@@ -153,7 +230,7 @@ class VoicePipeline:
                     logger.info("🎯 ElevenLabs TTS Persistent WebSocket Connected")
                 
                 # Setup Cartesia Persistent Connection if using it
-                if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                if self.tts_provider == "cartesia":
                     from utils.config import CARTESIA_API_KEY
                     c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
                     c_ws = await session.ws_connect(c_url)
@@ -169,11 +246,9 @@ class VoicePipeline:
                         logger.warning("⚠️ Speaker loop waiting for stream_sid...")
                         await asyncio.sleep(0.5)
 
-                    # --- ADDING: Persistent WebSocket Health Check & Reconnect ---
-                    if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                    if self.tts_provider == "cartesia":
                         if not c_ws or c_ws.closed:
                             from utils.config import CARTESIA_API_KEY
-                            # Using the latest cartesia_version as suggested by the user
                             c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
                             c_ws = await session.ws_connect(c_url)
                             logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
@@ -184,25 +259,47 @@ class VoicePipeline:
                     
                     self.is_rio_speaking = True
                     self.last_tts_start_time = time.time()
-                    self.current_tts_task = asyncio.create_task(
-                        self.tts_service.speak(
-                            text=sentence, 
-                            engine_type=engine_type, 
-                            communicator=self.communicator, 
-                            cartesia_ws=c_ws,
-                            aiohttp_session=session,
-                            deepgram_ws=dg_ws,
-                            elevenlabs_ws=el_ws,
-                            context_id=turn_context_id
+
+                    # For Cartesia: fire TTS request AND immediately check for next sentence
+                    # Cartesia queues them server-side via context_id
+                    if self.tts_provider == "cartesia" and c_ws:
+                        self.current_tts_task = asyncio.create_task(
+                            self.tts_service.speak(
+                                text=sentence,
+                                communicator=self.communicator,
+                                ws_to_use=c_ws,
+                                context_id=turn_context_id
+                            )
                         )
-                    )
-                    try:
-                        await self.current_tts_task
-                    except asyncio.CancelledError:
-                        logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
-                    finally:
-                        self.is_rio_speaking = False
-                        self.sentence_queue.task_done()
+                        try:
+                            await self.current_tts_task
+                        except asyncio.CancelledError:
+                            logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                        finally:
+                            self.is_rio_speaking = False
+                            self.sentence_queue.task_done()
+                    else:
+                        # Determine which persistent WS to pass as generic 'ws_to_use'
+                        active_ws = None
+                        if self.tts_provider == "deepgram": active_ws = dg_ws
+                        elif self.tts_provider == "elevenlabs": active_ws = el_ws
+
+                        self.current_tts_task = asyncio.create_task(
+                            self.tts_service.speak(
+                                text=sentence, 
+                                communicator=self.communicator, 
+                                ws_to_use=active_ws,
+                                aiohttp_session=session,
+                                context_id=turn_context_id
+                            )
+                        )
+                        try:
+                            await self.current_tts_task
+                        except asyncio.CancelledError:
+                            logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                        finally:
+                            self.is_rio_speaking = False
+                            self.sentence_queue.task_done() 
             
             finally:
                 # Cleanup persistent WebSockets
@@ -287,7 +384,9 @@ class VoicePipeline:
                     type="call",
                     content=f"Voice Interaction ({engine_name})",
                     transcript=full_transcript,
-                    timestamp=datetime.now(timezone.utc)
+                    timestamp=datetime.now(timezone.utc),
+                    source="Voice Call",
+                    created_by="Rio AI"
                 )
                 self.session.add(db_i)
                 self.session.commit()
@@ -304,7 +403,7 @@ class VoicePipeline:
         except Exception as e:
             logger.error(f"❌ Error saving transcript: {e}")
 
-    async def _process_llm_response(self, user_input, stt_latency, engine_type):
+    async def _process_llm_response(self, user_input, stt_latency):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
         llm_start_time = time.time()
         self.llm_service.add_user_message(user_input)
@@ -314,7 +413,7 @@ class VoicePipeline:
         full_reply = ""
         tool_calls = None
         
-        async for chunk in self.llm_service.stream_mistral(tools=mistral_tools):
+        async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
                 logger.info(f"📤 [Mistral -> Queue] Sentence: '{chunk['content']}'")
                 await self.sentence_queue.put(chunk["content"])
@@ -329,16 +428,16 @@ class VoicePipeline:
                     self.transcript_accumulator.append(f"Rio: {full_reply}")
                     self.save_transcript()
                     self.save_latency(
-                        engine_type, 
+                        f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}", 
                         stt_latency, 
                         llm_latency, 
-                        self.tts_service.last_tts_latency,
-                        stt_p=self.stt_service.last_provider,
-                        stt_m=self.stt_service.last_model,
+                        self.tts_service.last_latency,
+                        stt_p=self.stt_service.provider,
+                        stt_m=self.stt_service.model,
                         llm_p=self.llm_service.provider,
                         llm_m=self.llm_service.model,
-                        tts_p=self.tts_service.last_provider,
-                        tts_m=self.tts_service.last_model
+                        tts_p=self.tts_service.provider,
+                        tts_m=self.tts_service.model
                     )
                 
                 if tool_calls:
@@ -350,7 +449,25 @@ class VoicePipeline:
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
                         
                         try:
-                            result = await execute_mcp_tool(tool_name, tool_args)
+                            result = await execute_mcp_tool(tool_name, tool_args, user=self.user)
+                            
+                            # Auto-link interaction to lead if get_or_create_lead result has lead_id
+                            if tool_name == "get_or_create_lead" and "lead_id" in result:
+                                try:
+                                    lid = int(result["lead_id"])
+                                    logger.info(f"🔗 Linking interaction {self.interaction_id} to lead {lid}")
+                                    try:
+                                        interaction_id_int = int(self.interaction_id)
+                                        db_i = self.session.get(Interaction, interaction_id_int)
+                                        if db_i:
+                                            db_i.lead_id = lid
+                                            self.session.add(db_i)
+                                            self.session.commit()
+                                    except (ValueError, TypeError):
+                                        pass
+                                except Exception as e:
+                                    logger.error(f"❌ Failed to link interaction: {e}")
+
                         except Exception as e:
                             logger.error(f"❌ Tool Execution Error: {e}")
                             result = {"error": str(e)}
@@ -358,7 +475,7 @@ class VoicePipeline:
                         self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
                     
                     logger.info("🔄 Tool results ready. Recursing for final LLM response.")
-                    await self._process_llm_response("Tool results ready.", 0, engine_type)
+                    await self._process_llm_response("Tool results ready.", 0)
 
     #async def _audio_generator(self, receiver):
     #    """Helper to yield audio chunks from the communicator."""

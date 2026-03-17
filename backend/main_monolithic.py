@@ -115,7 +115,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-RIO_PERSONA_PROMPT = """You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
+RIO_PERSONA_PROMPT = """You are Rio, a Senior Sales Consultant at {company_name}. You are NOT a bot; you are a professional sales representative.
 
 **ROLE**: Senior Sales Consultant
 - Your tone is professional, empathetic, and knowledgeable.
@@ -1215,11 +1215,11 @@ async def incoming_call(request: Request, lead_id: int = None):
 
     # Announce based on engine
     if active_engine == "mistral":
-        response.say("Connected to AI assistant from Yexis Electronics by Mistral. Please start speaking.")
+        response.say("Connected to Digital Sales Representative from Yexis Electronics by Mistral. Please start speaking.")
     elif active_engine == "gemini":
-        response.say("Connected to AI assistant from Yexis Electronics by Google. Please start speaking.")
+        response.say("Connected to Digital Sales Representative from Yexis Electronics by Google. Please start speaking.")
     else:
-        response.say("Connected to Yexis Electronics AI assistant. Please start speaking.")
+        response.say("Connected to Yexis Electronics Digital Sales Representative. Please start speaking.")
     connect = Connect()
     stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')
     stream.parameter(name="interaction_id", value=str(interaction.id))
@@ -1544,7 +1544,7 @@ class ExotelCommunicator(TelephonyCommunicator):
         payload = {"event": "clear"}
         await self.websocket.send_json(payload)
 
-async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
+async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, company_name=None):
     """Handles the Native Multimodal Live API logic for Gemini."""
     
     logger.info(f"🤖 [LLM] Selected: GEMINI 2.0 Flash")
@@ -1639,7 +1639,7 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
                     print(f"Telephony Send Error: {e}")
 
             # Trigger initial greeting for outbound calls
-            greeting = "Hello, I me Rio from Adomita Technologies. How can I help you today?"
+            greeting = f"Hello, I am Rio from {company_name}. How can I help you today?"
             logger.info(f"🤖 [Gemini] Sending initial greeting: {greeting}")
             await gemini_session.send(input={"text": greeting})
             transcript_accumulator.append(f"Rio: {greeting}")
@@ -1842,11 +1842,16 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
     active_engine = engine_setting.value if engine_setting else "gemini"
     
-    verbosity_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
     verbosity = verbosity_setting.value if verbosity_setting else "2"
+    
+    # Fetch Company Branding from Admin User
+    admin = session.exec(select(User).where(User.role == "admin")).first()
+    company_name = admin.company_name if admin and admin.company_name else "Yexis Electronics"
+    
+    dynamic_instruction = dynamic_instruction.replace("{company_name}", company_name)
     dynamic_instruction = apply_verbosity_rules(dynamic_instruction, verbosity)
     
-    print(f"Twilio connected to media-stream WS (Engine: {active_engine.upper()}) | Interaction ID: {interaction_id} | Verbosity: {verbosity}")
+    print(f"Twilio connected to media-stream WS (Engine: {active_engine.upper()}) | Company: {company_name} | Interaction ID: {interaction_id} | Verbosity: {verbosity}")
 
     if interaction_id:
         try:
@@ -1861,11 +1866,11 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
 
     communicator = TwilioCommunicator(websocket)
     if active_engine.startswith("mistral"):
-        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine)
+        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type=active_engine, company_name=company_name)
     else:
-        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
+        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, company_name=company_name)
 
-async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type="mistral"):
+async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type="mistral", company_name=None):
     """Orchestrates STT, Mistral (LLM with MCP tools), and TTS based on engine_type."""
     
     
@@ -2248,7 +2253,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
             speaker_loop_task = asyncio.create_task(speaker_loop())
             
             # Start with a greeting for outbound calls
-            greeting = "Hello, I'm Rio from Adomita. I see you're interested in our services. How can I help you today?"
+            greeting = f"Hello, I'm Rio from {company_name}. I see you're interested in our services. How can I help you today?"
             await sentence_queue.put(greeting)
             transcript_accumulator.append(f"Rio: {greeting}")
             save_transcript(interaction_id, transcript_accumulator)
@@ -2268,15 +2273,11 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                     is_final = result.get("is_final", False)
                     
                     if transcript:
-                        logger.debug(f"🎤 [Cartesia STT] Interim: {transcript}")
-                    
-                    if transcript and is_final:
-                        logger.info(f"🎤 [Cartesia STT] FINAL: {transcript}")
-                        # Log STT Latency
-                        logger.debug(f"⏱️ [Cartesia STT] Latency: {time.time() - stt_start_time:.3f}s")
+                        logger.debug(f"🎤 [Cartesia STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                         
+                        # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
                         if is_rio_speaking or not sentence_queue.empty():
-                            logger.info("🛑 Barge-in detected! Interrupting Rio.")
+                            logger.info(f"🛑 Barge-in detected! ('{transcript}') Interrupting Rio.")
                             await communicator.clear_audio_buffer()
                             # Clear queue
                             while not sentence_queue.empty():
@@ -2287,6 +2288,10 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 current_tts_task.cancel()
                             if current_mistral_task and not current_mistral_task.done():
                                 current_mistral_task.cancel()
+                    
+                    if transcript and is_final:
+                        # Log STT Latency
+                        logger.debug(f"⏱️ [Cartesia STT] Latency: {time.time() - stt_start_time:.3f}s")
                         
                         latency = time.time() - stt_start_time
                         transcript_accumulator.append(f"User: {transcript}")
@@ -2349,19 +2354,23 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 is_final = getattr(result, "is_final", False)
                             
                             if transcript:
-                                logger.debug(f"🎤 [Sarvam STT] Interim: {transcript}")
-                            
-                            if transcript and is_final:
-                                logger.info(f"🎤 [Sarvam STT] FINAL: {transcript}")
+                                logger.debug(f"🎤 [Sarvam STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                                 
-                                if is_rio_speaking:
-                                    logger.info("🛑 Barge-in detected! Interrupting Rio.")
+                                # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
+                                if is_rio_speaking or not sentence_queue.empty():
+                                    logger.info(f"🛑 Barge-in detected! ('{transcript}') Interrupting Rio.")
                                     await communicator.clear_audio_buffer()
+                                    # Clear queue
+                                    while not sentence_queue.empty():
+                                        try: sentence_queue.get_nowait()
+                                        except asyncio.QueueEmpty: break
+                                    
                                     if current_tts_task and not current_tts_task.done():
                                         current_tts_task.cancel()
                                     if current_mistral_task and not current_mistral_task.done():
                                         current_mistral_task.cancel()
-                                
+                            
+                            if transcript and is_final:
                                 latency = time.time() - stt_start_time
                                 transcript_accumulator.append(f"User: {transcript}")
                                 save_transcript(interaction_id, transcript_accumulator)
@@ -2382,7 +2391,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         else:
             enc_params = "encoding=mulaw&sample_rate=8000"
 
-        stt_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&{enc_params}"
+        stt_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&{enc_params}&interim_results=true"
         stt_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         async with aiohttp.ClientSession() as session:
             async with session.ws_connect(stt_url, headers=stt_headers) as stt_ws:
@@ -2407,13 +2416,26 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                                 if "channel" in res:
                                     alt = res["channel"]["alternatives"][0]
                                     transcript = alt.get("transcript", "")
-                                    if transcript and res.get("is_final"):
-                                        logger.info(f"🎤 [Deepgram STT] FINAL: {transcript}")
-                                        if is_rio_speaking:
-                                            await communicator.clear_audio_buffer()
-                                            if current_tts_task and not current_tts_task.done(): current_tts_task.cancel()
-                                            if current_mistral_task and not current_mistral_task.done(): current_mistral_task.cancel()
+                                    is_final = res.get("is_final", False)
+                                    
+                                    if transcript:
+                                        logger.debug(f"🎤 [Deepgram STT] { 'FINAL' if is_final else 'Interim' }: {transcript}")
                                         
+                                        # FAST INTERRUPT: Stop Rio as soon as we hear ANY word
+                                        if is_rio_speaking or not sentence_queue.empty():
+                                            logger.info(f"🛑 Barge-in detected! ('{transcript}') Interrupting Rio.")
+                                            await communicator.clear_audio_buffer()
+                                            # Clear queue
+                                            while not sentence_queue.empty():
+                                                try: sentence_queue.get_nowait()
+                                                except asyncio.QueueEmpty: break
+                                            
+                                            if current_tts_task and not current_tts_task.done():
+                                                current_tts_task.cancel()
+                                            if current_mistral_task and not current_mistral_task.done():
+                                                current_mistral_task.cancel()
+                                    
+                                    if transcript and is_final:
                                         latency = time.time() - stt_start_time
                                         transcript_accumulator.append(f"User: {transcript}")
                                         save_transcript(interaction_id, transcript_accumulator)
@@ -2424,7 +2446,7 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                 logger.info(f"🚀 [Mistral] Starting Deepgram STT for {engine_type}...")
                 
                 # Start with a greeting for outbound calls
-                greeting = "Hello, I'm Rio from Adomita Technologies. How can I help you today?"
+                greeting = f"Hello, I'm Rio from {company_name}. How can I help you today?"
                 asyncio.create_task(speak(greeting))
                 transcript_accumulator.append(f"Rio: {greeting}")
                 save_transcript(interaction_id, transcript_accumulator)
