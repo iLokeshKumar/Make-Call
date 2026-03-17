@@ -9,9 +9,9 @@ from utils.config import ELEVENLABS_VOICE_ID
 logger = logging.getLogger(__name__)
 
 class ElevenLabsTTS:
-    def __init__(self, api_key: str = None, voice_id: str = None):
+    def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "ElevenLabs"
-        self.model = "eleven_turbo_v2_5"
+        self.model = model or "eleven_turbo_v2_5"
         self.api_key = api_key
         self.voice_id = voice_id or ELEVENLABS_VOICE_ID
         self.last_latency = 0

@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Package, Plus, Trash2, Edit, AlertCircle, Save, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 import { useRouter } from "next/navigation";
+import Pagination from "@/components/Pagination";
 
 interface Product {
     id?: number;
@@ -22,11 +23,18 @@ export default function InventoryPage() {
     const [editingProduct, setEditingProduct] = useState<Product | null>(null);
     const [formData, setFormData] = useState<Product>({ name: "", stock: 0, price: "" });
 
+    // Pagination State
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalProducts, setTotalProducts] = useState(0);
+    const [itemsPerPage] = useState(10);
+    const totalPages = Math.ceil(totalProducts / itemsPerPage);
+
     const API_BASE = "http://localhost:6060";
 
-    const fetchInventory = async () => {
+    const fetchInventory = useCallback(async (page: number = 1) => {
+        setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/inventory`, {
+            const res = await fetch(`${API_BASE}/inventory?page=${page}&limit=${itemsPerPage}`, {
                 headers: { "Authorization": `Bearer ${token}` }
             });
             if (res.status === 401) {
@@ -34,13 +42,15 @@ export default function InventoryPage() {
                 return;
             }
             const data = await res.json();
-            setProducts(data);
+            setProducts(data.items || []);
+            setTotalProducts(data.total || 0);
+            setCurrentPage(data.page || 1);
         } catch (error) {
             console.error("Error fetching inventory:", error);
         } finally {
             setLoading(false);
         }
-    };
+    }, [token, itemsPerPage, sessionTimeout]);
 
     useEffect(() => {
         if (!isLoading && user?.role !== "admin") {
@@ -50,9 +60,9 @@ export default function InventoryPage() {
 
     useEffect(() => {
         if (user?.role === "admin") {
-            fetchInventory();
+            fetchInventory(currentPage);
         }
-    }, [user]);
+    }, [user, fetchInventory, currentPage]);
 
     const handleOpenModal = (product?: Product) => {
         if (product) {
@@ -142,9 +152,15 @@ export default function InventoryPage() {
                         </thead>
                         <tbody className="divide-y divide-white/10 dark:divide-white/5">
                             {loading ? (
-                                <tr>
-                                    <td colSpan={5} className="px-6 py-12 text-center text-slate-500">Loading inventory...</td>
-                                </tr>
+                                Array.from({ length: 5 }).map((_, i) => (
+                                    <tr key={i} className="animate-pulse">
+                                        <td className="px-6 py-4"><div className="h-6 w-32 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
+                                        <td className="px-6 py-4"><div className="h-4 w-16 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
+                                        <td className="px-6 py-4"><div className="h-4 w-12 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
+                                        <td className="px-6 py-4"><div className="h-6 w-16 bg-slate-200 dark:bg-slate-700 rounded-full" /></td>
+                                        <td className="px-6 py-4 text-right"><div className="h-8 w-16 ml-auto bg-slate-200 dark:bg-slate-700 rounded-lg" /></td>
+                                    </tr>
+                                ))
                             ) : products.length === 0 ? (
                                 <tr>
                                     <td colSpan={5} className="px-6 py-12 text-center text-slate-500">No products found in catalog.</td>
@@ -199,6 +215,17 @@ export default function InventoryPage() {
                         </tbody>
                     </table>
                 </div>
+                {!loading && totalProducts > 0 && (
+                    <div className="px-6 py-4 border-t border-white/20 dark:border-white/10 bg-white/40 dark:bg-slate-800/40">
+                        <Pagination
+                            currentPage={currentPage}
+                            totalPages={totalPages}
+                            onPageChange={(page) => setCurrentPage(page)}
+                            totalItems={totalProducts}
+                            itemsPerPage={itemsPerPage}
+                        />
+                    </div>
+                )}
             </div>
 
             {/* Modal */}

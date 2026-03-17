@@ -11,12 +11,14 @@ _loaded: bool = False
 
 
 def load(session: Session) -> None:
-    """Load all SystemSettings from DB into memory. Call once at startup."""
+    """Load all SystemSettings from DB into memory with decryption. Call once at startup."""
     global _cache, _loaded
+    from utils.encryption import decrypt_value
     settings = session.exec(select(SystemSettings)).all()
-    _cache = {s.key: s.value for s in settings}
+    # We store decrypted values in memory for easy access throughout the app
+    _cache = {s.key: decrypt_value(s.value) for s in settings}
     _loaded = True
-    logger.info(f"✅ SettingsCache loaded: {len(_cache)} keys")
+    logger.info(f"✅ SettingsCache loaded and decrypted: {len(_cache)} keys")
 
 
 def get(key: str, default: Optional[str] = None) -> Optional[str]:
@@ -30,14 +32,17 @@ def get_all() -> Dict[str, str]:
 
 
 def set(key: str, value: str) -> None:
-    """Update a single key in cache (call after DB write)."""
-    _cache[key] = value
+    """Update a single key in cache with decryption."""
+    from utils.encryption import decrypt_value
+    _cache[key] = decrypt_value(value)
 
 
 def update(data: Dict[str, str]) -> None:
-    """Bulk update cache keys (call after PATCH /settings)."""
-    _cache.update(data)
-    logger.debug(f"SettingsCache updated: {list(data.keys())}")
+    """Bulk update cache keys with decryption."""
+    from utils.encryption import decrypt_value
+    for k, v in data.items():
+        _cache[k] = decrypt_value(v)
+    logger.debug(f"SettingsCache updated and decrypted: {list(data.keys())}")
 
 
 def is_loaded() -> bool:

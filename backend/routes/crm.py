@@ -18,10 +18,28 @@ from utils.encryption import encrypt_value, decrypt_value
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["CRM & Settings"])
 
-@router.get("/leads", response_model=List[Lead])
-async def get_leads(session: Session = Depends(get_session)):
-    """Fetch all leads from the database."""
-    return session.exec(select(Lead).order_by(Lead.created_at.desc())).all()
+@router.get("/leads")
+async def get_leads(
+    page: int = 1,
+    limit: int = 10,
+    session: Session = Depends(get_session)
+):
+    """Fetch leads from the database with pagination."""
+    offset = (page - 1) * limit
+    total = session.exec(select(func.count(Lead.id))).one()
+    leads = session.exec(
+        select(Lead)
+        .order_by(Lead.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    
+    return {
+        "items": leads,
+        "total": total,
+        "page": page,
+        "limit": limit
+    }
 
 @router.post("/leads", response_model=Lead)
 async def create_lead(
@@ -203,14 +221,49 @@ async def get_dashboard_stats(session: Session = Depends(get_session)):
     }
 
 @router.get("/interactions")
-async def get_interactions(session: Session = Depends(get_session)):
-    """Fetch call history."""
-    return session.exec(select(Interaction).order_by(Interaction.timestamp.desc())).all()
+async def get_interactions(
+    page: int = 1,
+    limit: int = 10,
+    session: Session = Depends(get_session)
+):
+    """Fetch call history with pagination."""
+    offset = (page - 1) * limit
+    total = session.exec(select(func.count(Interaction.id))).one()
+    interactions = session.exec(
+        select(Interaction)
+        .order_by(Interaction.timestamp.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    
+    return {
+        "items": interactions,
+        "total": total,
+        "page": page,
+        "limit": limit
+    }
 
-@router.get("/inventory", response_model=List[Product])
-async def get_inventory(session: Session = Depends(get_session)):
-    """Fetch all products from inventory."""
-    return session.exec(select(Product)).all()
+@router.get("/inventory")
+async def get_inventory(
+    page: int = 1,
+    limit: int = 10,
+    session: Session = Depends(get_session)
+):
+    """Fetch items from inventory with pagination."""
+    offset = (page - 1) * limit
+    total = session.exec(select(func.count(Product.id))).one()
+    products = session.exec(
+        select(Product)
+        .offset(offset)
+        .limit(limit)
+    ).all()
+    
+    return {
+        "items": products,
+        "total": total,
+        "page": page,
+        "limit": limit
+    }
 
 @router.get("/settings")
 async def get_settings(
@@ -278,12 +331,14 @@ async def get_integration_keys(
             (SystemSettings.key.like("%_TOKEN")) |
             (SystemSettings.key.like("%_MODEL")) |
             (SystemSettings.key.like("%_VOICE_ID")) |
-            (SystemSettings.key.like("%_VOICE")) |
+            (SystemSettings.key.like("%_VOICE")) | 
+            (SystemSettings.key.like("%_STT_MODEL")) |
+            (SystemSettings.key.like("%_TTS_MODEL")) |
             (SystemSettings.key.in_(["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]))
         )
     ).all()
     
-    # Return masked representation (e.g. sk-****123)
+    # Returns masked representation (e.g. sk-****123)
     masked = {}
     for s in settings:
         decrypted = decrypt_value(s.value)
@@ -304,7 +359,7 @@ async def update_integration_keys(
 ):
     """Securely encrypt and update user integration keys."""
     for key, value in data.items():
-        if not (key.endswith("_API_KEY") or key.endswith("_SID") or key.endswith("_TOKEN") or key.endswith("_MODEL") or key.endswith("_VOICE_ID") or key.endswith("_VOICE") or key in ["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]):
+        if not (key.endswith("_API_KEY") or key.endswith("_SID") or key.endswith("_TOKEN") or key.endswith("_MODEL") or key.endswith("_VOICE_ID") or key.endswith("_VOICE") or key.endswith("_STT_MODEL") or key.endswith("_TTS_MODEL") or key in ["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]):
              continue # Only handle sensitive keys here
              
         db_s = session.exec(

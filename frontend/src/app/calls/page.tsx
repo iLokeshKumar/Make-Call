@@ -1,9 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare } from "lucide-react";
 import clsx from "clsx";
+import Pagination from "@/components/Pagination";
 
 interface Interaction {
     id: number;
@@ -20,34 +21,40 @@ export default function CallsPage() {
     const [expandedCall, setExpandedCall] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
-        const fetchCalls = async () => {
-            try {
-                const res = await fetch("http://localhost:6060/interactions", {
-                    headers: { "Authorization": `Bearer ${token}` }
-                });
-                if (res.status === 401) {
-                    sessionTimeout();
-                    return;
-                }
-                if (!res.ok) throw new Error(`Server returned ${res.status}`);
-                const data = await res.json();
-                // Sort by timestamp descending
-                const sorted = data.sort((a: any, b: any) =>
-                    new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
-                );
-                setCalls(sorted);
-                setError(null);
-            } catch (err: any) {
-                console.error("Failed to fetch calls:", err);
-                setError(err.message || "Could not connect to backend");
-            } finally {
-                setLoading(false);
-            }
-        };
+    // Pagination State
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalCalls, setTotalCalls] = useState(0);
+    const [itemsPerPage] = useState(10);
+    const totalPages = Math.ceil(totalCalls / itemsPerPage);
 
-        fetchCalls();
-    }, []);
+    const fetchCalls = useCallback(async (page: number = 1) => {
+        setLoading(true);
+        try {
+            const res = await fetch(`http://localhost:6060/interactions?page=${page}&limit=${itemsPerPage}`, {
+                headers: { "Authorization": `Bearer ${token}` }
+            });
+            if (res.status === 401) {
+                sessionTimeout();
+                return;
+            }
+            if (!res.ok) throw new Error(`Server returned ${res.status}`);
+            const data = await res.json();
+            
+            setCalls(data.items || []);
+            setTotalCalls(data.total || 0);
+            setCurrentPage(data.page || 1);
+            setError(null);
+        } catch (err: any) {
+            console.error("Failed to fetch calls:", err);
+            setError(err.message || "Could not connect to backend");
+        } finally {
+            setLoading(false);
+        }
+    }, [token, itemsPerPage, sessionTimeout]);
+
+    useEffect(() => {
+        fetchCalls(currentPage);
+    }, [fetchCalls, currentPage]);
 
     const toggleExpand = (id: number) => {
         setExpandedCall(expandedCall === id ? null : id);
@@ -74,9 +81,10 @@ export default function CallsPage() {
             )}
 
             {loading ? (
-                <div className="text-center py-12">
-                    <div className="inline-block h-8 w-8 animate-spin rounded-full border-4 border-violet-600 border-r-transparent" />
-                    <p className="mt-4 text-slate-600 dark:text-slate-400">Loading call history...</p>
+                <div className="space-y-4">
+                    {Array.from({ length: 5 }).map((_, i) => (
+                        <div key={i} className="h-20 rounded-xl glass border border-white/20 dark:border-white/10 animate-pulse bg-slate-100/50 dark:bg-slate-800/50" />
+                    ))}
                 </div>
             ) : calls.length === 0 ? (
                 /* Empty State */
@@ -152,6 +160,18 @@ export default function CallsPage() {
                             )}
                         </div>
                     ))}
+                </div>
+            )}
+
+            {!loading && totalCalls > 0 && (
+                <div className="mt-8 rounded-2xl glass p-4 border border-white/40 dark:border-white/10">
+                    <Pagination
+                        currentPage={currentPage}
+                        totalPages={totalPages}
+                        onPageChange={(page) => setCurrentPage(page)}
+                        totalItems={totalCalls}
+                        itemsPerPage={itemsPerPage}
+                    />
                 </div>
             )}
         </div>

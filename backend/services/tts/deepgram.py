@@ -8,9 +8,9 @@ from utils.config import DEEPGRAM_VOICE
 logger = logging.getLogger(__name__)
 
 class DeepgramTTS:
-    def __init__(self, api_key: str = None, voice_id: str = None):
+    def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Deepgram"
-        self.model = voice_id or DEEPGRAM_VOICE
+        self.model = model or voice_id or DEEPGRAM_VOICE
         self.api_key = api_key
         self.last_latency = 0
         

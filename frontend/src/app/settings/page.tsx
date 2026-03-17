@@ -65,6 +65,11 @@ export default function SettingsPage() {
                         ELEVENLABS_API_KEY: "",
                         CARTESIA_API_KEY: "",
                         SARVAM_API_KEY: "",
+                        SARVAM_STT_MODEL: "",
+                        SARVAM_TTS_MODEL: "",
+                        SARVAM_VOICE_ID: "",
+                        CARTESIA_STT_MODEL: "",
+                        CARTESIA_TTS_MODEL: "",
                         OPENAI_API_KEY: "",
                         MISTRAL_API_KEY: "",
                         ANTHROPIC_API_KEY: "",
@@ -471,8 +476,8 @@ export default function SettingsPage() {
                                 "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_VOICE"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "DEEPGRAM_VOICE"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "SARVAM_VOICE_ID", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL"],
                                 "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL"],
                                 "Enrichment": ["APOLLO_API_KEY"]
                             }).map(([groupName, keys]) => (

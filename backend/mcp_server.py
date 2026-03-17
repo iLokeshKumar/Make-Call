@@ -563,10 +563,11 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             if GOOGLE_CALENDAR_AVAILABLE:
                 from google_calendar_service import GoogleMeetGenerator
                 generator = GoogleMeetGenerator(user=user, session=session)
-                is_valid, auth_message = generator.validate_authentication()
+                auth_result = generator.validate_authentication()
                 
-                if not is_valid:
+                if auth_result["status"] != "valid":
                     auth_url = generator.get_auth_url()
+                    auth_message = auth_result["message"]
                     logger.warning(f"[book_meeting] Auth issue: {auth_message}")
                     return {
                         "confirmed": False,

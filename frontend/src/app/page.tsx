@@ -51,7 +51,8 @@ export default function Home() {
           return;
         }
         if (leadsRes.ok) {
-          const leads = await leadsRes.json();
+          const data = await leadsRes.json();
+          const leads = data.items || [];
           // Map latest 5 leads to activity format
           const formattedActivities = leads.slice(0, 5).map((lead: any) => ({
             title: `Lead: ${lead.name} `,

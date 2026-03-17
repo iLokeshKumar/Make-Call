@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles, UserPlus, Plus, Mail, StickyNote } from "lucide-react";
+import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles, UserPlus, Plus, Mail, StickyNote, ChevronRight, ChevronLeft } from "lucide-react";
+import Pagination from "@/components/Pagination";
 
 interface Lead {
     id: number;
@@ -25,12 +26,19 @@ export default function LeadsPage() {
     const [searchQuery, setSearchQuery] = useState("");
     const [manualLead, setManualLead] = useState({ name: "", phone: "", email: "", notes: "" });
     const [isModalOpen, setIsModalOpen] = useState(false);
+    
+    // Pagination State
+    const [currentPage, setCurrentPage] = useState(1);
+    const [totalLeads, setTotalLeads] = useState(0);
+    const [itemsPerPage] = useState(10);
+    const totalPages = Math.ceil(totalLeads / itemsPerPage);
 
     const API_BASE = "http://localhost:6060";
 
-    const fetchLeads = async () => {
+    const fetchLeads = useCallback(async (page: number = 1) => {
+        setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/leads`, {
+            const res = await fetch(`${API_BASE}/leads?page=${page}&limit=${itemsPerPage}`, {
                 headers: {
                     "Authorization": `Bearer ${token}`
                 }
@@ -40,17 +48,19 @@ export default function LeadsPage() {
                 return;
             }
             const data = await res.json();
-            setLeads(data);
+            setLeads(data.items || []);
+            setTotalLeads(data.total || 0);
+            setCurrentPage(data.page || 1);
         } catch (error) {
             console.error("Error fetching leads:", error);
         } finally {
             setLoading(false);
         }
-    };
+    }, [token, itemsPerPage, sessionTimeout]);
 
     useEffect(() => {
-        fetchLeads();
-    }, []);
+        fetchLeads(currentPage);
+    }, [fetchLeads, currentPage]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (e.target.files) {
@@ -343,11 +353,19 @@ export default function LeadsPage() {
                         </thead>
                         <tbody className="divide-y divide-white/10 dark:divide-white/5">
                             {loading ? (
-                                <tr><td colSpan={5} className="px-6 py-12 text-center text-slate-500">Loading leads...</td></tr>
-                            ) : filteredLeads.length === 0 ? (
+                                Array.from({ length: 5 }).map((_, i) => (
+                                    <tr key={i} className="animate-pulse">
+                                        <td className="px-6 py-4"><div className="h-4 w-16 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
+                                        <td className="px-6 py-4"><div className="h-4 w-32 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
+                                        <td className="px-6 py-4"><div className="h-4 w-24 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
+                                        <td className="px-6 py-4"><div className="h-6 w-16 bg-slate-200 dark:bg-slate-700 rounded-full" /></td>
+                                        <td className="px-6 py-4 text-right"><div className="h-8 w-24 ml-auto bg-slate-200 dark:bg-slate-700 rounded-lg" /></td>
+                                    </tr>
+                                ))
+                            ) : leads.length === 0 ? (
                                 <tr><td colSpan={5} className="px-6 py-12 text-center text-slate-500">No leads found. Upload a file above.</td></tr>
                             ) : (
-                                filteredLeads.map((lead) => (
+                                leads.map((lead) => (
                                     <tr key={lead.id} className="hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors">
                                         <td className="px-6 py-4">
                                             <span className="inline-flex items-center rounded-md px-2 py-1 text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 ring-1 ring-inset ring-slate-500/10">
@@ -381,7 +399,7 @@ export default function LeadsPage() {
                                                             });
                                                             if (res.ok) {
                                                                 alert("Successfully Enriched");
-                                                                fetchLeads();
+                                                                fetchLeads(currentPage);
                                                             } else {
                                                                 alert("Enrichment failed");
                                                             }
@@ -422,6 +440,17 @@ export default function LeadsPage() {
                         </tbody>
                     </table>
                 </div>
+                {!loading && totalLeads > 0 && (
+                    <div className="px-6 py-4 border-t border-white/20 dark:border-white/10 bg-white/40 dark:bg-slate-800/40">
+                        <Pagination
+                            currentPage={currentPage}
+                            totalPages={totalPages}
+                            onPageChange={(page) => setCurrentPage(page)}
+                            totalItems={totalLeads}
+                            itemsPerPage={itemsPerPage}
+                        />
+                    </div>
+                )}
             </div>
 
             {/* Modal Overlay */}

@@ -294,7 +294,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
             result = check_icp_qualification.fn(
                 company_size=arguments.get("company_size"),
                 industry=arguments.get("industry"),
-                employees=arguments.get("employee_count", 0)
+                employees=int(arguments.get("employee_count", 0) or 0)
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
@@ -310,7 +310,7 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
         elif tool_name == "check_guardrails":
             # Delegate to MCP tool
             result = check_guardrails.fn(
-                requested_discount_percent=arguments.get("requested_discount_percent", 0)
+                requested_discount_percent=float(arguments.get("requested_discount_percent", 0) or 0)
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
