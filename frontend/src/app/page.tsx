@@ -27,7 +27,7 @@ export default function Home() {
       }
       try {
         // Fetch Stats
-        const statsRes = await fetch("http://localhost:6060/dashboard/stats", {
+        const statsRes = await fetch("http://localhost:6060/crm/dashboard/stats", {
           headers: { "Authorization": `Bearer ${token}` }
         });
 
@@ -42,7 +42,7 @@ export default function Home() {
         }
 
         // Fetch Recent Leads for Activity
-        const leadsRes = await fetch("http://localhost:6060/leads", {
+        const leadsRes = await fetch("http://localhost:6060/crm/leads", {
           headers: { "Authorization": `Bearer ${token}` }
         });
 

@@ -16,7 +16,6 @@ from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import setup_logger
 from rag_service import sync_products_to_chroma
 from utils.config import PORT
-from routes import auth, crm, telephony
 from communicators import TwilioCommunicator, ExotelCommunicator, EnableXCommunicator
 from pipelines.voice_pipeline import VoicePipeline
 from utils import settings_cache
@@ -63,9 +62,11 @@ app.add_middleware(
 )
 
 # Routes
+from routes import auth, crm, telephony, analytics
 app.include_router(auth.router)
 app.include_router(crm.router)
 app.include_router(telephony.router)
+app.include_router(analytics.router)
 
 # Serve uploads
 import os

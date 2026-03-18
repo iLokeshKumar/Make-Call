@@ -78,7 +78,6 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
         clean_number = "".join(filter(str.isdigit, to))
         
         if to.startswith("+"):
-            # Already E.164, leave as is
             pass
         elif len(clean_number) == 10:
             # Standard 10-digit Indian number

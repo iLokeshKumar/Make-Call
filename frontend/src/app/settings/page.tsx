@@ -19,7 +19,7 @@ export default function SettingsPage() {
     const [llmProvider, setLlmProvider] = useState("mistral");
     const [ttsProvider, setTtsProvider] = useState("cartesia");
     const [telephonyEngine, setTelephonyEngine] = useState("twilio");
-    const [aiVerbosity, setAiVerbosity] = useState("2");
+    const [aiVerbosity, setAiVerbosity] = useState("1");
     
     // API Keys State
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
@@ -32,12 +32,13 @@ export default function SettingsPage() {
     const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
 
     const API_BASE = "http://localhost:6060";
+    const CRM_BASE = `${API_BASE}/crm`;
 
     useEffect(() => {
         const fetchSettingsAndKeys = async () => {
             try {
                 // Fetch General Settings
-                const res = await fetch(`${API_BASE}/settings`, {
+                const res = await fetch(`${CRM_BASE}/settings`, {
                     headers: { "Authorization": `Bearer ${token}` }
                 });
                 if (res.status === 401) {
@@ -53,7 +54,7 @@ export default function SettingsPage() {
                 setAiVerbosity(data.ai_verbosity || "2");
                 
                 // Fetch Encrypted Integration Keys
-                const keysRes = await fetch(`${API_BASE}/integrations/keys`, {
+                const keysRes = await fetch(`${CRM_BASE}/integrations/keys`, {
                     headers: { "Authorization": `Bearer ${token}` }
                 });
                 if (keysRes.ok) {
@@ -119,7 +120,7 @@ export default function SettingsPage() {
         setSaveSuccess(false);
         try {
             // Save General Settings
-            const res = await fetch(`${API_BASE}/settings`, {
+            const res = await fetch(`${CRM_BASE}/settings`, {
                 method: "PATCH",
                 headers: {
                     "Content-Type": "application/json",
@@ -140,7 +141,7 @@ export default function SettingsPage() {
             }
             
             // Save Integration Keys
-            const keysRes = await fetch(`${API_BASE}/integrations/keys`, {
+            const keysRes = await fetch(`${CRM_BASE}/integrations/keys`, {
                 method: "PATCH",
                 headers: {
                     "Content-Type": "application/json",

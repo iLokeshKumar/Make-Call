@@ -27,10 +27,13 @@ export default function CallsPage() {
     const [itemsPerPage] = useState(10);
     const totalPages = Math.ceil(totalCalls / itemsPerPage);
 
+    const API_BASE = "http://localhost:6060";
+    const CRM_BASE = `${API_BASE}/crm`;
+
     const fetchCalls = useCallback(async (page: number = 1) => {
         setLoading(true);
         try {
-            const res = await fetch(`http://localhost:6060/interactions?page=${page}&limit=${itemsPerPage}`, {
+            const res = await fetch(`${CRM_BASE}/interactions?page=${page}&limit=${itemsPerPage}`, {
                 headers: { "Authorization": `Bearer ${token}` }
             });
             if (res.status === 401) {

@@ -4,7 +4,7 @@ import { useState, useEffect } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
-  LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut,
+  LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
   ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog
 } from "lucide-react";
 import clsx from "clsx";
@@ -18,6 +18,7 @@ const navItems = [
   { name: "Calls", href: "/calls", icon: Phone },
   { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Settings", href: "/settings", icon: Settings, adminOnly: true },
+  { name: "Analytics", href: "/analytics", icon: Activity },
 ];
 
 export default function Sidebar() {

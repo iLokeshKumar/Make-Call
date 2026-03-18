@@ -30,11 +30,12 @@ export default function InventoryPage() {
     const totalPages = Math.ceil(totalProducts / itemsPerPage);
 
     const API_BASE = "http://localhost:6060";
+    const CRM_BASE = `${API_BASE}/crm`;
 
     const fetchInventory = useCallback(async (page: number = 1) => {
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/inventory?page=${page}&limit=${itemsPerPage}`, {
+            const res = await fetch(`${CRM_BASE}/inventory?page=${page}&limit=${itemsPerPage}`, {
                 headers: { "Authorization": `Bearer ${token}` }
             });
             if (res.status === 401) {
@@ -78,7 +79,7 @@ export default function InventoryPage() {
     const handleDelete = async (id: number) => {
         if (!confirm("Are you sure you want to delete this product?")) return;
         try {
-            const res = await fetch(`${API_BASE}/inventory/${id}`, {
+            const res = await fetch(`${CRM_BASE}/inventory/${id}`, {
                 method: "DELETE",
                 headers: { "Authorization": `Bearer ${token}` }
             });
@@ -95,7 +96,7 @@ export default function InventoryPage() {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            const res = await fetch(`${API_BASE}/inventory`, {
+            const res = await fetch(`${CRM_BASE}/inventory`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",

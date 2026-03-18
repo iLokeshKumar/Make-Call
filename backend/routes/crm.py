@@ -2,12 +2,12 @@ import logging
 import io
 import pandas as pd
 import requests
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from sqlmodel import Session, select, func, text
 from database import get_session, engine
-from models.models import Lead, LeadCreate, Product, Interaction, Outcome, ApolloSearch, SystemSettings, User
+from models.models import Lead, LeadCreate, Product, Interaction, Outcome, ApolloSearch, SystemSettings, User, LatencyLog
 from utils.config import APOLLO_API_KEY
 from auth import RoleChecker, get_current_active_user
 from enrichment_service import enrich_lead_cascade
@@ -16,7 +16,7 @@ from utils import settings_cache
 from utils.encryption import encrypt_value, decrypt_value
 
 logger = logging.getLogger(__name__)
-router = APIRouter(tags=["CRM & Settings"])
+router = APIRouter(prefix="/crm", tags=["CRM"])
 
 @router.get("/leads")
 async def get_leads(

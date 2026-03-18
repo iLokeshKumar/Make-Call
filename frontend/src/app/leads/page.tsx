@@ -34,11 +34,12 @@ export default function LeadsPage() {
     const totalPages = Math.ceil(totalLeads / itemsPerPage);
 
     const API_BASE = "http://localhost:6060";
+    const CRM_BASE = `${API_BASE}/crm`;
 
     const fetchLeads = useCallback(async (page: number = 1) => {
         setLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/leads?page=${page}&limit=${itemsPerPage}`, {
+            const res = await fetch(`${CRM_BASE}/leads?page=${page}&limit=${itemsPerPage}`, {
                 headers: {
                     "Authorization": `Bearer ${token}`
                 }
@@ -78,7 +79,7 @@ export default function LeadsPage() {
         formData.append("file", file);
 
         try {
-            const res = await fetch(`${API_BASE}/leads/upload`, {
+            const res = await fetch(`${CRM_BASE}/leads/upload`, {
                 method: "POST",
                 headers: {
                     "Authorization": `Bearer ${token}`
@@ -132,7 +133,7 @@ export default function LeadsPage() {
     const handleDeleteLead = async (id: number) => {
         if (!confirm("Are you sure you want to delete this lead?")) return;
         try {
-            const res = await fetch(`${API_BASE}/leads/${id}`, {
+            const res = await fetch(`${CRM_BASE}/leads/${id}`, {
                 method: "DELETE",
                 headers: {
                     "Authorization": `Bearer ${token}`
@@ -288,7 +289,7 @@ export default function LeadsPage() {
                                     }
 
                                     try {
-                                        const res = await fetch(`${API_BASE}/leads/fetch-apollo`, {
+                                        const res = await fetch(`${CRM_BASE}/leads/fetch-apollo`, {
                                             method: 'POST',
                                             headers: {
                                                 'Content-Type': 'application/json',
@@ -391,7 +392,7 @@ export default function LeadsPage() {
                                                 <button
                                                     onClick={async () => {
                                                         try {
-                                                            const res = await fetch(`${API_BASE}/leads/${lead.id}/enrich`, {
+                                                            const res = await fetch(`${CRM_BASE}/leads/${lead.id}/enrich`, {
                                                                 method: 'POST',
                                                                 headers: {
                                                                     "Authorization": `Bearer ${token}`
@@ -544,7 +545,7 @@ export default function LeadsPage() {
                                 disabled={!manualLead.name || !manualLead.phone}
                                 onClick={async () => {
                                     try {
-                                        const res = await fetch(`${API_BASE}/leads`, {
+                                        const res = await fetch(`${CRM_BASE}/leads`, {
                                             method: 'POST',
                                             headers: {
                                                 'Content-Type': 'application/json',
