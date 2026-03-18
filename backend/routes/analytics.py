@@ -33,7 +33,7 @@ async def get_latency_analytics(
         cutoff_start = cutoff
         cutoff_end = datetime.now(timezone.utc) + timedelta(days=1)
 
-    # ── 1. Per-engine aggregates (turn-level rows)
+    # Per-engine aggregates (turn-level rows)
     engine_rows = session.exec(
         select(
             LatencyLog.engine,
@@ -66,7 +66,7 @@ async def get_latency_analytics(
         for r in engine_rows
     ]
 
-    # ── 2. Per-interaction (call-level) aggregates
+    # Per-interaction (call-level) aggregates
     interaction_rows = session.exec(
         select(
             LatencyLog.interaction_id,
@@ -114,7 +114,7 @@ async def get_latency_analytics(
         for r in interaction_rows
     ]
 
-    # ── 3. Model-level breakdowns (STT / LLM / TTS)
+    # Model-level breakdowns (STT / LLM / TTS)
     def fetch_model_stats(model_col, ms_col, provider_col):
         rows = session.exec(
             select(
@@ -148,7 +148,7 @@ async def get_latency_analytics(
     llm_models = fetch_model_stats(LatencyLog.llm_model, LatencyLog.llm_ms, LatencyLog.llm_provider)
     tts_models = fetch_model_stats(LatencyLog.tts_model, LatencyLog.tts_ms, LatencyLog.tts_provider)
 
-    # ── 4. Daily trend per engine
+    # Daily trend per engine
     trend_raw = session.execute(
         text("""
             SELECT

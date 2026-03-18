@@ -129,7 +129,6 @@ export default function LeadsPage() {
         setIsModalOpen(true);
     };
 
-    // Keep existing delete functionality
     const handleDeleteLead = async (id: number) => {
         if (!confirm("Are you sure you want to delete this lead?")) return;
         try {
