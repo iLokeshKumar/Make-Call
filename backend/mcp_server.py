@@ -596,14 +596,19 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             
             # STEP 3: Create appointment record in database
             appointment_insert = text("""
-                INSERT INTO appointment (lead_id, appointment_time, status, meeting_link, calendar_event_id)
-                VALUES (:lid, :atime, :status, :meet_link, :event_id)
+                INSERT INTO appointment (created_at, updated_at, created_by, updated_by, lead_id, appointment_time, status, meeting_link, calendar_event_id)
+                VALUES (:created_at, :updated_at, :created_by, :updated_by, :lid, :atime, :status, :meet_link, :event_id)
                 RETURNING id
             """)
             
+            now = datetime.now(timezone.utc)
             result = session.execute(
                 appointment_insert,
                 {
+                    "created_at": now,
+                    "updated_at": now,
+                    "created_by": "Rio AI",
+                    "updated_by": "Rio AI",
                     "lid": lead_id,
                     "atime": time_to_use,
                     "status": "scheduled",

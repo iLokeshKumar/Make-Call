@@ -33,6 +33,7 @@ class VoicePipeline:
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
         self.transcript_accumulator = transcript_accumulator
+        self._transcript_dirty = False
         self.session = session
         self.company_name = company_name
         self.user = user
@@ -44,6 +45,7 @@ class VoicePipeline:
         self.audio_encoding = audio_encoding
         self.audio_encoding = audio_encoding
         self.audio_sample_rate = audio_sample_rate
+        self.last_customer_speech_time = time.time()
         
         # 1. Basic Initialization (Core loop attributes)
         self.sentence_queue = asyncio.Queue()
@@ -153,6 +155,7 @@ class VoicePipeline:
 
     async def run(self):
         speaker_task = asyncio.create_task(self._speaker_loop())
+        silence_task = asyncio.create_task(self._silence_watcher())
         audio_queue = asyncio.Queue()
 
         async def _ingest():
@@ -317,6 +320,8 @@ class VoicePipeline:
 
                     last_final_transcript = current_turn_transcript
                     logger.info(f"🎤 [STT] FINAL: {current_turn_transcript}")
+                    self.last_customer_speech_time = time.time()
+                    logger.info(f"⏰ [VoicePipeline] Last customer speech time: {self.last_customer_speech_time}")
                     latency = time.time() - stt_start_time
 
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
@@ -338,6 +343,42 @@ class VoicePipeline:
             fan_out_task.cancel()
             barge_task.cancel()
             ingest_task.cancel()
+            silence_task.cancel()
+            self.flush_transcript()
+            logger.info(f"✅ [VoicePipeline] Call ended. Interaction ID: {self.interaction_id}")
+            logger.info(f"📜 [VoicePipeline] Full Transcript: {self.transcript_accumulator}")
+            logger.info("📜 Post-call transcript flush complete.")
+
+    async def _silence_watcher(self):
+        """Re-engages customer after prolonged silence."""
+        SILENCE_THRESHOLD = 12.0  # seconds
+        CHECK_INTERVAL = 3.0      # check every 3 seconds
+
+        phrases = [
+            "Still with me? Take your time, no rush at all.",
+            "Happy to answer any questions whenever you're ready.",
+            "Just wanted to check — are you still there?",
+            "Take your time, I'm right here whenever you're ready.",
+        ]
+        phrase_index = 0
+
+        while True:
+            await asyncio.sleep(CHECK_INTERVAL)
+            silence_duration = time.time() - self.last_customer_speech_time
+
+            # Only fire if: customer is silent, Rio is NOT speaking, queue is empty
+            if (silence_duration > SILENCE_THRESHOLD 
+                    and not self.is_rio_speaking 
+                    and self.sentence_queue.empty()):
+            
+                phrase = phrases[phrase_index % len(phrases)]
+                phrase_index += 1
+                logger.info(f"🔔 [Silence Watcher] {silence_duration:.0f}s of silence — re-engaging")
+                await self.sentence_queue.put(phrase)
+            
+                # Reset timer so we don't spam immediately again
+                self.last_customer_speech_time = time.time()
+
 
     async def _speaker_loop(self):
         """Continuously pulls sentences from the queue and speaks them."""
@@ -526,8 +567,58 @@ class VoicePipeline:
         except Exception as e:
             logger.error(f"❌ Error saving latency: {e}")
 
+    # def save_transcript(self, engine_name="voice_call"):
+    #     """Saves transcript to Interaction table. Upserts if record exists."""
+    #     try:
+    #         full_transcript = "\n".join(self.transcript_accumulator)
+    #         if not full_transcript.strip():
+    #             return
+
+    #         try:
+    #             interaction_id_int = int(self.interaction_id)
+    #         except (ValueError, TypeError):
+    #             interaction_id_int = None
+
+    #         db_i = None
+    #         if interaction_id_int:
+    #             db_i = self.session.get(Interaction, interaction_id_int)
+            
+    #         if not db_i:
+    #             # Try to find a lead if we have a phone number (not implemented in VoicePipeline but good pattern)
+    #             # For now, create a new Interaction record
+    #             db_i = Interaction(
+    #                 lead_id=0, # Anonymous lead
+    #                 type="call",
+    #                 content=f"Voice Interaction ({engine_name})",
+    #                 transcript=full_transcript,
+    #                 timestamp=datetime.now(timezone.utc),
+    #                 source="Voice Call",
+    #                 created_by="Rio AI"
+    #             )
+    #             self.session.add(db_i)
+    #             self.session.commit()
+    #             self.session.refresh(db_i)
+    #             # If we're now assigning an ID, update our internal reference
+    #             if not interaction_id_int:
+    #                 self.interaction_id = str(db_i.id)
+    #         else:
+    #             db_i.transcript = full_transcript
+    #             self.session.add(db_i)
+    #             self.session.commit()
+                
+    #         logger.debug(f"📜 [Transcript Saved] ID: {db_i.id} | Length: {len(full_transcript)} chars")
+    #     except Exception as e:
+    #         logger.error(f"❌ Error saving transcript: {e}")
+
     def save_transcript(self, engine_name="voice_call"):
-        """Saves transcript to Interaction table. Upserts if record exists."""
+        """During call: just mark dirty. DB write is deferred to flush_transcript()."""
+        self._transcript_dirty = True
+        # No DB write here. transcript_accumulator already has the data in memory.
+
+    def flush_transcript(self, engine_name="voice_call"):
+        """Called ONCE after call ends. Writes full transcript to DB."""
+        if not self._transcript_dirty:
+            return
         try:
             full_transcript = "\n".join(self.transcript_accumulator)
             if not full_transcript.strip():
@@ -541,12 +632,10 @@ class VoicePipeline:
             db_i = None
             if interaction_id_int:
                 db_i = self.session.get(Interaction, interaction_id_int)
-            
+        
             if not db_i:
-                # Try to find a lead if we have a phone number (not implemented in VoicePipeline but good pattern)
-                # For now, create a new Interaction record
                 db_i = Interaction(
-                    lead_id=0, # Anonymous lead
+                    lead_id=0,
                     type="call",
                     content=f"Voice Interaction ({engine_name})",
                     transcript=full_transcript,
@@ -557,17 +646,17 @@ class VoicePipeline:
                 self.session.add(db_i)
                 self.session.commit()
                 self.session.refresh(db_i)
-                # If we're now assigning an ID, update our internal reference
                 if not interaction_id_int:
                     self.interaction_id = str(db_i.id)
             else:
                 db_i.transcript = full_transcript
                 self.session.add(db_i)
                 self.session.commit()
-                
-            logger.debug(f"📜 [Transcript Saved] ID: {db_i.id} | Length: {len(full_transcript)} chars")
+        
+            self._transcript_dirty = False
+            logger.info(f"📜 [Transcript Flushed] ID: {db_i.id} | {len(full_transcript)} chars | {len(self.transcript_accumulator)} lines")
         except Exception as e:
-            logger.error(f"❌ Error saving transcript: {e}")
+            logger.error(f"❌ Error flushing transcript: {e}")
 
     def _strip_markdown(self, text: str) -> str:
         """Removes markdown formatting like **bold**, *italics*, and bullet points for TTS."""
@@ -680,6 +769,24 @@ class VoicePipeline:
                         tool_name = tc.function.name
                         tool_args = json.loads(tc.function.arguments)
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
+
+                        # Thinking message — keep customer engaged during tool wait
+                        thinking_phrases = {
+                            "get_product_info":        "Let me pull up the details on that for you.",
+                            "book_meeting":            "Let me get that booked for you right now.",
+                            "book_demo":               "I'm scheduling that demo for you now.",
+                            "send_communication":      "Sending that over to you now.",
+                            "get_or_create_lead":      "One moment while I update your record.",
+                            "check_icp_qualification": "Let me check if this fits your profile.",
+                            "check_guardrails":        "Let me check what I can do on pricing.",
+                        }
+                        thinking_msg = thinking_phrases.get(tool_name, "One moment, let me look into that for you.")
+                        
+                        # Only say it if Rio isn't already mid-sentence
+                        if self.sentence_queue.empty() and not self.is_rio_speaking:
+                            await self.sentence_queue.put(thinking_msg)
+                            # Small wait so the phrase starts playing before tool execution
+                            await asyncio.sleep(0.3)
                         
                         try:
                             result = await execute_mcp_tool(tool_name, tool_args, user=self.user)

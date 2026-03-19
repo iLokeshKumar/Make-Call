@@ -251,9 +251,9 @@ class GoogleMeetGenerator:
                 ],
                 'conferenceData': {
                     'createRequest': {
-                        'requestId': f'rio-{lead_name}-{datetime.now().timestamp()}',
+                        'requestId': f'rio-{int(datetime.now().timestamp())}-{lead_name}',
                         'conferenceSolutionKey': {
-                            'key': 'hangoutsMeet'
+                            'type': 'hangoutsMeet'
                         }
                     }
                 },
