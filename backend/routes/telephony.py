@@ -104,6 +104,7 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
 
             logger.info(f"📞 [telephony] Attempting call for user {current_user.username} (ID: {current_user.id})")
             logger.info(f"🔑 [telephony] Using SID: {sid[:6]}...{sid[-4:] if sid else 'NONE'}")
+            logger.debug(f"㊙️ [telephony] Token last 4 chars: ...{token[-4:] if token else 'NONE'}")
             
             # Additional keys for other providers in case needed
             exotel_sid = get_credential("EXOTEL_ACCOUNT_SID", user_id=current_user.id) or os.getenv("EXOTEL_ACCOUNT_SID")

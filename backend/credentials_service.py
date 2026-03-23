@@ -14,7 +14,7 @@ def get_credential(key: str, user_id: int | None = None) -> str | None:
     Falls back to global if user-specific is not found.
     """
     val = settings_cache.get(key, user_id)
-    if val:
+    if val and val.strip():
         logger.info(f"🔑 [credentials] Found '{key}' for user {user_id}")
         return val
         

@@ -1,12 +1,24 @@
 import os
 import sys
+from dotenv import load_dotenv
+
+# Add the parent 'backend' directory to sys.path so we can import 'models' and 'utils'
+backend_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if backend_path not in sys.path:
+    sys.path.append(backend_path)
+
+# Load .env from backend directory BEFORE other imports
+env_path = os.path.join(backend_path, '.env')
+load_dotenv(env_path)
+
 from sqlmodel import Session, select, create_engine
 from models.models import SystemSettings, User
 from utils.encryption import decrypt_value
-from dotenv import load_dotenv
 
-load_dotenv()
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./crm.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL or not DATABASE_URL.startswith("postgresql"):
+    DATABASE_URL = "postgresql://postgres:1234@localhost/calls"
+
 engine = create_engine(DATABASE_URL)
 
 def check_settings():
@@ -16,7 +28,7 @@ def check_settings():
         settings = session.exec(stmt).all()
         for s in settings:
             try:
-                # FIX: Check s.key, not s itself
+                # Decide if we should try to decrypt
                 should_decrypt = (
                     s.key.endswith("_API_KEY") or 
                     s.key.endswith("_TOKEN") or 
