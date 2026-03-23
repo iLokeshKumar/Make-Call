@@ -66,6 +66,33 @@ class BaseLLM(ABC):
             "tool_call_id": tool_call_id
         })
 
+    def clean_interrupted_tool_calls(self):
+        """
+        Removes tool_calls from the last assistant message if they haven't been fulfilled.
+        Prevents 'Not the same number of function calls and responses' errors during barge-in.
+        """
+        if not self.messages:
+            return
+
+        last_msg = self.messages[-1]
+        
+        # If the last message is an assistant message with tool_calls
+        if last_msg.get("role") == "assistant" and last_msg.get("tool_calls"):
+            # Check if there are corresponding 'tool' messages in the history
+            tool_call_ids = {tc.get("id") for tc in last_msg.get("tool_calls", []) if tc.get("id")}
+            
+            # Since LLM protocol requires tool messages to follow immediately, 
+            # if the NEXT message is not a tool message, it's an interrupted sequence.
+            # However, the user might have already spoken (next message is 'user').
+            # Simply: if no tool messages followed, it's interrupted.
+            
+            # We look for ANY tool messages that follow this assistant message.
+            # But in our case, if it's the LAST message, it's definitely interrupted.
+            logger.info(f"🧹 [BaseLLM] Cleaning interrupted tool calls from last assistant message.")
+            last_msg.pop("tool_calls", None)
+            # Optional: if the content is also empty, we might want to remove the message entirely,
+            # but usually it has a "Thinking..." phrase.
+
     def get_safe_history(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
         Returns a truncated message history that is safe for tool-calling models.

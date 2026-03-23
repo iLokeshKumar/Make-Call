@@ -13,7 +13,7 @@ from services.llm import get_llm_service
 from services.tts import get_tts_service
 from services.stt import get_stt_service
 from utils.audio import clean_voice_text
-from utils.config import mistral_client
+from utils.config import get_mistral_client
 from tool_adapter import get_mistral_tools, execute_mcp_tool
 from sqlmodel import Session
 from models.models import Interaction, LatencyLog, User, Lead, SystemSettings
@@ -36,87 +36,60 @@ class VoicePipeline:
         self._transcript_dirty = False
         self.session = session
         self.company_name = company_name
+        from utils import settings_cache
         self.user = user
         self.lead_context = lead_context
         self.company_website = company_website
-        self.stt_provider = stt_provider
-        self.llm_provider = llm_provider
-        self.tts_provider = tts_provider
-        self.audio_encoding = audio_encoding
+        user_id = user.id if user else None
+        
+        # 1. Fetch ALL settings for this user (merged with global) from our new user-aware cache
+        all_settings = settings_cache.get_all(user_id)
+        
+        # 2. Extract specific providers (overriding with passed args if provided)
+        self.stt_provider = stt_provider or all_settings.get("stt_provider", "deepgram")
+        self.llm_provider = llm_provider or all_settings.get("llm_provider", "mistral")
+        self.tts_provider = tts_provider or all_settings.get("tts_provider", "cartesia")
+        
         self.audio_encoding = audio_encoding
         self.audio_sample_rate = audio_sample_rate
         self.last_customer_speech_time = time.time()
         
-        # 1. Basic Initialization (Core loop attributes)
+        # Basic Initialization (Core loop attributes)
         self.sentence_queue = asyncio.Queue()
         self.current_tts_task = None
         self.current_llm_task = None
         self.is_rio_speaking = False
         self.tts_first_byte_time = 0.0
         self.last_tts_start_time = 0.0
-        self.llm_error_count = 0  # Track consecutive failures for smart fallback
+        self.llm_error_count = 0 
 
-        # 2. Extract and Decrypt API Keys for current user
-        keys = self._get_decrypted_integration_keys()
+        # 3. Determine specific LLM, TTS, STT keys based on provider
+        # Use provider-specific keys (e.g., MISTRAL_API_KEY) or fall back to general keys
+        llm_api_key = all_settings.get(f"{self.llm_provider.upper()}_API_KEY") or all_settings.get("llm_api_key")
+        tts_api_key = all_settings.get(f"{self.tts_provider.upper()}_API_KEY") or all_settings.get("tts_api_key")
+        stt_api_key = all_settings.get(f"{self.stt_provider.upper()}_API_KEY") or all_settings.get("stt_api_key")
         
-        # Determine specific LLM, TTS, STT keys based on provider
-        llm_api_key = keys.get(f"{llm_provider.upper()}_API_KEY")
-        tts_api_key = keys.get(f"{tts_provider.upper()}_API_KEY")
-        stt_api_key = keys.get(f"{stt_provider.upper()}_API_KEY")
-        # STT provider names might be slightly different depending on DB, but follow convention:
-        llm_model = keys.get(f"{llm_provider.upper()}_MODEL")
-        tts_voice = keys.get(f"{tts_provider.upper()}_VOICE_ID") or keys.get(f"{tts_provider.upper()}_VOICE")
-        tts_model = keys.get(f"{tts_provider.upper()}_TTS_MODEL") or keys.get(f"{tts_provider.upper()}_MODEL")
-        stt_model = keys.get(f"{stt_provider.upper()}_STT_MODEL") or keys.get(f"{stt_provider.upper()}_MODEL")
+        llm_model = all_settings.get(f"{self.llm_provider.upper()}_MODEL") or all_settings.get("llm_model")
+        tts_voice = all_settings.get(f"{self.tts_provider.upper()}_VOICE_ID") or all_settings.get(f"{self.tts_provider.upper()}_VOICE") or all_settings.get("tts_voice_id")
+        tts_model = all_settings.get(f"{self.tts_provider.upper()}_TTS_MODEL") or all_settings.get(f"{self.tts_provider.upper()}_MODEL") or all_settings.get("tts_model")
+        stt_model = all_settings.get(f"{self.stt_provider.upper()}_STT_MODEL") or all_settings.get(f"{self.stt_provider.upper()}_MODEL") or all_settings.get("stt_model")
 
         now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
         time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
         
         full_system_prompt = system_prompt + time_context
-        self.llm_service = get_llm_service(llm_provider, full_system_prompt, api_key=llm_api_key, model=llm_model)
-        self.tts_service = get_tts_service(tts_provider, api_key=tts_api_key, voice_id=tts_voice, model=tts_model)
-        self.stt_service = get_stt_service(stt_provider, api_key=stt_api_key, model=stt_model)
+        self.llm_service = get_llm_service(self.llm_provider, full_system_prompt, api_key=llm_api_key, model=llm_model)
+        self.tts_service = get_tts_service(self.tts_provider, api_key=tts_api_key, voice_id=tts_voice, model=tts_model)
+        self.stt_service = get_stt_service(self.stt_provider, api_key=stt_api_key, model=stt_model)
         
-        # Store keys globally on instance for TTS/STT loop logic later
-        self.integration_keys = keys
+        # Store keys globally on instance for reference if needed
+        self.integration_keys = all_settings
 
-        # 3. Inject pre-fetched lead/prospect context if provided at start
+        # 4. Inject pre-fetched lead/prospect context if provided at start
         if lead_context:
             self._apply_context_to_prompt(lead_context)
-            
-    def _get_decrypted_integration_keys(self) -> Dict[str, str]:
-        """Safely fetch and decrypt system integration keys (Global and User-Specific)."""
-        db_keys_list = ["DEEPGRAM_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_API_KEY", "SARVAM_API_KEY",
-                        "OPENAI_API_KEY", "MISTRAL_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY",
-                        "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "APOLLO_API_KEY",
-                        "TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM",
-                        "ELEVENLABS_VOICE_ID", "CARTESIA_VOICE_ID", "DEEPGRAM_VOICE", "SARVAM_VOICE_ID",
-                        "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL",
-                        "DEEPGRAM_MODEL", "SARVAM_MODEL", "CARTESIA_MODEL",
-                        "DEEPGRAM_STT_MODEL", "SARVAM_STT_MODEL", "CARTESIA_STT_MODEL",
-                        "DEEPGRAM_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL"]
-        decrypted_keys = {}
         
-        from sqlmodel import or_
-        user_id = self.user.id if self.user else -1
-        
-        # Query for settings belonging to either THIS user or NO user (Global Defaults)
-        settings = self.session.exec(
-            select(SystemSettings).where(
-                or_(SystemSettings.user_id == user_id, SystemSettings.user_id == None),
-                SystemSettings.key.in_(db_keys_list)
-            ).order_by(SystemSettings.user_id) # NULLs usually come first, then specific IDs
-        ).all()
-        
-        # Process settings: user-specific records appear later and will override global ones
-        for s in settings:
-            decrypted_val = decrypt_value(s.value)
-            # If decrypt_value returns the original string or a non-empty decrypted string, store it
-            # We use an explicit "not None" check to allow empty strings if necessary
-            if decrypted_val is not None:
-                decrypted_keys[s.key] = decrypted_val
-                
-        return decrypted_keys
+        self.last_context_type = "general"
 
     def _apply_context_to_prompt(self, context: str):
         """Helper to structure and inject lead context into the LLM service."""
@@ -350,17 +323,9 @@ class VoicePipeline:
             logger.info("📜 Post-call transcript flush complete.")
 
     async def _silence_watcher(self):
-        """Re-engages customer after prolonged silence."""
-        SILENCE_THRESHOLD = 12.0  # seconds
-        CHECK_INTERVAL = 3.0      # check every 3 seconds
-
-        phrases = [
-            "Still with me? Take your time, no rush at all.",
-            "Happy to answer any questions whenever you're ready.",
-            "Just wanted to check — are you still there?",
-            "Take your time, I'm right here whenever you're ready.",
-        ]
-        phrase_index = 0
+        """Re-engages customer after prolonged silence with context-aware phrases."""
+        SILENCE_THRESHOLD = 15  # seconds - reduced for proactive selling
+        CHECK_INTERVAL = 10     # check frequently for high responsiveness
 
         while True:
             await asyncio.sleep(CHECK_INTERVAL)
@@ -371,13 +336,22 @@ class VoicePipeline:
                     and not self.is_rio_speaking 
                     and self.sentence_queue.empty()):
             
-                phrase = phrases[phrase_index % len(phrases)]
-                phrase_index += 1
-                logger.info(f"🔔 [Silence Watcher] {silence_duration:.0f}s of silence — re-engaging")
+                # Select phrase based on the last action context
+                if self.last_context_type == "pricing":
+                    phrase = "Take your time — that's a big decision and I'm happy to walk through it."
+                elif self.last_context_type == "demo":
+                    phrase = "Does that answer your question, or would you like me to go deeper on any part?"
+                else:
+                    phrase = "Still there? Happy to answer anything."
+                
+                logger.info(f"🔔 [Silence Watcher] {silence_duration:.1f}s of silence in '{self.last_context_type}' context — re-engaging")
                 await self.sentence_queue.put(phrase)
             
                 # Reset timer so we don't spam immediately again
                 self.last_customer_speech_time = time.time()
+                
+                # Reset context after re-engaging to avoid repetitive phrases
+                self.last_context_type = "general"
 
 
     async def _speaker_loop(self):
@@ -751,18 +725,20 @@ class VoicePipeline:
                 if full_reply:
                     self.transcript_accumulator.append(f"Rio: {full_reply}")
                     self.save_transcript()
-                    self.save_latency(
-                        f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}", 
-                        stt_latency, 
-                        llm_latency, 
-                        self.tts_service.last_latency,
-                        stt_p=self.stt_service.provider,
-                        stt_m=self.stt_service.model,
-                        llm_p=self.llm_service.provider,
-                        llm_m=self.llm_service.model,
-                        tts_p=self.tts_service.provider,
-                        tts_m=self.tts_service.model
-                    )
+
+                # Always save latency, even for tool-only turns
+                self.save_latency(
+                    f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}", 
+                    stt_latency, 
+                    llm_latency, 
+                    self.tts_service.last_latency,
+                    stt_p=self.stt_service.provider,
+                    stt_m=self.stt_service.model,
+                    llm_p=self.llm_service.provider,
+                    llm_m=self.llm_service.model,
+                    tts_p=self.tts_service.provider,
+                    tts_m=self.tts_service.model
+                )
                 
                 if tool_calls:
                     for tc in tool_calls:
@@ -780,6 +756,13 @@ class VoicePipeline:
                             "check_icp_qualification": "Let me check if this fits your profile.",
                             "check_guardrails":        "Let me check what I can do on pricing.",
                         }
+                        
+                        # Update context for silence re-engagement
+                        if tool_name in ["get_product_info", "check_guardrails"]:
+                            self.last_context_type = "pricing"
+                        elif tool_name in ["book_meeting", "book_demo"]:
+                            self.last_context_type = "demo"
+                        
                         thinking_msg = thinking_phrases.get(tool_name, "One moment, let me look into that for you.")
                         
                         # Only say it if Rio isn't already mid-sentence
@@ -808,6 +791,9 @@ class VoicePipeline:
                                 except Exception as e:
                                     logger.error(f"❌ Failed to link interaction: {e}")
 
+                        except asyncio.CancelledError:
+                            logger.info(f"🛑 [VoicePipeline] Tool execution for '{tool_name}' interrupted by barge-in")
+                            raise # Re-raise to ensure the whole turn is aborted
                         except Exception as e:
                             logger.error(f"❌ Tool Execution Error: {e}")
                             result = {"error": str(e)}

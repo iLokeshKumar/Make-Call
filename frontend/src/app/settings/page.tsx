@@ -91,6 +91,11 @@ export default function SettingsPage() {
                         ENABLEX_APP_ID: "",
                         ENABLEX_APP_KEY: "",
                         ENABLEX_FROM_NUMBER: "",
+                        SMTP_SERVER: "",
+                        SMTP_PORT: "",
+                        SMTP_USERNAME: "",
+                        SMTP_PASSWORD: "",
+                        SMTP_FROM_EMAIL: "",
                         ELEVENLABS_VOICE_ID: "",
                         CARTESIA_VOICE_ID: "",
                         DEEPGRAM_VOICE: "",
@@ -116,10 +121,14 @@ export default function SettingsPage() {
 
 
     const handleSave = async () => {
+        console.log("💾 [Settings] Starting save operation...");
         setSaving(true);
         setSaveSuccess(false);
         try {
             // Save General Settings
+            console.log("📤 [Settings] Patching general settings:", {
+                stt: sttProvider, llm: llmProvider, tts: ttsProvider, telephony: telephonyEngine
+            });
             const res = await fetch(`${CRM_BASE}/settings`, {
                 method: "PATCH",
                 headers: {
@@ -135,12 +144,18 @@ export default function SettingsPage() {
                     ai_verbosity: aiVerbosity
                 }),
             });
+            console.log("📥 [Settings] General settings response status:", res.status);
+            
             if (res.status === 401) {
+                console.error("❌ [Settings] Unauthorized (General)");
                 sessionTimeout();
                 return;
             }
             
             // Save Integration Keys
+            const changedKeys = Object.entries(apiKeys).filter(([k, v]) => v && !v.startsWith("***") && !v.includes("..."));
+            console.log("📤 [Settings] Patching integration keys. Changed count:", changedKeys.length);
+            
             const keysRes = await fetch(`${CRM_BASE}/integrations/keys`, {
                 method: "PATCH",
                 headers: {
@@ -149,13 +164,17 @@ export default function SettingsPage() {
                 },
                 body: JSON.stringify(apiKeys),
             });
+            console.log("📥 [Settings] Integration keys response status:", keysRes.status);
 
             if (res.ok && keysRes.ok) {
+                console.log("✨ [Settings] Save successful!");
                 setSaveSuccess(true);
                 setTimeout(() => setSaveSuccess(false), 3000);
+            } else {
+                console.error("❌ [Settings] Save failed:", res.status, keysRes.status);
             }
         } catch (error) {
-            console.error("Error saving settings:", error);
+            console.error("❌ [Settings] Error saving settings:", error);
         } finally {
             setSaving(false);
         }
@@ -366,8 +385,8 @@ export default function SettingsPage() {
                                         className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
                                         <option value="deepgram">Deepgram Nova-2</option>
-                                        <option value="sarvam">Sarvam Bulbul</option>
-                                        <option value="cartesia">Cartesia Sonic</option>
+                                        <option value="sarvam">Sarvam Saaras</option>
+                                        <option value="cartesia">Cartesia Ink Whisper</option>
                                     </select>
                                 </div>
 
@@ -382,7 +401,7 @@ export default function SettingsPage() {
                                         <option value="mistral">Mistral Large</option>
                                         <option value="anthropic">Claude 3.5 Sonnet</option>
                                         <option value="google">Gemini 1.5 Flash</option>
-                                        <option value="perplexity">Perplexity AI</option>
+                                        <option value="perplexity">Perplexity Sonar</option>
                                         <option value="openrouter">OpenRouter (Inference)</option>
                                         <option value="cerebras">Cerebras (Inference)</option>
                                     </select>
@@ -480,6 +499,7 @@ export default function SettingsPage() {
                                 "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "DEEPGRAM_VOICE"],
                                 "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "SARVAM_VOICE_ID", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL"],
                                 "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL"],
+                                "Email (SMTP)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Enrichment": ["APOLLO_API_KEY"]
                             }).map(([groupName, keys]) => (
                                 <div key={groupName} className="space-y-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">

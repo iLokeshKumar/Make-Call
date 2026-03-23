@@ -4,7 +4,7 @@ import logging
 import json
 import websockets
 import aiohttp
-from utils.config import DEEPGRAM_API_KEY, CARTESIA_API_KEY, CARTESIA_VOICE_ID, SARVAM_API_KEY
+from credentials_service import get_credential
 
 try:
     from sarvamai import AsyncSarvamAI
@@ -54,6 +54,7 @@ class STTService:
             yield {"transcript": "[Error: Cartesia Helper Missing]", "is_final": True}
             return
 
+        CARTESIA_API_KEY = get_credential("CARTESIA_API_KEY")
         if not CARTESIA_API_KEY:
             logger.error("❌ CARTESIA_API_KEY missing.")
             yield {"transcript": "[Error: Cartesia API Key Missing]", "is_final": True}
@@ -112,6 +113,7 @@ class STTService:
             yield {"transcript": "[Error: Sarvam Helper Missing]", "is_final": True}
             return
 
+        SARVAM_API_KEY = get_credential("SARVAM_API_KEY")
         if not SARVAM_API_KEY:
             logger.error("❌ SARVAM_API_KEY missing.")
             yield {"transcript": "[Error: Sarvam API Key Missing]", "is_final": True}
@@ -175,6 +177,7 @@ class STTService:
         self.last_provider = "Deepgram"
         self.last_model = "nova-2"
         
+        DEEPGRAM_API_KEY = get_credential("DEEPGRAM_API_KEY")
         url = f"wss://api.deepgram.com/v1/listen?model=nova-2&encoding={dg_encoding}&sample_rate={sample_rate}&interim_results=true"
         headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
         

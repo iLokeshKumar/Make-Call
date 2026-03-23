@@ -318,7 +318,7 @@ def check_guardrails(requested_discount_percent: float, requested_price: float =
         }
 
 @mcp.tool()
-def send_communication(lead_id: int, channels: list[str], content: str, subject: str = "Message from Rio AI", email: str = None, phone: str = None) -> dict:
+def send_communication(lead_id: int, channels: list[str], content: str, subject: str = "Message from Rio AI", email: str = None, phone: str = None, user_id: int = None) -> dict:
     """
     Sends information to a lead via requested channels (email and/or whatsapp).
     Use this to share product specs, brochures, addresses, or any other requested info.
@@ -361,8 +361,8 @@ def send_communication(lead_id: int, channels: list[str], content: str, subject:
             elif not EMAIL_SERVICE_AVAILABLE:
                 results["email"] = "Failed: Email service unavailable."
             else:
-                html_content = get_styled_html(subject, content, lead.name)
-                success = send_smtp_email(target_email, subject, content, html_body=html_content)
+                html_content = get_styled_html(subject, content, lead.name, user_id=user_id)
+                success = send_smtp_email(target_email, subject, content, html_body=html_content, user_id=user_id)
                 if success:
                     results["email"] = "Sent"
                     successful_channels.append("Email")
@@ -389,6 +389,7 @@ def send_communication(lead_id: int, channels: list[str], content: str, subject:
             channel_str = " & ".join(successful_channels)
             interaction = Interaction(
                 lead_id=lead_id,
+                user_id=user_id,
                 type="Multi-Channel Communication",
                 content=f"Sent {channel_str}: {content[:100]}...",
                 timestamp=datetime.now(timezone.utc)
@@ -445,17 +446,9 @@ def send_email(phone: str, email: str, subject: str, body: str) -> dict:
                 timestamp=datetime.now(timezone.utc)
             )
             session.add(interaction)
-
-            # 5. Track Outcome (Stage: Interest)
-            outcome = Outcome(
-                lead_id=lead.id if lead else 0,
-                type="EMAIL_SENT",
-                stage="Interest",
-                potential_value=1200.0,
-                probability=0.05 
-            )
-            session.add(outcome)
             session.commit()
+            # NOTE: Sending a follow-up email is NOT a pipeline stage change.
+            # Outcome rows are only created by book_meeting (a real qualification event).
             return {"success": True, "message": f"Email '{subject}' sent to {target_email} and logged."}
         else:
             return {"success": False, "message": "SMTP failure. Check environmental variables."}
@@ -619,7 +612,23 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             session.commit()
             appointment_id = result.scalar()
             logger.info(f"[book_meeting] Appointment created: ID={appointment_id}")
-            
+
+            # STEP 3b: Record pipeline Outcome — Demo Booked = Qualification stage
+            try:
+                outcome = Outcome(
+                    lead_id=lead_id,
+                    type="DEMO_BOOKED",
+                    stage="Qualification",
+                    potential_value=0.0,   # Unknown until discussed — admin editable from UI
+                    probability=0.30,      # 30% baseline for a booked demo
+                    notes=f"Demo booked via AI call. Meeting type: {meeting_type}"
+                )
+                session.add(outcome)
+                session.commit()
+                logger.info(f"[book_meeting] Pipeline Outcome recorded for lead {lead_id} (stage=Qualification)")
+            except Exception as oe:
+                logger.warning(f"[book_meeting] Could not record Outcome: {oe}")
+
             # STEP 4: Send email with calendar invite and Meet link
             email_sent = False
             email_error = None
@@ -747,7 +756,7 @@ async def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "de
             }
 
 @mcp.tool()
-async def book_demo(lead_id: int, name: str, phone: str, demo_date: str, products: str, city: str = None, state: str = None, pincode: str = None, demo_type: str = "Online", email: str = None, notes: str = None, user: User = None) -> dict:
+async def book_demo(lead_id: int, name: str, phone: str, demo_date: str, products: str, city: str = None, state: str = None, pincode: str = None, demo_type: str = "Online", email: str = None, notes: str = None, user: User = None, user_id: int = None) -> dict:
     """
     Records a demo request with contact information, location, and product interest.
     Use this when a lead wants to schedule a demo for specific products.
@@ -848,6 +857,7 @@ async def book_demo(lead_id: int, name: str, phone: str, demo_date: str, product
         interactionContent = f"Booked Demo for {products} | {name} ({normalized_phone}) at {city}, {state} ({pincode}) for {demo_date}"
         interaction = Interaction(
             lead_id=lead_id,
+            user_id=user_id or (user.id if user else None),
             type="Demo Booking",
             content=interactionContent,
             timestamp=datetime.now(timezone.utc)
@@ -869,8 +879,9 @@ async def book_demo(lead_id: int, name: str, phone: str, demo_date: str, product
                 subject = f"{demo_type} Demo Confirmation - {products}"
                 meet_text = f"\n\nGoogle Meet Link: {google_meet_link}" if google_meet_link else ""
                 body = f"Hi {name},\n\nYour {demo_type.lower()} demo request for {products} has been recorded for {demo_date}.{meet_text}\n\nLocation: {city}, {state}, {pincode}\nOur team will contact you soon to finalize the details."
-                html_content = get_styled_html(subject, body, name)
-                email_sent = send_smtp_email(target_email, subject, body, html_body=html_content)
+                current_user_id = user_id or (user.id if user else None)
+                html_content = get_styled_html(subject, body, name, user_id=current_user_id)
+                email_sent = send_smtp_email(target_email, subject, body, html_body=html_content, user_id=current_user_id)
                 if email_sent:
                     logger.info(f"[book_demo] Confirmation email sent to {target_email}")
             except Exception as e:

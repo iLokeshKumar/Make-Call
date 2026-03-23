@@ -11,9 +11,9 @@ logger = logging.getLogger(__name__)
 class CartesiaTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Cartesia"
-        self.model = model or settings_cache.get("CARTESIA_TTS_MODEL") or "sonic-3"
+        self.model = model or "sonic-3"
         self.api_key = api_key
-        self.voice_id = voice_id or settings_cache.get("CARTESIA_VOICE_ID") or "694f9369-aef9-5dba-99c5-6c1d27e44b9a"
+        self.voice_id = voice_id or "694f9369-aef9-5dba-99c5-6c1d27e44b9a"
         self.last_latency = 0
         
         if not self.api_key:

@@ -87,9 +87,27 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     
     # Robust Interaction ID parsing
     interaction_id = websocket.query_params.get("interaction_id")
-    if not interaction_id or interaction_id == "None":
-        interaction_id = f"session_{uuid.uuid4().hex[:8]}"
-        logger.info(f"Assigning fallback Interaction ID: {interaction_id}")
+    
+    # If interaction_id is a session string or missing, create a placeholder Interaction record immediately 
+    # so we have a numeric ID for latency logging and linking.
+    if not interaction_id or not interaction_id.isdigit():
+        try:
+            db_i = Interaction(
+                lead_id=int(websocket.query_params.get("lead_id", "0")),
+                type="call",
+                content="Inbound Call",
+                timestamp=datetime.now(timezone.utc),
+                created_by="Rio AI"
+            )
+            session.add(db_i)
+            session.commit()
+            session.refresh(db_i)
+            interaction_id = str(db_i.id)
+            logger.info(f"✨ Created numeric Interaction ID: {interaction_id} (Replaced session string)")
+        except Exception as e:
+            fallback_id = f"session_{uuid.uuid4().hex[:8]}"
+            logger.warning(f"⚠️ Failed to create numeric Interaction ID: {e}. Using fallback: {fallback_id}")
+            interaction_id = fallback_id
     
     # Pre-fetch lead context
     lead_id = websocket.query_params.get("lead_id", "0")
@@ -104,18 +122,28 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
         logger.error(f"❌ Error during lead pre-fetch: {e}")
         pass
 
-    # Use cached settings
-    all_settings = settings_cache.get_all()
+    # Identify relevant user for settings & branding
+    # Ideally, we look up the Lead first, then find which User 'owns' this lead or which User initiated the call.
+    # For now, we attempt to find the user from the lead's 'created_by' or default to the primary admin.
+    target_user = None
+    if lead_id and int(lead_id) > 0:
+        lead_obj = session.get(Lead, int(lead_id))
+        if lead_obj and lead_obj.created_by:
+            target_user = session.exec(select(User).where(User.username == lead_obj.created_by)).first()
     
-    # Fetch admin user for company name
-    admin_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
-    if admin_user:
-        logger.info(f"👤 Found User for Branding: {admin_user.username} (ID: {admin_user.id}) | Company: {admin_user.company_name}")
+    if not target_user:
+        target_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
+    
+    user_id = target_user.id if target_user else None
+    all_settings = settings_cache.get_all(user_id)
+    
+    if target_user:
+        logger.info(f"👤 Using settings/branding for User: {target_user.username} (ID: {user_id}) | Company: {target_user.company_name}")
     else:
-        logger.warning("⚠️ No users found in database for branding!")
+        logger.warning("⚠️ No users found in database!")
 
-    company_name = admin_user.company_name if admin_user and admin_user.company_name else "Rio CRM"
-    company_website = admin_user.company_website if admin_user and admin_user.company_website else "https://rio-crm.example.com/"
+    company_name = target_user.company_name if target_user and target_user.company_name else "Rio CRM"
+    company_website = target_user.company_website if target_user and target_user.company_website else "https://rio-crm.example.com/"
     
     system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
     logger.info(f"📜 Original System Prompt (first 50 chars): {system_prompt[:50]}...")
@@ -152,7 +180,7 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
             llm_provider=llm_provider,
             tts_provider=tts_provider,
             company_name=company_name,
-            user=admin_user,
+            user=target_user,
             lead_context=None, # Loaded proactively by pipeline
         )
         logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Providers: STT={stt_provider}, LLM={llm_provider}, TTS={tts_provider} | Company: {company_name}")
@@ -179,8 +207,27 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
         # Fallback for FastAPI versions that don't support headers in accept()
         await websocket.accept()
 
-    interaction_id = websocket.query_params.get("interaction_id", f"exo_{uuid.uuid4().hex[:8]}")
+    interaction_id = websocket.query_params.get("interaction_id")
     lead_id = websocket.query_params.get("lead_id", "0")
+
+    # Ensure numeric Interaction ID
+    if not interaction_id or not interaction_id.isdigit():
+        try:
+            db_i = Interaction(
+                lead_id=int(lead_id),
+                type="call",
+                content="Inbound Call",
+                timestamp=datetime.now(timezone.utc),
+                created_by="Rio AI"
+            )
+            session.add(db_i)
+            session.commit()
+            session.refresh(db_i)
+            interaction_id = str(db_i.id)
+            logger.info(f"✨ [Exotel] Created numeric Interaction ID: {interaction_id}")
+        except Exception as e:
+            interaction_id = f"exo_{uuid.uuid4().hex[:8]}"
+            logger.warning(f"⚠️ [Exotel] Failed to create numeric ID: {e}. Using fallback: {interaction_id}")
 
     # Pre-fetch lead context
     lead_id = websocket.query_params.get("lead_id", "0")
@@ -195,9 +242,19 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
         logger.error(f"❌ Error during exotel lead pre-fetch: {e}")
         pass
 
-    all_settings = settings_cache.get_all()
-    admin_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
-    company_name = admin_user.company_name if admin_user and admin_user.company_name else "Rio CRM"
+    # Exotel user identification
+    target_user = None
+    if lead_id and int(lead_id) > 0:
+        lead_obj = session.get(Lead, int(lead_id))
+        if lead_obj and lead_obj.created_by:
+            target_user = session.exec(select(User).where(User.username == lead_obj.created_by)).first()
+    
+    if not target_user:
+        target_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
+    
+    user_id = target_user.id if target_user else None
+    all_settings = settings_cache.get_all(user_id)
+    company_name = target_user.company_name if target_user and target_user.company_name else "Rio CRM"
 
     system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
     for ph in ["{company_name}", "Yexis Electronics (Chennai)", "Yexis Electronics", "Rio CRM"]:
@@ -221,7 +278,7 @@ async def handle_exotel_media_stream(websocket: WebSocket, session: Session = De
         llm_provider=llm_provider,
         tts_provider=tts_provider,
         company_name=company_name,
-        user=admin_user,
+        user=target_user,
         lead_context=lead_context,
         audio_encoding="linear16",
         audio_sample_rate=8000,

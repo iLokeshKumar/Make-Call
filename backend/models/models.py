@@ -58,6 +58,7 @@ class DemoCreate(SQLModel):
 class Interaction(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     lead_id: int
+    user_id: Optional[int] = Field(default=None, foreign_key="user.id", index=True)
     type: str  
     content: str
     transcript: Optional[str] = None
@@ -116,6 +117,7 @@ class User(AuditMixin, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True)
     email: str = Field(unique=True, index=True)
+    email_hash: Optional[str] = Field(default=None, index=True)
     hashed_password: str
     role: str = Field(default="sales_rep")
     mfa_secret: Optional[str] = None
@@ -127,6 +129,7 @@ class User(AuditMixin, table=True):
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     phone_number: Optional[str] = None
+    phone_number_hash: Optional[str] = Field(default=None, index=True)
     profile_picture_url: Optional[str] = None
     reveal_otp: Optional[str] = None
     reveal_otp_expires_at: Optional[datetime] = None
@@ -180,3 +183,11 @@ class RevealOTPVerify(SQLModel):
 class ResendVerification(SQLModel):
     email: Optional[str] = None
     username: Optional[str] = None
+
+class Credential(AuditMixin, table=True):
+    id: Optional[int] = Field(default=None, primary_key=True)
+    key: str = Field(unique=True, index=True)
+    encrypted_value: str
+    service_group: str = Field(default="general")
+    label: str
+    is_set: bool = Field(default=False)

@@ -47,3 +47,13 @@ def decrypt_value(encrypted_value: str) -> str:
     except Exception as e:
         logger.error(f"Decryption failed: {e}")
         return ""
+import hmac
+import hashlib
+
+def generate_blind_index(value: str) -> str:
+    """ Generates a deterministic hash for indexing/searching encrypted values. """
+    if not value:
+        return ""
+    # We use SECRET_KEY as a salt for the blind index
+    salt = os.getenv("SECRET_KEY", "default_salt_for_indexing").encode()
+    return hmac.new(salt, value.lower().strip().encode(), hashlib.sha256).hexdigest()

@@ -53,9 +53,9 @@ class SarvamTTS:
 
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Sarvam"
-        self.model = model or settings_cache.get("SARVAM_TTS_MODEL") or "bulbul:v3"
+        self.model = model or "bulbul:v3"
         self.api_key = api_key
-        self.speaker = voice_id or settings_cache.get("SARVAM_VOICE_ID") or "ritu"
+        self.speaker = voice_id or "ritu"
         self.last_latency = 0.0
 
         if not self.api_key:

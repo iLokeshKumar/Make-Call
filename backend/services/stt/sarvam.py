@@ -39,7 +39,7 @@ class SarvamSTT:
 
     def __init__(self, api_key: str = None, language: str = "en-IN", model: str = None):
         self.provider = "Sarvam"
-        self.model = model or settings_cache.get("SARVAM_STT_MODEL") or "saaras:v3"
+        self.model = model or "saaras:v3"
         self.language = language
         self.api_key = api_key
 

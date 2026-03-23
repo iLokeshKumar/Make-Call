@@ -28,8 +28,6 @@ if "postgresql" in DATABASE_URL:
 else:
     engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=True)
 
-
-
 from models.models import (
     Lead, Interaction, Product, SystemSettings, Appointment, 
     Outcome, LatencyLog, User, AuditMixin, LeadCreate, UserCreate,
@@ -59,10 +57,11 @@ RULES:
 4. Don't hallucinate tools; use exactly what you have bound.
 """
             session.add(SystemSettings(key="system_instruction", value=default_instruction))
+            
 
         # Seed AI Verbosity if empty (1: Ultra-Concise, 2: Balanced, 3: Detailed)
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first():
-            session.add(SystemSettings(key="ai_verbosity", value="2"))
+            session.add(SystemSettings(key="ai_verbosity", value="1"))
         
         # Seed Voice Engine if empty
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "llm_provider")).first():
@@ -74,13 +73,37 @@ RULES:
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "tts_model")).first():
             session.add(SystemSettings(key="tts_model", value="aura-asteria-en"))
 
+        # Seed LLM model defaults (global, user_id=None)
+        _model_defaults = [
+            ("MISTRAL_MODEL",    "mistral-small-latest"),
+            ("CEREBRAS_MODEL",   "gpt-oss-120b"),
+            ("OPENROUTER_MODEL", "openai/gpt-4o-mini"),
+            ("GEMINI_MODEL",     "gemini-2.0-flash"),
+            ("OPENAI_MODEL",     "gpt-4o-mini"),
+        ]
+        for key, default_val in _model_defaults:
+            if not session.exec(select(SystemSettings).where(SystemSettings.key == key, SystemSettings.user_id == None)).first():
+                session.add(SystemSettings(key=key, value=default_val))
+
+        # Seed voice ID / STT model defaults (global, user_id=None)
+        _voice_defaults = [
+            ("CARTESIA_VOICE_ID",   "a0e99841-438c-4a64-b679-ae501e7d6091"),
+            ("ELEVENLABS_VOICE_ID", "CwhOLp6mAE7h9asvUURR"),
+            ("DEEPGRAM_VOICE",      "aura-asteria-en"),
+            ("DEEPGRAM_STT_MODEL",  "nova-2"),
+            ("CARTESIA_STT_MODEL",  "ink-whisper"),
+        ]
+        for key, default_val in _voice_defaults:
+            if not session.exec(select(SystemSettings).where(SystemSettings.key == key, SystemSettings.user_id == None)).first():
+                session.add(SystemSettings(key=key, value=default_val))
+
         # Seed Telephony Engine if empty
         if not session.exec(select(SystemSettings).where(SystemSettings.key == "telephony_engine")).first():
             session.add(SystemSettings(key="telephony_engine", value="twilio"))
         
         # Seed AI Verbosity if empty (1: Ultra-Concise, 2: Balanced, 3: Detailed)
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first():
-            session.add(SystemSettings(key="ai_verbosity", value="2"))
+        # if not session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first():
+        #     session.add(SystemSettings(key="ai_verbosity", value="2"))
 
         # Seed Products if empty
         if not session.exec(select(Product)).first():

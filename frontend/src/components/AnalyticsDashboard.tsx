@@ -130,7 +130,7 @@ function KpiCard({
 // Main Component
 
 export default function AnalyticsDashboard() {
-  const { token } = useAuth();
+  const { token, sessionTimeout } = useAuth();
   const [data, setData]             = useState<AnalyticsData | null>(null);
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -154,6 +154,10 @@ export default function AnalyticsDashboard() {
       const res = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       });
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
       if (res.ok) { setData(await res.json()); setLastAt(new Date()); }
     } finally {
       setLoading(false); setRefreshing(false);

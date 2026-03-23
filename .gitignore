@@ -62,3 +62,6 @@ dist-ssr/
 .idea/
 *.swp
 *.swo
+
+# Claude
+.claude/

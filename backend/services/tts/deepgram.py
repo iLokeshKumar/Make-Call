@@ -3,14 +3,14 @@ import base64
 import logging
 import time
 import aiohttp
-from utils.config import DEEPGRAM_VOICE
+from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
 
 class DeepgramTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Deepgram"
-        self.model = model or voice_id or DEEPGRAM_VOICE
+        self.model = model or voice_id or get_credential("DEEPGRAM_VOICE") or "aura-asteria-en"
         self.api_key = api_key
         self.last_latency = 0
         

@@ -17,11 +17,9 @@ from twilio.twiml.messaging_response import MessagingResponse
 
 from database import get_session, engine
 from models.models import Lead, Interaction, SystemSettings, Product, ApolloSearch, User
-from utils.config import (
-    DOMAIN, twilio_client, PHONE_NUMBER_FROM, 
-    EXOTEL_ACCOUNT_SID, EXOTEL_API_KEY, EXOTEL_API_TOKEN,
-    ENABLEX_APP_ID, ENABLEX_APP_KEY, EXOPHONE, EXOTEL_APP_ID, ENABLEX_FROM_NUMBER,
-)
+import os
+from utils.config import DOMAIN
+from credentials_service import get_credential
 from utils.phone import normalize_phone
 from utils.lead_utils import get_comprehensive_lead_context
 from auth import RoleChecker
@@ -30,17 +28,26 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Telephony"])
 
-@router.post("/incoming-call")
-async def incoming_call(request: Request, lead_id: int = None):
+@router.post("/outgoing-call")
+async def outgoing_call(request: Request, lead_id: int = None):
     """Returns TwiML to connect the call to the WebSocket stream."""
     response = VoiceResponse()
 
     # Create an interaction record
     with Session(engine) as session:
+        # Get lead phone for better labeling
+        lead_phone = ""
+        if lead_id and lead_id > 0:
+            lead = session.get(Lead, lead_id)
+            if lead:
+                lead_phone = lead.phone
+        
+        content = f"Outbound to Lead #{lead_id}" if lead_id and lead_id > 0 else "Outbound Call"
+        
         interaction = Interaction(
             lead_id=lead_id if lead_id else 0,
             type="call",
-            content="Outbound call (Twilio)",
+            content=content,
             timestamp=datetime.now(timezone.utc)
         )
         session.add(interaction)
@@ -90,20 +97,20 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
             to = f"+{clean_number}" if not to.startswith("+") else to
             
         with Session(engine) as session:
-            # Fetch user keys
-            user_keys = session.exec(
-                select(SystemSettings).where(
-                    SystemSettings.user_id == current_user.id,
-                    SystemSettings.key.in_(["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", 
-                                            "EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"])
-                )
-            ).all()
-            keys = {s.key: decrypt_value(s.value) for s in user_keys}
+            # Unified Credential Retrieval (Priority: User DB -> Global DB -> .env)
+            sid = get_credential("TWILIO_ACCOUNT_SID", user_id=current_user.id) or os.getenv("TWILIO_ACCOUNT_SID")
+            token = get_credential("TWILIO_AUTH_TOKEN", user_id=current_user.id) or os.getenv("TWILIO_AUTH_TOKEN")
+            from_number = get_credential("PHONE_NUMBER_FROM", user_id=current_user.id) or os.getenv("PHONE_NUMBER_FROM")
 
-            # Fallback to defaults from env if missing in DB
-            sid = keys.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
-            token = keys.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
-            from_number = keys.get("PHONE_NUMBER_FROM") or os.getenv("PHONE_NUMBER_FROM")
+            logger.info(f"📞 [telephony] Attempting call for user {current_user.username} (ID: {current_user.id})")
+            logger.info(f"🔑 [telephony] Using SID: {sid[:6]}...{sid[-4:] if sid else 'NONE'}")
+            
+            # Additional keys for other providers in case needed
+            exotel_sid = get_credential("EXOTEL_ACCOUNT_SID", user_id=current_user.id) or os.getenv("EXOTEL_ACCOUNT_SID")
+            exotel_key = get_credential("EXOTEL_API_KEY", user_id=current_user.id) or os.getenv("EXOTEL_API_KEY")
+            exotel_token = get_credential("EXOTEL_API_TOKEN", user_id=current_user.id) or os.getenv("EXOTEL_API_TOKEN")
+            exophone = get_credential("EXOPHONE", user_id=current_user.id) or os.getenv("EXOPHONE")
+            app_id = get_credential("EXOTEL_APP_ID", user_id=current_user.id) or os.getenv("EXOTEL_APP_ID")
 
             # ROBUST LEAD LOOKUP: If lead_id is missing, search by normalized phone number
             if not lead_id or lead_id == 0:
@@ -132,18 +139,14 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
         if active_telephony == "twilio":
             client = TwilioClient(sid, token)
             call = client.calls.create(
-                url=f"https://{DOMAIN}/incoming-call?lead_id={lead_id or 0}",
+                url=f"https://{DOMAIN}/outgoing-call?lead_id={lead_id or 0}",
                 to=to,
                 from_=from_number
             )
             return {"message": "Twilio Call initiated", "call_sid": call.sid}
         
         elif active_telephony == "exotel":
-            exotel_sid = keys.get("EXOTEL_ACCOUNT_SID") or os.getenv("EXOTEL_ACCOUNT_SID")
-            exotel_key = keys.get("EXOTEL_API_KEY") or os.getenv("EXOTEL_API_KEY")
-            exotel_token = keys.get("EXOTEL_API_TOKEN") or os.getenv("EXOTEL_API_TOKEN")
-            exophone = keys.get("EXOPHONE") or os.getenv("EXOPHONE")
-            app_id = keys.get("EXOTEL_APP_ID") or os.getenv("EXOTEL_APP_ID")
+            # Keys already fetched above using get_credential
 
             url = f"https://api.exotel.com/v1/Accounts/{exotel_sid}/Calls/connect.json"
             exoml_url = f"https://{DOMAIN}/exoml-start/{interaction_id or 'default'}?lead_id={lead_id or 0}&ngrok-skip-browser-warning=1"
@@ -167,9 +170,9 @@ async def make_call(to: str, lead_id: Optional[int] = None, engine_type: str = "
         
         elif active_telephony == "enablex":
             # EnableX Outbound
-            enablex_id = keys.get("ENABLEX_APP_ID") or os.getenv("ENABLEX_APP_ID")
-            enablex_key = keys.get("ENABLEX_APP_KEY") or os.getenv("ENABLEX_APP_KEY")
-            enablex_from = keys.get("ENABLEX_FROM_NUMBER") or os.getenv("ENABLEX_FROM_NUMBER")
+            enablex_id = get_credential("ENABLEX_APP_ID", user_id=current_user.id) or os.getenv("ENABLEX_APP_ID")
+            enablex_key = get_credential("ENABLEX_APP_KEY", user_id=current_user.id) or os.getenv("ENABLEX_APP_KEY")
+            enablex_from = get_credential("ENABLEX_FROM_NUMBER", user_id=current_user.id) or os.getenv("ENABLEX_FROM_NUMBER")
 
             logger.info(f"Initiating EnableX Call to: {to}")
             enablex_auth = base64.b64encode(f"{enablex_id}:{enablex_key}".encode()).decode()
@@ -253,7 +256,9 @@ async def enablex_event(request: Request, lead_id: int = None):
         ws_domain = DOMAIN.replace("https://", "").replace("http://", "").rstrip("/")
         ws_url = f"wss://{ws_domain}/enablex-media-stream?voice_id={voice_id}&lead_id={lead_id or 0}"
         
-        enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
+        enablex_id  = get_credential("ENABLEX_APP_ID")
+        enablex_key = get_credential("ENABLEX_APP_KEY")
+        enablex_auth = base64.b64encode(f"{enablex_id}:{enablex_key}".encode()).decode()
         headers = {"Authorization": f"Basic {enablex_auth}", "Content-Type": "application/json"}
         
         # payload = {"action": "streaming", "url": ws_url, "stream_type": "both", "play_on_connect": True}
@@ -278,17 +283,11 @@ async def send_sms(to: str, message: str, current_user: User = Depends(RoleCheck
     from twilio.rest import Client as TwilioClient
     try:
         with Session(engine) as session:
-            user_keys = session.exec(
-                select(SystemSettings).where(
-                    SystemSettings.user_id == current_user.id,
-                    SystemSettings.key.in_(["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM"])
-                )
-            ).all()
-            keys = {s.key: decrypt_value(s.value) for s in user_keys}
+            sid = get_credential("TWILIO_ACCOUNT_SID", user_id=current_user.id) or os.getenv("TWILIO_ACCOUNT_SID")
+            token = get_credential("TWILIO_AUTH_TOKEN", user_id=current_user.id) or os.getenv("TWILIO_AUTH_TOKEN")
+            from_num = get_credential("PHONE_NUMBER_FROM", user_id=current_user.id) or os.getenv("PHONE_NUMBER_FROM")
             
-            sid = keys.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
-            token = keys.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
-            from_num = keys.get("PHONE_NUMBER_FROM") or os.getenv("PHONE_NUMBER_FROM")
+            logger.info(f"📤 [telephony] Sending SMS via {sid[:6]}...")
             
             client = TwilioClient(sid, token)
             msg = client.messages.create(to=to, from_=from_num, body=message)

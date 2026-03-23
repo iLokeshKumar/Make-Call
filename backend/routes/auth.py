@@ -1,5 +1,6 @@
 import random
 import uuid
+import logging
 from datetime import timedelta, datetime, timezone
 from typing import Optional
 
@@ -18,6 +19,9 @@ from auth import (
 )
 from email_service import send_smtp_email, get_styled_html
 from google_calendar_service import GoogleMeetGenerator
+from utils.encryption import encrypt_value, decrypt_value, generate_blind_index
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["Authentication"])
 
@@ -86,7 +90,7 @@ async def enable_mfa(verify: MFAVerify, current_user: User = Depends(get_current
             "Your account is now protected with 2FA.<br><br>You will be required to enter a code from your authenticator app every time you log in.",
             current_user.username
         )
-        send_smtp_email(current_user.email, subject, email_body, styled_html)
+        send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
 
         return {"message": "MFA enabled successfully"}
 
@@ -108,7 +112,7 @@ async def request_mfa_disable(current_user: User = Depends(get_current_active_us
         current_user.username
     )
     
-    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
     
     return {"message": "OTP sent to your registered email"}
 
@@ -133,7 +137,7 @@ async def verify_mfa_disable(request: MFADisableRequest, current_user: User = De
         "Two-Factor Authentication has been removed from your account.",
         current_user.username
     )
-    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
     
     return {"message": "MFA disabled successfully"}
 
@@ -146,12 +150,12 @@ async def delete_my_account(current_user: User = Depends(get_current_active_user
     subject = "Your Rio CRM Account has been Deleted"
     email_body = f"Hello {user_name},\n\nYour account has been successfully deleted from Rio CRM."
     styled_html = get_styled_html(
-        subject, 
+        "Account Deleted",
         f"Your account with the role <strong>{user_role}</strong> has been successfully removed from our system.", 
         user_name
     )
     
-    send_smtp_email(user_email, subject, email_body, styled_html)
+    send_smtp_email(user_email, subject, email_body, styled_html, user_id=current_user.id)
 
     session.delete(current_user)
     session.commit()
@@ -163,18 +167,20 @@ async def register_user(user: UserCreate, session: Session = Depends(get_session
     if existing_user_name:
         raise HTTPException(status_code=400, detail="Username already registered")
     
-    existing_user_email = session.exec(select(User).where(User.email == user.email)).first()
+    existing_user_email = session.exec(select(User).where(User.email_hash == generate_blind_index(user.email))).first()
     if existing_user_email:
         raise HTTPException(status_code=400, detail="Email already registered")
     
     verification_token = str(uuid.uuid4())
     db_user = User(
         username=user.username,
-        email=user.email,
+        email=encrypt_value(user.email),
+        email_hash=generate_blind_index(user.email),
         hashed_password=get_password_hash(user.password),
         first_name=user.first_name,
         last_name=user.last_name,
-        phone_number=user.phone_number,
+        phone_number=encrypt_value(user.phone_number),
+        phone_number_hash=generate_blind_index(user.phone_number),
         is_active=True,
         email_verified=False,
         verification_token=verification_token
@@ -187,7 +193,7 @@ async def register_user(user: UserCreate, session: Session = Depends(get_session
     email_body = f"Welcome to Rio CRM! Please verify your email by clicking the link below:\n\n{verify_link}"
     styled_html = get_styled_html("Verify Your Email", f"Please click the button below to verify your account.<br><br><a href='{verify_link}' class='btn' style='color: white;'>Verify Email</a>", db_user.username)
     
-    send_smtp_email(db_user.email, "Verify Your Rio CRM Account", email_body, styled_html)
+    send_smtp_email(user.email, "Verify Your Rio CRM Account", email_body, styled_html)
 
     return db_user
 
@@ -207,7 +213,7 @@ async def verify_email(token: str, session: Session = Depends(get_session)):
 async def resend_verification(data: ResendVerification, session: Session = Depends(get_session)):
     user = None
     if data.email:
-        user = session.exec(select(User).where(User.email == data.email)).first()
+        user = session.exec(select(User).where(User.email_hash == generate_blind_index(data.email))).first()
     elif data.username:
         user = session.exec(select(User).where(User.username == data.username)).first()
     
@@ -239,7 +245,11 @@ async def update_users_me(
 ):
     update_data = user_update.model_dump(exclude_unset=True)
     for key, value in update_data.items():
-        setattr(current_user, key, value)
+        if key == "phone_number" and value:
+            setattr(current_user, "phone_number", encrypt_value(value))
+            setattr(current_user, "phone_number_hash", generate_blind_index(value))
+        else:
+            setattr(current_user, key, value)
     
     current_user.updated_at = datetime.now(timezone.utc)
     current_user.updated_by = current_user.username
@@ -265,7 +275,7 @@ async def request_reveal_otp(current_user: User = Depends(get_current_active_use
         current_user.username
     )
     
-    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
     
     return {"message": "OTP sent to your registered email"}
 
@@ -274,11 +284,6 @@ async def verify_reveal_otp(verify: RevealOTPVerify, current_user: User = Depend
     if not current_user.reveal_otp or verify.token != current_user.reveal_otp:
         raise HTTPException(status_code=400, detail="Invalid OTP")
     
-    if current_user.reveal_otp_expires_at and datetime.now(timezone.utc).replace(tzinfo=None) > current_user.reveal_otp_expires_at.replace(tzinfo=None):
-         # Note: SQLModel might return naive datetimes or offset-aware depending on DB. 
-         # Best to normalize. I'll use timezone.utc throughout.
-         pass
-
     # Re-comparing properly with timezone awareness
     now = datetime.now(timezone.utc)
     # Ensure reveal_otp_expires_at is timezone-aware if it's not
@@ -295,7 +300,7 @@ async def verify_reveal_otp(verify: RevealOTPVerify, current_user: User = Depend
     session.add(current_user)
     session.commit()
     
-    return {"message": "Verification successful", "email": current_user.email, "phone_number": current_user.phone_number}
+    return {"message": "Verification successful", "email": decrypt_value(current_user.email), "phone_number": decrypt_value(current_user.phone_number)}
 
 @router.post("/auth/upload-avatar")
 async def upload_avatar(
@@ -314,6 +319,7 @@ async def upload_avatar(
     except Exception as e:
         logger.error(f"❌ Avatar Upload Error: {e}")
         raise HTTPException(status_code=500, detail="Failed to upload avatar")
+
 @router.get("/auth/google/url")
 async def get_google_auth_url(current_user: User = Depends(get_current_active_user)):
     """Returns the URL for the user to visit and authorize Google Calendar."""

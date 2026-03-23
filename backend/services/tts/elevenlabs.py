@@ -4,7 +4,7 @@ import logging
 import time
 import aiohttp
 import audioop
-from utils.config import ELEVENLABS_VOICE_ID
+from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +13,7 @@ class ElevenLabsTTS:
         self.provider = "ElevenLabs"
         self.model = model or "eleven_turbo_v2_5"
         self.api_key = api_key
-        self.voice_id = voice_id or ELEVENLABS_VOICE_ID
+        self.voice_id = voice_id or get_credential("ELEVENLABS_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
         self.last_latency = 0
         
         if not self.api_key:

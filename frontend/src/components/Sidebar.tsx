@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
@@ -25,6 +25,37 @@ export default function Sidebar() {
   const pathname = usePathname();
   const { user, token, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
+  
+  // Resizing State
+  const [sidebarWidth, setSidebarWidth] = useState(288); // Default w-72 = 288px
+  const [isResizing, setIsResizing] = useState(false);
+
+  const startResizing = useCallback((e: React.MouseEvent) => {
+    e.preventDefault();
+    setIsResizing(true);
+  }, []);
+
+  const stopResizing = useCallback(() => {
+    setIsResizing(false);
+  }, []);
+
+  const resize = useCallback((e: MouseEvent) => {
+    if (isResizing) {
+      const newWidth = e.clientX;
+      if (newWidth > 80 && newWidth < 450) {
+        setSidebarWidth(newWidth);
+      }
+    }
+  }, [isResizing]);
+
+  useEffect(() => {
+    window.addEventListener("mousemove", resize);
+    window.addEventListener("mouseup", stopResizing);
+    return () => {
+      window.removeEventListener("mousemove", resize);
+      window.removeEventListener("mouseup", stopResizing);
+    };
+  }, [resize, stopResizing]);
 
   // OTP Reveal State
   const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
@@ -94,17 +125,29 @@ export default function Sidebar() {
     <>
       <div
         className={clsx(
-          "flex h-screen flex-col bg-white dark:bg-slate-900/60 border-r border-slate-200 dark:border-white/10 relative overflow-hidden transition-all duration-300",
-          isCollapsed ? "w-20" : "w-72"
+          "flex h-screen flex-col bg-white dark:bg-slate-900/60 border-r border-slate-200 dark:border-white/10 relative overflow-hidden transition-all duration-300 select-none",
+          isResizing && "transition-none" // Disable transitions while resizing for smoothness
         )}
+        style={{ width: isCollapsed ? 80 : sidebarWidth }}
       >
         {/* Animated Background Gradient */}
         <div className="absolute inset-0 bg-gradient-to-br from-violet-500/5 via-blue-500/5 to-purple-500/5 dark:from-violet-500/10 dark:via-blue-500/10 dark:to-purple-500/10 animate-pulse opacity-40 dark:opacity-30 pointer-events-none" />
 
+        {/* Resize Handle */}
+        {!isCollapsed && (
+          <div
+            onMouseDown={startResizing}
+            className={clsx(
+              "absolute top-0 right-0 z-[60] h-full w-1 cursor-col-resize transition-all hover:bg-violet-500/30",
+              isResizing ? "bg-violet-500/50 w-1.5" : "bg-transparent"
+            )}
+          />
+        )}
+
         {/* Collapse Toggle Button */}
         <button
           onClick={() => setIsCollapsed(!isCollapsed)}
-          className="absolute -right-3 top-10 z-50 flex h-6 w-6 items-center justify-center rounded-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-violet-600 dark:hover:text-white hover:border-violet-400 dark:hover:border-violet-500 transition-all duration-300 shadow-lg"
+          className="absolute -right-3 top-10 z-[70] flex h-6 w-6 items-center justify-center rounded-full bg-white dark:bg-slate-800 border border-slate-300 dark:border-slate-700 text-slate-500 dark:text-slate-400 hover:text-violet-600 dark:hover:text-white hover:border-violet-400 dark:hover:border-violet-500 transition-all duration-300 shadow-lg"
         >
           {isCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
         </button>

@@ -237,7 +237,7 @@ async def enable_mfa(verify: MFAVerify, current_user: User = Depends(get_current
             "Your account is now protected with 2FA.<br><br>You will be required to enter a code from your authenticator app every time you log in.",
             current_user.username
         )
-        send_smtp_email(current_user.email, subject, email_body, styled_html)
+        send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
 
         return {"message": "MFA enabled successfully"}
 
@@ -264,7 +264,7 @@ async def request_mfa_disable(
         current_user.username
     )
     
-    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
     
     return {"message": "OTP sent to your registered email"}
 
@@ -298,7 +298,7 @@ async def verify_mfa_disable(
         "Two-Factor Authentication has been removed from your account.<br><br>If you did not request this, please secure your account immediately.",
         current_user.username
     )
-    send_smtp_email(current_user.email, subject, email_body, styled_html)
+    send_smtp_email(current_user.email, subject, email_body, styled_html, user_id=current_user.id)
     
     return {"message": "MFA disabled successfully"}
 @app.delete("/auth/me")
@@ -320,7 +320,7 @@ async def delete_my_account(
         user_name
     )
     
-    send_smtp_email(user_email, subject, email_body, styled_html)
+    send_smtp_email(user_email, subject, email_body, styled_html, user_id=current_user.id)
 
     session.delete(current_user)
     session.commit()
@@ -354,7 +354,7 @@ async def register_user(user: UserCreate, session: Session = Depends(get_session
     email_body = f"Welcome to Rio CRM! Please verify your email by clicking the link below:\n\n{verify_link}"
     styled_html = get_styled_html("Verify Your Email", f"Please click the button below to verify your account and get started with Rio CRM.<br><br><a href='{verify_link}' class='btn' style='color: white;'>Verify Email</a>", db_user.username)
     
-    send_smtp_email(db_user.email, "Verify Your Rio CRM Account", email_body, styled_html)
+    send_smtp_email(db_user.email, "Verify Your Rio CRM Account", email_body, styled_html, user_id=db_user.id)
 
     return db_user
 
@@ -399,7 +399,7 @@ async def resend_verification(data: ResendVerification, session: Session = Depen
     email_body = f"Click here to verify your account: {verify_link}"
     styled_html = get_styled_html("Verify Your Email", f"You requested a new verification link. Please click below to confirm your account.<br><br><a href='{verify_link}' class='btn' style='color: white;'>Verify Email</a>", user.username)
     
-    send_smtp_email(user.email, "New Verification Link - Rio CRM", email_body, styled_html)
+    send_smtp_email(user.email, "New Verification Link - Rio CRM", email_body, styled_html, user_id=user.id)
     
     return {"message": "New verification link sent."}
 
@@ -691,15 +691,25 @@ def update_lead_tool(phone: str, notes: str, status: str = None):
              # Create new lead if not exists? For now just report.
             return "Lead not found for this number."
 
-def send_email_tool(phone: str, email: str, subject: str, body: str):
+def send_email_tool(phone: str, email: str, subject: str, body: str, user_id: int = None):
     """
     Sends an email to the lead. Update lead's email if provided.
     """
-    print(f"Tool Triggered: send_email_tool({phone}, {email})")
+    print(f"Tool Triggered: send_email_tool({phone}, {email}, user_id={user_id})")
     with Session(engine) as session:
+        # Fetch lead
         statement = select(Lead).where(Lead.phone == phone)
         lead = session.exec(statement).first()
         
+        # Fetch User branding if user_id is provided
+        company_name = "Rio CRM"
+        company_website = "https://rio-crm.example.com/"
+        if user_id:
+            user = session.get(User, user_id)
+            if user:
+                company_name = user.company_name or company_name
+                company_website = user.company_website or company_website
+
         # Priority: use provided email, fallback to DB
         target_email = email or (lead.email if lead else None)
         
@@ -715,8 +725,14 @@ def send_email_tool(phone: str, email: str, subject: str, body: str):
             print(f"Updated lead {lead.name} with email {email}")
 
         # Generate Premium HTML
-        html_content = get_styled_html(subject, body, lead.name if lead else "Valued Customer")
-        success = send_smtp_email(target_email, subject, body, html_body=html_content)
+        html_content = get_styled_html(
+            subject, 
+            body, 
+            lead_name=lead.name if lead else "Valued Customer",
+            company_name=company_name,
+            company_website=company_website
+        )
+        success = send_smtp_email(target_email, subject, body, html_body=html_content, user_id=user_id)
         
         if success:
             # Log as interaction
@@ -741,20 +757,29 @@ def send_email_tool(phone: str, email: str, subject: str, body: str):
             session.commit()
             return f"Successfully sent email to {target_email}."
         else:
-            return "Failed to send email. Ensure SMTP settings are configured in .env."
+            return f"Failed to send email. Ensure SMTP settings are configured for {company_name}."
 
-def book_demo_tool(phone: str, time_str: str, notes: str = None):
+def book_demo_tool(phone: str, time_str: str, notes: str = None, user_id: int = None):
     """
     Books a demo/appointment for the lead.
     time_str should be a natural language or ISO time.
     """
-    print(f"Tool Triggered: book_demo_tool({phone}, {time_str})")
+    print(f"Tool Triggered: book_demo_tool({phone}, {time_str}, user_id={user_id})")
     with Session(engine) as session:
         statement = select(Lead).where(Lead.phone == phone)
         lead = session.exec(statement).first()
         
         if not lead:
             return "Error: Lead not found for this phone number."
+
+        # Fetch branding
+        company_name = "Rio CRM"
+        company_website = "https://rio-crm.example.com/"
+        if user_id:
+            user = session.get(User, user_id)
+            if user:
+                company_name = user.company_name or company_name
+                company_website = user.company_website or company_website
 
         try:
             # just use now + some logic or the raw string for demo
@@ -790,6 +815,21 @@ def book_demo_tool(phone: str, time_str: str, notes: str = None):
             session.add(outcome)
 
             session.commit()
+
+            # --- SEND CONFIRMATION EMAIL ---
+            if lead.email:
+                subject = f"Your Demo with {company_name} is Confirmed! 📅"
+                body = f"Hello {lead.name},\n\nWe've scheduled your demo for {time_str}.\n\nLooking forward to speaking with you!\n\nBest regards,\nThe {company_name} Team"
+                html_content = get_styled_html(
+                    subject, 
+                    body, 
+                    lead_name=lead.name,
+                    company_name=company_name,
+                    company_website=company_website
+                )
+                send_smtp_email(lead.email, subject, body, html_body=html_content, user_id=user_id)
+                return f"Successfully booked demo for {lead.name} at {time_str} and sent confirmation email."
+
             return f"Successfully booked demo for {lead.name} at {time_str}."
         except Exception as e:
             return f"Error booking demo: {str(e)}"
@@ -877,8 +917,9 @@ async def index():
     return "<h1>Twilio + Gemini Voice Agent</h1><p>Server is running.</p>"
 
 @app.post("/make-call")
-async def make_call(to: str, lead_id: int = None):
+async def make_call(to: str, lead_id: int = None, current_user: User = Depends(get_current_active_user)):
     """Initiates an outbound call to the specified number."""
+    user_id = current_user.id
     if not DOMAIN:
         raise HTTPException(status_code=500, detail="DOMAIN environment variable not set")
     
@@ -923,8 +964,9 @@ async def make_call(to: str, lead_id: int = None):
                     with Session(engine) as db_session:
                         interaction = Interaction(
                             lead_id=lead_id if lead_id else 0,
+                            user_id=user_id,
                             type="call",
-                            content="Outbound Call (EnableX)",
+                            content=f"Outbound Call (EnableX) to Lead #{lead_id}" if lead_id else "Outbound Call (EnableX)",
                             timestamp=datetime.now(timezone.utc)
                         )
                         db_session.add(interaction)
@@ -934,17 +976,32 @@ async def make_call(to: str, lead_id: int = None):
 
                     return {"message": "EnableX Call initiated", "voice_id": result.get("voice_id"), "interaction_id": interaction_id}
         elif active_telephony == "twilio":
+            # Create interaction BEFORE call so we can pass ID
+            with Session(engine) as db_session:
+                interaction = Interaction(
+                    lead_id=lead_id if lead_id else 0,
+                    user_id=user_id,
+                    type="call",
+                    content=f"Outbound Call (Twilio) to Lead #{lead_id}" if lead_id else "Outbound Call (Twilio)",
+                    timestamp=datetime.now(timezone.utc)
+                )
+                db_session.add(interaction)
+                db_session.commit()
+                db_session.refresh(interaction)
+                interaction_id = interaction.id
+
             # Twilio Outbound
             webhook_url = f"https://{DOMAIN}/incoming-call"
+            webhook_url += f"?interaction_id={interaction_id}"
             if lead_id:
-                webhook_url += f"?lead_id={lead_id}"
+                webhook_url += f"&lead_id={lead_id}"
 
             call = client.calls.create(
                 to=to,
                 from_=PHONE_NUMBER_FROM,
                 url=webhook_url
             )
-            return {"message": "Twilio Call initiated", "call_sid": call.sid}
+            return {"message": "Twilio Call initiated", "call_sid": call.sid, "interaction_id": interaction_id}
         elif active_telephony == "exotel":
             # Exotel API URL
             exotel_subdomain = EXOTEL_SUBDOMAIN_OVERRIDE
@@ -968,8 +1025,9 @@ async def make_call(to: str, lead_id: int = None):
                     with Session(engine) as db_session:
                         interaction = Interaction(
                             lead_id=lead_id,
+                            user_id=user_id,
                             type="call",
-                            content="Outbound Call (Exotel)",
+                            content=f"Outbound Call (Exotel) to Lead #{lead_id}" if lead_id else "Outbound Call (Exotel)",
                             timestamp=datetime.now(timezone.utc)
                         )
                         db_session.add(interaction)
@@ -1199,16 +1257,22 @@ async def incoming_call(request: Request, lead_id: int = None):
     response = VoiceResponse()
 
     # Create an interaction record
+    interaction_id = request.query_params.get("interaction_id")
+    
     with Session(engine) as session:
-        interaction = Interaction(
-            lead_id=lead_id if lead_id else 0, # 0 for unknown
-            type="call",
-            content="Incoming call",
-            timestamp=datetime.now(timezone.utc)
-        )
-        session.add(interaction)
-        session.commit()
-        session.refresh(interaction) # Get the ID
+        if interaction_id:
+            interaction = session.get(Interaction, int(interaction_id))
+        else:
+            interaction = Interaction(
+                lead_id=lead_id if lead_id else 0, # 0 for unknown
+                type="call",
+                content="Incoming call",
+                timestamp=datetime.now(timezone.utc)
+            )
+            session.add(interaction)
+            session.commit()
+            session.refresh(interaction) # Get the ID
+        
         # Read active engine from settings to tailor the prompt
         engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
         active_engine = (engine_setting.value if engine_setting else "gemini").strip().lower()
@@ -1221,8 +1285,8 @@ async def incoming_call(request: Request, lead_id: int = None):
     else:
         response.say("Connected to Yexis Electronics Digital Sales Representative. Please start speaking.")
     connect = Connect()
-    stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')
-    stream.parameter(name="interaction_id", value=str(interaction.id))
+    stream_url = f'wss://{request.url.netloc}/media-stream?interaction_id={interaction.id}'
+    stream = connect.stream(url=stream_url)
     response.append(connect)
     return HTMLResponse(content=str(response), media_type="application/xml")
 
@@ -1560,6 +1624,15 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
         "tools": [check_inventory, query_knowledge_base, update_lead_tool, send_email_tool, book_demo_tool, query_mcp_resource]
     }
 
+    # Extract user_id for tool calls
+    user_id = None
+    with Session(engine) as session:
+        if interaction_id:
+            try:
+                db_i = session.get(Interaction, int(interaction_id))
+                if db_i: user_id = db_i.user_id
+            except: pass
+
     try:
         async with gemini_client.aio.live.connect(model=model, config=config) as gemini_session:
             async def receive_from_telephony():
@@ -1607,7 +1680,12 @@ async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instructio
                                 for part in response.server_content.model_turn.parts:
                                     if getattr(part, 'function_call', None):
                                         fc = part.function_call
-                                        result = await run_tool(fc.name, fc.args, transcript_accumulator, interaction_id)
+                                        # Inject user_id into args if tool supports it
+                                        args = dict(fc.args)
+                                        if fc.name in ["send_email_tool", "book_demo_tool"]:
+                                            args["user_id"] = user_id
+                                            
+                                        result = await run_tool(fc.name, args, transcript_accumulator, interaction_id, user_id=user_id)
                                         await gemini_session.send(input=types.LiveClientToolResponse(
                                             function_responses=[types.FunctionResponse(name=fc.name, id=fc.id, response={"result": result})]
                                         ))
@@ -1742,14 +1820,14 @@ def clean_voice_text(text: str, max_chars: int = 300) -> str:
         
     return text.strip()
 
-async def run_tool(name, args, transcript_accumulator, interaction_id):
+async def run_tool(name, args, transcript_accumulator, interaction_id, user_id=None):
     """Shared tool runner - uses unified MCP tools for both Gemini and Mistral."""
     
     logger.info(f"📋 [MCP] Calling tool: {name}")
     logger.debug(f"📋 [MCP] Arguments: {args}")
     
     # Use unified MCP tool executor
-    result = await execute_mcp_tool(name, args)
+    result = await execute_mcp_tool(name, args, interaction_id, user_id=user_id)
     
     logger.info(f"📋 [MCP] Tool result: {result}")
     
@@ -1844,10 +1922,30 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
     
     verbosity = verbosity_setting.value if verbosity_setting else "2"
     
-    # Fetch Company Branding from Admin User
-    admin = session.exec(select(User).where(User.role == "admin")).first()
-    company_name = admin.company_name if admin and admin.company_name else "Yexis Electronics"
+    # Fetch Company Branding from current user via Interaction
+    company_name = "Rio CRM"
+    company_website = "https://rio-crm.example.com/"
+    current_user_id = None
     
+    if interaction_id:
+        try:
+            db_interaction = session.get(Interaction, int(interaction_id))
+            if db_interaction and db_interaction.user_id:
+                current_user_id = db_interaction.user_id
+                u = session.get(User, db_interaction.user_id)
+                if u:
+                    company_name = u.company_name or company_name
+                    company_website = u.company_website or company_website
+            elif not db_interaction:
+                 # Fallback to admin for incoming calls not pre-registered
+                 admin = session.exec(select(User).where(User.role == "admin")).first()
+                 if admin:
+                    current_user_id = admin.id
+                    company_name = admin.company_name or company_name
+                    company_website = admin.company_website or company_website
+        except Exception as e:
+            logger.error(f"Error fetching branding: {e}")
+
     dynamic_instruction = dynamic_instruction.replace("{company_name}", company_name)
     dynamic_instruction = apply_verbosity_rules(dynamic_instruction, verbosity)
     
@@ -1872,6 +1970,15 @@ async def handle_media_stream(websocket: WebSocket, session: Session = Depends(g
 
 async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator, engine_type="mistral", company_name=None):
     """Orchestrates STT, Mistral (LLM with MCP tools), and TTS based on engine_type."""
+    
+    # Extract user_id for tool calls
+    user_id = None
+    with Session(engine) as session:
+        if interaction_id:
+            try:
+                db_i = session.get(Interaction, int(interaction_id))
+                if db_i: user_id = db_i.user_id
+            except: pass
     
     
     logger.info(f"🤖 [LLM] Selected: {engine_type.upper()}")
@@ -2198,8 +2305,12 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
                 for tc in aggregated_tool_calls:
                     try:
                         args = json.loads(tc.function.arguments)
+                        # Inject user_id into args if tool supports it
+                        if tc.function.name in ["send_email_tool", "book_demo_tool"]:
+                            args["user_id"] = user_id
+                            
                         print(f"Tool Triggered: {tc.function.name}({args})")
-                        result = await run_tool(tc.function.name, args, transcript_accumulator, interaction_id)
+                        result = await run_tool(tc.function.name, args, transcript_accumulator, interaction_id, user_id=user_id)
                     except Exception as e:
                         logger.error(f"❌ Tool execution error: {e}")
                         result = {"error": str(e)}

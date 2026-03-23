@@ -6,11 +6,7 @@ import json
 import aiohttp
 import audioop
 from typing import Optional
-from utils.config import (
-    CARTESIA_API_KEY, CARTESIA_VOICE_ID, 
-    ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID,
-    DEEPGRAM_API_KEY, SARVAM_API_KEY
-)
+from credentials_service import get_credential
 from utils.audio import clean_voice_text
 
 logger = logging.getLogger(__name__)
@@ -49,7 +45,7 @@ class TTSService:
             tts_event = {
                 "model_id": "sonic-3",
                 "transcript": text,
-                "voice": {"mode": "id", "id": CARTESIA_VOICE_ID},
+                "voice": {"mode": "id", "id": get_credential("CARTESIA_VOICE_ID") or "a0e99841-438c-4a64-b679-ae501e7d6091"},
                 "output_format": {
                     "container": "raw",
                     "encoding": "pcm_s16le",  # native, no internal mulaw conversion
@@ -92,7 +88,7 @@ class TTSService:
             if ws_to_use:
                 await _stream_on_ws(ws_to_use)
             else:
-                url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
+                url = f"wss://api.cartesia.ai/tts/websocket?api_key={get_credential('CARTESIA_API_KEY')}&cartesia_version=2025-04-16"
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(url) as ws:
                         await _stream_on_ws(ws)
@@ -106,6 +102,7 @@ class TTSService:
 
     async def _sarvam_speak(self, text, communicator, aiohttp_session=None):
         """Sarvam AI TTS using aiohttp with mulaw output."""
+        SARVAM_API_KEY = get_credential("SARVAM_API_KEY")
         if not SARVAM_API_KEY:
             logger.error("❌ SARVAM_API_KEY missing!")
             return
@@ -115,7 +112,7 @@ class TTSService:
         
         url = "https://api.sarvam.ai/text-to-speech/stream"
         headers = {
-            "api-subscription-key": SARVAM_API_KEY,
+            "api-subscription-key": SARVAM_API_KEY,  # resolved above
             "Content-Type": "application/json"
         }
         
@@ -173,9 +170,10 @@ class TTSService:
         # Determine encoding based on communicator type
         enc_params = "encoding=mulaw&sample_rate=8000"
         
-        from utils.config import DEEPGRAM_VOICE
-        tts_url = f"wss://api.deepgram.com/v1/speak?model={DEEPGRAM_VOICE}&{enc_params}"
-        headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
+        _dg_voice = get_credential("DEEPGRAM_VOICE") or "aura-asteria-en"
+        _dg_key   = get_credential("DEEPGRAM_API_KEY")
+        tts_url = f"wss://api.deepgram.com/v1/speak?model={_dg_voice}&{enc_params}"
+        headers = {"Authorization": f"Token {_dg_key}"}
         
         async def _stream_on_ws(ws):
             nonlocal tts_first_byte_time
@@ -210,13 +208,15 @@ class TTSService:
             
             self.last_tts_latency = tts_first_byte_time
             self.last_provider = "Deepgram"
-            self.last_model = DEEPGRAM_VOICE
+            self.last_model = get_credential("DEEPGRAM_VOICE") or "aura-asteria-en"
             logger.info(f"✅ [Deepgram TTS] Complete. First byte: {tts_first_byte_time:.3f}s")
         except Exception as e:
             logger.error(f"❌ [Deepgram TTS] Error: {e}")
 
     async def _elevenlabs_speak(self, text, communicator, aiohttp_session=None, ws_to_use=None):
         """ElevenLabs TTS (Streaming via WebSocket)."""
+        ELEVENLABS_API_KEY  = get_credential("ELEVENLABS_API_KEY")
+        ELEVENLABS_VOICE_ID = get_credential("ELEVENLABS_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
         if not ELEVENLABS_API_KEY:
             logger.error("❌ ElevenLabs API Key missing!")
             return

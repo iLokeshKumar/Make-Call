@@ -30,6 +30,9 @@ class MistralLLM(BaseLLM):
                 if not self.client:
                     raise ValueError("Mistral Client is not initialized due to missing API key")
 
+                # Clean up any unfulfilled tool calls from previous (interrupted) turns
+                self.clean_interrupted_tool_calls()
+
                 stream = await self.client.chat.stream_async(
                     model=self.model,
                     messages=self.messages,

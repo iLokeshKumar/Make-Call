@@ -5,10 +5,11 @@ import requests
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+from pydantic import BaseModel
 from sqlmodel import Session, select, func, text
 from database import get_session, engine
 from models.models import Lead, LeadCreate, Product, Interaction, Outcome, ApolloSearch, SystemSettings, User, LatencyLog
-from utils.config import APOLLO_API_KEY
+from utils.config import get_apollo_api_key
 from auth import RoleChecker, get_current_active_user
 from enrichment_service import enrich_lead_cascade
 from utils.phone import normalize_phone
@@ -122,14 +123,15 @@ async def upload_leads(
 @router.post("/leads/fetch-apollo", dependencies=[Depends(RoleChecker(["admin"]))])
 async def fetch_apollo(search: ApolloSearch, session: Session = Depends(get_session)):
     """Fetches leads from Apollo.io (Organizations) and adds them to DB."""
-    if not APOLLO_API_KEY:
-        raise HTTPException(status_code=500, detail="APOLLO_API_KEY not configured.")
+    apollo_api_key = get_apollo_api_key()
+    if not apollo_api_key:
+        raise HTTPException(status_code=500, detail="Apollo API key not configured. Go to Settings → Credentials.")
 
     url = "https://api.apollo.io/v1/organizations/search"
     headers = {
         "Content-Type": "application/json",
         "Cache-Control": "no-cache",
-        "X-Api-Key": APOLLO_API_KEY
+        "X-Api-Key": apollo_api_key
     }
     payload = {
         "q_organization_name": search.keywords,
@@ -229,15 +231,25 @@ async def get_interactions(
     """Fetch call history with pagination."""
     offset = (page - 1) * limit
     total = session.exec(select(func.count(Interaction.id))).one()
-    interactions = session.exec(
-        select(Interaction)
+    
+    # Join with Lead to get the name for UI
+    statement = (
+        select(Interaction, Lead.name.label("lead_name"))
+        .outerjoin(Lead, Interaction.lead_id == Lead.id)
         .order_by(Interaction.timestamp.desc())
         .offset(offset)
         .limit(limit)
-    ).all()
+    )
+    results = session.exec(statement).all()
+    
+    items = []
+    for interaction, lead_name in results:
+        data = interaction.model_dump()
+        data["lead_name"] = lead_name or "Unknown Lead"
+        items.append(data)
     
     return {
-        "items": interactions,
+        "items": items,
         "total": total,
         "page": page,
         "limit": limit
@@ -289,7 +301,10 @@ async def update_settings(
     current_user: User = Depends(get_current_active_user)
 ):
     """Update system settings for the current user."""
+    logger.info(f"💾 [update_settings] User: {current_user.username} (ID: {current_user.id}) | Keys: {list(data.keys())}")
     for key, value in data.items():
+        val_str = str(value)
+        # Find existing user-specific setting
         db_s = session.exec(
             select(SystemSettings).where(
                 SystemSettings.key == key, 
@@ -298,23 +313,28 @@ async def update_settings(
         ).first()
         
         if not db_s:
+            logger.info(f"🆕 [update_settings] Creating new user setting: {key}={val_str} for user_id={current_user.id}")
             db_s = SystemSettings(
                 key=key, 
-                value=str(value), 
+                value=val_str, 
                 user_id=current_user.id,
                 created_by=current_user.username,
                 updated_by=current_user.username
             )
+            session.add(db_s)
         else:
-            db_s.value = str(value)
-            db_s.updated_by = current_user.username
+            if db_s.value != val_str:
+                logger.info(f"🔄 [update_settings] Updating user setting: {key} from {db_s.value} to {val_str}")
+                db_s.value = val_str
+                db_s.updated_by = current_user.username
+                session.add(db_s)
+            else:
+                logger.debug(f"ℹ️ [update_settings] No change for {key}")
             
-        session.add(db_s)
-        
     session.commit()
-    # Cache management would normally need to be user-aware depending on architecture.
-    # For now, we update the cache but note it's globally shared in pipeline currently
-    settings_cache.update({key: str(value) for key, value in data.items()}) 
+    logger.info(f"✅ [update_settings] Successfully committed changes for user {current_user.username}")
+    # Update user-specific cache
+    settings_cache.update({key: str(value) for key, value in data.items()}, user_id=current_user.id)
     return {"message": "Settings updated"}
 
 @router.get("/integrations/keys")
@@ -334,6 +354,7 @@ async def get_integration_keys(
             (SystemSettings.key.like("%_VOICE")) | 
             (SystemSettings.key.like("%_STT_MODEL")) |
             (SystemSettings.key.like("%_TTS_MODEL")) |
+            (SystemSettings.key.like("SMTP_%")) |
             (SystemSettings.key.in_(["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]))
         )
     ).all()
@@ -358,10 +379,23 @@ async def update_integration_keys(
     current_user: User = Depends(get_current_active_user)
 ):
     """Securely encrypt and update user integration keys."""
+    logger.info(f"🔐 [update_integration_keys] User: {current_user.username} (ID: {current_user.id}) | Keys: {list(data.keys())}")
     for key, value in data.items():
-        if not (key.endswith("_API_KEY") or key.endswith("_SID") or key.endswith("_TOKEN") or key.endswith("_MODEL") or key.endswith("_VOICE_ID") or key.endswith("_VOICE") or key.endswith("_STT_MODEL") or key.endswith("_TTS_MODEL") or key in ["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]):
+        if not (key.endswith("_API_KEY") or key.endswith("_SID") or key.endswith("_TOKEN") or key.endswith("_MODEL") or key.endswith("_VOICE_ID") or key.endswith("_VOICE") or key.endswith("_STT_MODEL") or key.endswith("_TTS_MODEL") or key.startswith("SMTP_") or key in ["PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM", "EXOPHONE", "EXOTEL_APP_ID", "ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"]):
              continue # Only handle sensitive keys here
              
+        val_str = str(value).strip()
+        
+        # skip if empty or masked (meaning the user didn't change it or deleted it in UI)
+        if not val_str:
+            logger.debug(f"⏭️ [update_integration_keys] Skipping empty value for {key}")
+            continue
+        if val_str.startswith("***") or "..." in val_str:
+            logger.debug(f"⏭️ [update_integration_keys] Skipping masked value for {key}")
+            continue
+            
+        encrypted_val = encrypt_value(val_str)
+        
         db_s = session.exec(
             select(SystemSettings).where(
                 SystemSettings.key == key, 
@@ -369,13 +403,8 @@ async def update_integration_keys(
             )
         ).first()
         
-        # Don't save if it's masked (meaning the user didn't change it in the UI)
-        if str(value).startswith("***") or "..." in str(value):
-            continue
-            
-        encrypted_val = encrypt_value(str(value))
-        
         if not db_s:
+            logger.info(f"🆕 [update_integration_keys] Creating new user integration key: {key} for user_id={current_user.id}")
             db_s = SystemSettings(
                 key=key, 
                 value=encrypted_val, 
@@ -383,13 +412,19 @@ async def update_integration_keys(
                 created_by=current_user.username,
                 updated_by=current_user.username
             )
+            session.add(db_s)
         else:
-            db_s.value = encrypted_val
-            db_s.updated_by = current_user.username
+            if db_s.value != encrypted_val:
+                logger.info(f"🔄 [update_integration_keys] Updating user integration key: {key}")
+                db_s.value = encrypted_val
+                db_s.updated_by = current_user.username
+                session.add(db_s)
             
-        session.add(db_s)
+        # Sync cache only for changed keys
+        settings_cache.set_val(key, val_str, user_id=current_user.id)
         
     session.commit()
+    logger.info(f"✅ [update_integration_keys] Successfully committed integration keys for user {current_user.username}")
     return {"message": "Integration keys updated securely"}
 
 @router.get("/settings/reload_cache", dependencies=[Depends(RoleChecker(["admin"]))])
@@ -452,7 +487,7 @@ async def update_product(
 
 @router.delete("/inventory/{product_id}")
 async def delete_product(
-    product_id: int, 
+    product_id: int,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_active_user)
 ):
@@ -460,7 +495,71 @@ async def delete_product(
     db_product = session.get(Product, product_id)
     if not db_product:
         raise HTTPException(status_code=404, detail="Product not found")
-    
+
     session.delete(db_product)
     session.commit()
     return {"message": "Product deleted successfully"}
+
+
+# ── Outcome / Pipeline CRUD ───────────────────────────────────────────────────
+
+class OutcomeUpdate(BaseModel):
+    stage: Optional[str] = None
+    potential_value: Optional[float] = None
+    probability: Optional[float] = None
+    notes: Optional[str] = None
+
+    class Config:
+        # Allow None fields to be excluded from partial updates
+        extra = "ignore"
+
+
+@router.get("/outcomes", dependencies=[Depends(RoleChecker(["admin"]))])
+async def list_outcomes(session: Session = Depends(get_session)):
+    """Fetch all pipeline outcomes (admin only)."""
+    outcomes = session.exec(select(Outcome).order_by(Outcome.created_at.desc())).all()
+    return outcomes
+
+
+@router.get("/outcomes/lead/{lead_id}")
+async def get_outcomes_for_lead(lead_id: int, session: Session = Depends(get_session)):
+    """Fetch all outcomes for a specific lead."""
+    outcomes = session.exec(
+        select(Outcome).where(Outcome.lead_id == lead_id).order_by(Outcome.created_at.desc())
+    ).all()
+    return outcomes
+
+
+@router.put("/outcomes/{outcome_id}", dependencies=[Depends(RoleChecker(["admin"]))])
+async def update_outcome(
+    outcome_id: int,
+    data: OutcomeUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_active_user),
+):
+    """Update a pipeline outcome's stage, deal value, probability, or notes (admin only)."""
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome:
+        raise HTTPException(status_code=404, detail="Outcome not found")
+
+    update_data = data.dict(exclude_unset=True)
+    for key, value in update_data.items():
+        setattr(outcome, key, value)
+
+    outcome.updated_by = current_user.username
+    session.add(outcome)
+    session.commit()
+    session.refresh(outcome)
+    return outcome
+
+
+@router.delete("/outcomes/{outcome_id}", dependencies=[Depends(RoleChecker(["admin"]))])
+async def delete_outcome(outcome_id: int, session: Session = Depends(get_session)):
+    """Delete a pipeline outcome (admin only)."""
+    outcome = session.get(Outcome, outcome_id)
+    if not outcome:
+        raise HTTPException(status_code=404, detail="Outcome not found")
+
+    session.delete(outcome)
+    session.commit()
+    return {"message": "Outcome deleted successfully"}

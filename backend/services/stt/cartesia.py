@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 class CartesiaSTT:
     def __init__(self, api_key: str = None, model: str = None):
         self.provider = "Cartesia"
-        self.model = model or settings_cache.get("CARTESIA_STT_MODEL") or "ink-whisper"
+        self.model = model or "ink-whisper"
         self.api_key = api_key
         
         if not self.api_key:

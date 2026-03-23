@@ -5,15 +5,13 @@ import asyncio
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
-from utils.config import OPENROUTER_MODEL
-
 logger = logging.getLogger(__name__)
 
 class OpenRouterLLM(BaseLLM):
     def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "OpenRouter"
-        self.model = model or OPENROUTER_MODEL
+        self.model = model
         self.api_key = api_key
         
         if not self.api_key:

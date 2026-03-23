@@ -3,7 +3,9 @@ import os
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from dotenv import load_dotenv
+from credentials_service import get_credential_smtp
 import logging
+from utils.encryption import decrypt_value
 
 load_dotenv()
 
@@ -13,7 +15,11 @@ logger = logging.getLogger(__name__)
 def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer", company_name: str = "Rio CRM", company_website: str = "https://rio-crm.example.com/"):
     """
     Wraps the body in a premium, modern HTML template.
+    Creates a clickable link for the company name.
     """
+    # Create the clickable link
+    company_link = f'<a href="{company_website}" style="color: inherit; text-decoration: none;">{company_name}</a>'
+    
     return f"""
     <!DOCTYPE html>
     <html>
@@ -27,6 +33,7 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer",
             .btn {{ display: inline-block; padding: 12px 24px; background: #7c3aed; color: white; text-decoration: none; border-radius: 12px; font-weight: bold; margin-top: 20px; }}
             h1 {{ margin: 0; font-size: 24px; letter-spacing: -0.5px; }}
             p {{ margin-bottom: 20px; }}
+            a {{ color: #7c3aed; text-decoration: underline; }}
         </style>
     </head>
     <body>
@@ -39,10 +46,10 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer",
                 <div style="font-size: 16px; color: #475569;">
                     {body.replace('\\n', '<br>')}
                 </div>
-                <p style="margin-top: 30px;">Best regards,<br><strong>Rio Digital Sales Representative</strong><br>{company_name} Team</p>
+                <p style="margin-top: 30px;">Best regards,<br><strong>Rio Digital Sales Representative</strong><br>{company_link} Team</p>
             </div>
             <div class="footer">
-                &copy; 2026 {company_name}. All rights reserved.<br>
+                &copy; 2026 {company_link}. All rights reserved.<br>
                 Powered by Advanced Agentic Voice AI
             </div>
         </div>
@@ -50,19 +57,29 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer",
     </html>
     """
 
-def send_smtp_email(to_email: str, subject: str, body: str, html_body: str = None, company_name: str = "Yexis Electronics"):
+def send_smtp_email(to_email: str, subject: str, body: str, html_body: str = None, company_name: str = "Rio CRM", user_id: int = None):
     """
-    Sends an email using SMTP settings from .env file.
+    Sends an email using SMTP settings from .env file or DB.
     Supports both plain text and HTML.
     """
-    smtp_server = os.getenv("SMTP_SERVER")
-    smtp_port = os.getenv("SMTP_PORT")
-    smtp_user = os.getenv("SMTP_USER")
-    smtp_password = os.getenv("SMTP_PASSWORD")
-    sender_email = os.getenv("SENDER_EMAIL")
+    # Automatically decrypt if it's an encrypted blob
+    to_email = decrypt_value(to_email)
+
+    # smtp_server = os.getenv("SMTP_SERVER")
+    # smtp_port = os.getenv("SMTP_PORT")
+    # smtp_user = os.getenv("SMTP_USER")
+    # smtp_password = os.getenv("SMTP_PASSWORD")
+    # sender_email = os.getenv("SENDER_EMAIL")
+
+    smtp_server   = get_credential_smtp("SMTP_SERVER", user_id)
+    smtp_port     = int(get_credential_smtp("SMTP_PORT", user_id) or 587)
+    smtp_user     = get_credential_smtp("SMTP_USERNAME", user_id)
+    smtp_password = get_credential_smtp("SMTP_PASSWORD", user_id)
+    sender_email    = get_credential_smtp("SMTP_FROM_EMAIL", user_id)
 
     if not all([smtp_server, smtp_port, smtp_user, smtp_password, sender_email]):
         logger.error("Missing SMTP configuration in .env.")
+        logger.warning("SMTP configuration not found. Email will not be sent.")
         return False
 
     try:

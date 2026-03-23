@@ -27,6 +27,8 @@ Why this matters:
 """
 
 import logging
+from sqlmodel import Session
+from database import engine, User
 from mcp_server import (
     check_icp_qualification,
     get_product_info,
@@ -266,7 +268,7 @@ def get_mistral_tools():
 
 # UNIFIED TOOL EXECUTOR
 
-async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
+async def execute_mcp_tool(tool_name: str, arguments: dict, interaction_id: str = None, user_id: int = None) -> dict:
     """
     Execute MCP tools by delegating to mcp_server.py.
     
@@ -276,12 +278,15 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
     Args:
         tool_name: Name of the tool to execute
         arguments: Dict of arguments for the tool
-        user: Optional User object for personalization (e.g. Google Auth)
-        
-    Returns:
-        Tool result as dict
+        interaction_id: (Optional) ID for interaction tracking
+        user_id: (Optional) ID of the user triggering the tool
     """
-    
+    # Fetch user from DB if user_id is provided
+    user = None
+    if user_id:
+        with Session(engine) as session:
+            user = session.get(User, user_id)
+
     # Hallucination mapping: Mistral sometimes calls 'lookup_product' instead of 'get_product_info'
     if tool_name == "lookup_product":
         tool_name = "get_product_info"
@@ -364,7 +369,8 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
                 demo_type=arguments.get("demo_type", "Offline"),
                 email=arguments.get("email"),
                 notes=arguments.get("notes"),
-                user=user
+                user=user,
+                user_id=user_id
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result
@@ -377,7 +383,8 @@ async def execute_mcp_tool(tool_name: str, arguments: dict, user=None) -> dict:
                 content=arguments.get("content"),
                 subject=arguments.get("subject", "Message from Rio AI"),
                 email=arguments.get("email"),
-                phone=arguments.get("phone")
+                phone=arguments.get("phone"),
+                user_id=user.id if user else None
             )
             logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
             return result

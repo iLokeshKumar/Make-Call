@@ -1,12 +1,11 @@
 import json
 import logging
 import aiohttp
-import os
 import asyncio
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
-from utils.config import CEREBRAS_API_KEY, CEREBRAS_MODEL
+from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
 
@@ -14,7 +13,7 @@ class CerebrasLLM(BaseLLM):
     def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Cerebras"
-        self.model = model or CEREBRAS_MODEL
+        self.model = model
         self.api_key = api_key
         
         if not self.api_key:

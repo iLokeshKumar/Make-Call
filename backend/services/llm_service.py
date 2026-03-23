@@ -4,7 +4,7 @@ import time
 import json
 import re
 from typing import Optional, List, Dict, Any, AsyncGenerator
-from utils.config import mistral_client
+from utils.config import get_mistral_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ class LLMService:
             full_reply = ""
             tool_calls_dict = {}
 
-            stream = await mistral_client.chat.stream_async(
+            stream = await get_mistral_client().chat.stream_async(
                 model="mistral-large-latest",
                 messages=self.messages,
                 tools=tools,

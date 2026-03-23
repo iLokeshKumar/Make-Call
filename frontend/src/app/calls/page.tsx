@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare } from "lucide-react";
+import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare, Mail, MessageCircle } from "lucide-react";
 import clsx from "clsx";
 import Pagination from "@/components/Pagination";
 
@@ -12,6 +12,7 @@ interface Interaction {
     content: string;
     timestamp: string;
     transcript?: string;
+    lead_name?: string;
 }
 
 export default function CallsPage() {
@@ -61,6 +62,32 @@ export default function CallsPage() {
 
     const toggleExpand = (id: number) => {
         setExpandedCall(expandedCall === id ? null : id);
+    };
+
+    const getInteractionIcon = (type: string) => {
+        const lowerType = type.toLowerCase();
+        if (lowerType.includes("email")) return <Mail className="h-5 w-5" />;
+        if (lowerType.includes("whatsapp")) return <MessageCircle className="h-5 w-5" />;
+        if (lowerType.includes("multi-channel")) return <MessageSquare className="h-5 w-5" />;
+        return <Phone className="h-5 w-5" />;
+    };
+
+    const getInteractionColor = (type: string) => {
+        const lowerType = type.toLowerCase();
+        if (lowerType.includes("email")) return "bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400";
+        if (lowerType.includes("whatsapp")) return "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400";
+        if (lowerType.includes("multi-channel")) return "bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400";
+        return "bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400";
+    };
+
+    const getInteractionTitle = (call: Interaction) => {
+        if (call.type === "call") {
+            if (call.content.includes("Outbound")) {
+                return call.lead_name ? `Outbound to ${call.lead_name}` : "Outbound Call";
+            }
+            return call.lead_name ? `Inbound from ${call.lead_name}` : "Inbound Call";
+        }
+        return call.type;
     };
 
     return (
@@ -114,12 +141,12 @@ export default function CallsPage() {
                                 className="p-4 flex items-center justify-between cursor-pointer"
                             >
                                 <div className="flex items-center space-x-4">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400">
-                                        <Phone className="h-5 w-5" />
+                                    <div className={clsx("flex h-10 w-10 items-center justify-center rounded-lg shadow-sm font-bold", getInteractionColor(call.type))}>
+                                        {getInteractionIcon(call.type)}
                                     </div>
                                     <div>
-                                        <p className="font-semibold text-slate-900 dark:text-white">
-                                            {call.content.includes("to") ? `Outbound: ${call.content.split("to ").pop()}` : "Inbound Call"}
+                                        <p className="font-semibold text-slate-900 dark:text-white capitalize">
+                                            {getInteractionTitle(call)}
                                         </p>
                                         <p className="text-xs text-slate-400 dark:text-slate-500">
                                             {new Date(call.timestamp).toLocaleString()}
@@ -127,17 +154,23 @@ export default function CallsPage() {
                                     </div>
                                 </div>
                                 <div className="flex items-center space-x-3">
-                                    {call.transcript && (
-                                        <MessageSquare className="h-4 w-4 text-violet-500 animate-pulse" />
+                                    {(call.transcript || (call.type !== "call" && call.content)) && (
+                                        <div className="h-2 w-2 rounded-full bg-violet-500 animate-pulse shadow-[0_0_8px_rgba(139,92,246,0.5)]" />
                                     )}
                                     {expandedCall === call.id ? <ChevronUp className="h-5 w-5 text-slate-400" /> : <ChevronDown className="h-5 w-5 text-slate-400" />}
                                 </div>
                             </div>
 
-                            {/* Expanded Transcript Section */}
+                            {/* Expanded Section */}
                             {expandedCall === call.id && (
                                 <div className="p-4 bg-slate-50/50 dark:bg-slate-900/50 border-t border-slate-100 dark:border-slate-800 animate-in slide-in-from-top-2 duration-300">
-                                    <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Transcript</h4>
+                                    <div className="flex items-center justify-between mb-3">
+                                        <h4 className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                                            {call.type === 'call' ? 'Conversation Transcript' : 'Interaction Details'}
+                                        </h4>
+                                        <span className="text-[10px] bg-white/50 dark:bg-slate-800 px-2 py-0.5 rounded border border-slate-200 dark:border-slate-700 text-slate-500 font-mono">ID: #{call.id}</span>
+                                    </div>
+                                    
                                     {call.transcript ? (
                                         <div className="space-y-2">
                                             {call.transcript.split("\n").map((line, i) => {
@@ -145,19 +178,26 @@ export default function CallsPage() {
                                                 const isSystem = line.startsWith("[System]:");
                                                 return (
                                                     <div key={i} className={clsx(
-                                                        "rounded-lg p-2 text-sm",
-                                                        isRio ? "bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300" :
-                                                            isSystem ? "bg-slate-100 dark:bg-slate-800/50 text-slate-500 dark:text-slate-400 italic" :
-                                                                "bg-white/40 dark:bg-white/5 text-slate-700 dark:text-slate-300"
+                                                        "rounded-lg p-2.5 text-sm border shadow-sm",
+                                                        isRio ? "bg-violet-50/80 dark:bg-violet-900/20 border-violet-100 dark:border-violet-800/50 text-violet-700 dark:text-violet-300 font-medium" :
+                                                            isSystem ? "bg-slate-100/80 dark:bg-slate-800/50 border-slate-200 dark:border-slate-700/50 text-slate-500 dark:text-slate-400 italic" :
+                                                                "bg-white dark:bg-slate-800/80 border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-300"
                                                     )}>
                                                         <span className="font-mono text-[10px] opacity-40 mr-2">[{i + 1}]</span>
-                                                        <span className="font-medium">{line}</span>
+                                                        <span className="leading-relaxed">{line}</span>
                                                     </div>
                                                 );
                                             })}
                                         </div>
                                     ) : (
-                                        <p className="text-sm text-slate-500 italic">No transcript recorded for this call.</p>
+                                        <div className="rounded-lg p-4 bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 shadow-sm">
+                                            <p className="text-sm text-slate-700 dark:text-slate-300 leading-relaxed font-medium">
+                                                {call.content}
+                                            </p>
+                                            {call.type === 'call' && (
+                                                <p className="mt-2 text-[10px] text-slate-400 italic font-medium">No detailed transcript available for this voice interaction.</p>
+                                            )}
+                                        </div>
                                     )}
                                 </div>
                             )}
