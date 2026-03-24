@@ -12,11 +12,17 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer", company_name: str = "Rio CRM", company_website: str = "https://rio-crm.example.com/"):
+def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer", user_id: int = None):
     """
     Wraps the body in a premium, modern HTML template.
-    Creates a clickable link for the company name.
+    Uses user-specific company name and website if available.
     """
+    from utils import settings_cache
+    
+    # Fetch user-specific or global defaults
+    company_name = settings_cache.get("COMPANY_NAME", user_id) or "Rio CRM"
+    company_website = settings_cache.get("COMPANY_WEBSITE", user_id) or "https://rio-crm.example.com/"
+
     # Create the clickable link
     company_link = f'<a href="{company_website}" style="color: inherit; text-decoration: none;">{company_name}</a>'
     
@@ -46,6 +52,7 @@ def get_styled_html(subject: str, body: str, lead_name: str = "Valued Customer",
                 <div style="font-size: 16px; color: #475569;">
                     {body.replace('\\n', '<br>')}
                 </div>
+                <a href="{company_website}" class="btn">{company_name}</a>
                 <p style="margin-top: 30px;">Best regards,<br><strong>Rio Digital Sales Representative</strong><br>{company_link} Team</p>
             </div>
             <div class="footer">

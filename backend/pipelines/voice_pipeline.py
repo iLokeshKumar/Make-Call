@@ -361,7 +361,8 @@ class VoicePipeline:
             dg_ws = None
             el_ws = None
             c_ws = None
-            sv_ws = None  # Sarvam TTS persistent WS
+            sv_ws = None
+            mimo_ws = None
             
             try:
                 # 1. Setup persistent connections if needed
@@ -381,6 +382,15 @@ class VoicePipeline:
                     el_headers = {"xi-api-key": el_api_key}
                     el_ws = await session.ws_connect(el_url, headers=el_headers)
                     logger.info(f"🎯 ElevenLabs TTS Persistent WebSocket Connected (voice={el_voice}, model={el_model})")
+                
+                elif self.tts_provider == "mimo":
+                    mimo_api_key = self.integration_keys.get("MIMO_API_KEY")
+                    mimo_voice = self.tts_service.voice_id
+                    mimo_model = self.tts_service.model
+                    mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=pcm_16000"
+                    mimo_headers = {"xi-api-key": mimo_api_key}
+                    mimo_ws = await session.ws_connect(mimo_url, headers=mimo_headers)
+                    logger.info(f"🎯 Mimo TTS Persistent WebSocket Connected (voice={mimo_voice}, model={mimo_model})")
                 
                 # Setup Cartesia Persistent Connection if using it
                 if self.tts_provider == "cartesia":
@@ -418,6 +428,35 @@ class VoicePipeline:
                             c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={c_api_key}&cartesia_version=2025-04-16"
                             c_ws = await session.ws_connect(c_url)
                             logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
+
+                    elif self.tts_provider == "elevenlabs":
+                        if not el_ws or el_ws.closed:
+                            el_api_key = self.integration_keys.get("ELEVENLABS_API_KEY")
+                            el_voice = self.tts_service.voice_id
+                            el_model = self.tts_service.model
+                            el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=pcm_16000"
+                            el_headers = {"xi-api-key": el_api_key}
+                            el_ws = await session.ws_connect(el_url, headers=el_headers)
+                            logger.info("🎯 ElevenLabs TTS Persistent WebSocket (Re)Connected")
+
+                    elif self.tts_provider == "deepgram":
+                        if not dg_ws or dg_ws.closed:
+                            dg_api_key = self.integration_keys.get("DEEPGRAM_API_KEY")
+                            dg_voice = self.tts_service.model
+                            dg_url = f"wss://api.deepgram.com/v1/speak?model={dg_voice}&encoding=mulaw&sample_rate=8000"
+                            dg_headers = {"Authorization": f"Token {dg_api_key}"}
+                            dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
+                            logger.info("🎯 Deepgram TTS Persistent WebSocket (Re)Connected")
+
+                    elif self.tts_provider == "mimo":
+                        if not mimo_ws or mimo_ws.closed:
+                            mimo_api_key = self.integration_keys.get("MIMO_API_KEY")
+                            mimo_voice = self.tts_service.voice_id
+                            mimo_model = self.tts_service.model
+                            mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=pcm_16000"
+                            mimo_headers = {"xi-api-key": mimo_api_key}
+                            mimo_ws = await session.ws_connect(mimo_url, headers=mimo_headers)
+                            logger.info("🎯 Mimo TTS Persistent WebSocket (Re)Connected")
 
                     elif self.tts_provider == "sarvam":
                         if not sv_ws or sv_ws.closed:
@@ -463,6 +502,7 @@ class VoicePipeline:
                         if self.tts_provider == "deepgram": active_ws = dg_ws
                         elif self.tts_provider == "elevenlabs": active_ws = el_ws
                         elif self.tts_provider == "sarvam": active_ws = sv_ws
+                        elif self.tts_provider == "mimo": active_ws = mimo_ws
 
                         self.current_tts_task = asyncio.create_task(
                             self.tts_service.speak(
@@ -487,6 +527,7 @@ class VoicePipeline:
                 if el_ws: await el_ws.close()
                 if c_ws: await c_ws.close()
                 if sv_ws: await sv_ws.close()
+                if mimo_ws: await mimo_ws.close()
 
     async def _handle_barge_in(self, reason: str = "Unknown"):
         """Interrupts current AI activities."""

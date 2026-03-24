@@ -268,22 +268,19 @@ def get_mistral_tools():
 
 # UNIFIED TOOL EXECUTOR
 
-async def execute_mcp_tool(tool_name: str, arguments: dict, interaction_id: str = None, user_id: int = None) -> dict:
+async def execute_mcp_tool(tool_name: str, arguments: dict, interaction_id: str = None, user_id: int = None, user: User = None) -> dict:
     """
     Execute MCP tools by delegating to mcp_server.py.
-    
-    DESIGN PATTERN: This function routes calls to MCP tools.
-    It does NOT implement any tool logic - it simply dispatches.
     
     Args:
         tool_name: Name of the tool to execute
         arguments: Dict of arguments for the tool
         interaction_id: (Optional) ID for interaction tracking
         user_id: (Optional) ID of the user triggering the tool
+        user: (Optional) User object already fetched
     """
-    # Fetch user from DB if user_id is provided
-    user = None
-    if user_id:
+    # Fetch user from DB if user_id is provided and user object wasn't passed
+    if not user and user_id:
         with Session(engine) as session:
             user = session.get(User, user_id)
 

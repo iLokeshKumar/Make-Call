@@ -8,34 +8,25 @@ from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
 
-class ElevenLabsTTS:
+class MimoTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
-        self.provider = "ElevenLabs"
-        
-        # Priority: 1. Passed model (if likely ElevenLabs) 2. DB Credential 3. Default
-        db_model = get_credential("ELEVENLABS_TTS_MODEL")
-        
-        # Guard against picking up 'aura-asteria-en' or 'sonic-english' if passed as generic tts_model
-        if model and ("eleven_" in model or "multilingual" in model):
-            self.model = model
-        else:
-            self.model = db_model or "eleven_turbo_v2_5"
-            
+        self.provider = "Mimo"
+        self.model = model or "mimo_turbo_v2_5" or "mimo-v2-tts"
         self.api_key = api_key
-        self.voice_id = voice_id or get_credential("ELEVENLABS_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
+        self.voice_id = voice_id or get_credential("MIMO_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
         self.last_latency = 0
         
         if not self.api_key:
-            logger.warning("ElevenLabsTTS initialized without an API key! Streams will fail.")
+            logger.warning("MimoTTS initialized without an API key! Streams will fail.")
 
     async def speak(self, text: str, communicator, ws_to_use=None, aiohttp_session=None, **kwargs):
         if not self.api_key:
-            logger.error("❌ [ElevenLabsTTS] API Key missing!")
+            logger.error("❌ [MimoTTS] API Key missing!")
             return
 
         start_time = time.time()
         first_byte_time = 0
-        url = f"wss://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model}&output_format=pcm_16000"
+        url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model}&output_format=pcm_16000"
         
         async def _stream_on_ws(ws):
             nonlocal first_byte_time
@@ -79,6 +70,6 @@ class ElevenLabsTTS:
                     if should_close: await session.close()
             
             self.last_latency = first_byte_time
-            logger.info(f"🔊 [ElevenLabsTTS] Complete. First byte: {first_byte_time:.3f}s")
+            logger.info(f"🔊 [MimoTTS] Complete. First byte: {first_byte_time:.3f}s")
         except Exception as e:
-            logger.error(f"❌ [ElevenLabsTTS] Error: {e}")
+            logger.error(f"❌ [MimoTTS] Error: {e}")

@@ -1,6 +1,7 @@
 from .deepgram import DeepgramSTT
 from .sarvam import SarvamSTT
 from .cartesia import CartesiaSTT
+from .elevenlabs import ElevenLabsSTT
 
 def get_stt_service(provider: str, api_key: str = None, model: str = None):
     """Factory to get the requested STT service."""
@@ -11,6 +12,8 @@ def get_stt_service(provider: str, api_key: str = None, model: str = None):
         return SarvamSTT(api_key=api_key, model=model)
     elif provider == "cartesia":
         return CartesiaSTT(api_key=api_key, model=model)
+    elif provider == "elevenlabs":
+        return ElevenLabsSTT(api_key=api_key, model=model)
     else:
         # Default fallback
         return DeepgramSTT(api_key=api_key, model=model)

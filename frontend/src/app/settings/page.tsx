@@ -105,7 +105,15 @@ export default function SettingsPage() {
                         ANTHROPIC_MODEL: "",
                         PERPLEXITY_MODEL: "",
                         OPENROUTER_MODEL: "",
-                        CEREBRAS_MODEL: ""
+                        CEREBRAS_MODEL: "",
+                        DEEPGRAM_STT_MODEL: "",
+                        DEEPGRAM_TTS_MODEL: "",
+                        ELEVENLABS_TTS_MODEL: "",
+                        ELEVENLABS_STT_MODEL: "",
+                        MIMO_VOICE_ID: "",
+                        MIMO_TTS_MODEL: "",
+                        MIMO_API_KEY: "",
+                        MIMO_MODEL: ""
                     };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
@@ -384,9 +392,10 @@ export default function SettingsPage() {
                                         onChange={(e) => setSttProvider(e.target.value)}
                                         className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
-                                        <option value="deepgram">Deepgram Nova-2</option>
-                                        <option value="sarvam">Sarvam Saaras</option>
-                                        <option value="cartesia">Cartesia Ink Whisper</option>
+                                        <option value="deepgram">Deepgram</option>
+                                        <option value="sarvam">Sarvam</option>
+                                        <option value="cartesia">Cartesia</option>
+                                        <option value="elevenlabs">ElevenLabs</option>
                                     </select>
                                 </div>
 
@@ -398,12 +407,13 @@ export default function SettingsPage() {
                                         onChange={(e) => setLlmProvider(e.target.value)}
                                         className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
-                                        <option value="mistral">Mistral Large</option>
-                                        <option value="anthropic">Claude 3.5 Sonnet</option>
-                                        <option value="google">Gemini 1.5 Flash</option>
-                                        <option value="perplexity">Perplexity Sonar</option>
+                                        <option value="mistral">Mistral</option>
+                                        <option value="anthropic">Claude</option>
+                                        <option value="google">Gemini</option>
+                                        <option value="perplexity">Perplexity</option>
                                         <option value="openrouter">OpenRouter (Inference)</option>
                                         <option value="cerebras">Cerebras (Inference)</option>
+                                        <option value="mimo">Mimo (Inference)</option>
                                     </select>
                                 </div>
 
@@ -415,10 +425,11 @@ export default function SettingsPage() {
                                         onChange={(e) => setTtsProvider(e.target.value)}
                                         className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
                                     >
-                                        <option value="cartesia">Cartesia Sonic</option>
-                                        <option value="elevenlabs">ElevenLabs Turbo</option>
-                                        <option value="sarvam">Sarvam Bulbul</option>
-                                        <option value="deepgram">Deepgram Aura</option>
+                                        <option value="cartesia">Cartesia</option>
+                                        <option value="elevenlabs">ElevenLabs</option>
+                                        <option value="sarvam">Sarvam</option>
+                                        <option value="deepgram">Deepgram</option>
+                                        <option value="mimo">Mimo</option>
                                     </select>
                                 </div>
                             </div>
@@ -496,9 +507,9 @@ export default function SettingsPage() {
                                 "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "DEEPGRAM_VOICE"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "SARVAM_VOICE_ID", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL"],
-                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL"],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL"],
                                 "Email (SMTP)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Enrichment": ["APOLLO_API_KEY"]
                             }).map(([groupName, keys]) => (

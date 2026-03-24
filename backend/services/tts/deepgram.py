@@ -10,7 +10,16 @@ logger = logging.getLogger(__name__)
 class DeepgramTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Deepgram"
-        self.model = model or voice_id or get_credential("DEEPGRAM_VOICE") or "aura-asteria-en"
+        
+        # Priority: 1. Passed model (if likely Deepgram) 2. DB Credential 3. Default
+        db_model = get_credential("DEEPGRAM_TTS_MODEL")
+        
+        # Guard against picking up 'eleven_turbo' or 'sonic-english' if passed as generic tts_model
+        if model and ("aura-" in model or "nova-" in model):
+            self.model = model
+        else:
+            self.model = db_model or voice_id or get_credential("DEEPGRAM_VOICE") or "aura-asteria-en"
+            
         self.api_key = api_key
         self.last_latency = 0
         
