@@ -1,27 +1,25 @@
-import json
+import audioop
 import base64
 import logging
 import time
 import aiohttp
-import audioop
-from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
+
+# Default PCM sample rate Mimo TTS outputs (matches OpenAI TTS convention)
+MIMO_TTS_SAMPLE_RATE = 24000
+
 
 class MimoTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Mimo"
-        # Priority: 1. Passed model 2. DB Credential 3. Default
-        db_model = get_credential("MIMO_TTS_MODEL")
-        if model and ("mimo" in model or "eleven_" in model or "multilingual" in model):
-            self.model = model
-        else:
-            self.model = db_model or "mimo_turbo_v2_5"
-            
+        self.model = model or "mimo-v2-tts"
         self.api_key = api_key
-        self.voice_id = voice_id or get_credential("MIMO_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
+        # voice_id here is a text description of the desired voice, e.g.
+        # "Professional female, calm, clear, neutral accent"
+        self.voice_id = voice_id or "Professional female voice, calm and clear"
         self.last_latency = 0
-        
+
         if not self.api_key:
             logger.warning("MimoTTS initialized without an API key! Streams will fail.")
 
@@ -31,50 +29,43 @@ class MimoTTS:
             return
 
         start_time = time.time()
-        first_byte_time = 0
-        url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model}&output_format=ulaw_8000"
-        
-        async def _stream_on_ws(ws):
-            nonlocal first_byte_time
-            resample_state = None
-            await ws.send_json({
-                "text": " ",
-                "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
-                "xi_api_key": self.api_key
-            })
-            await ws.send_json({"text": text, "try_trigger_generation": True})
-            await ws.send_json({"text": ""})
-            
-            async for message in ws:
-                if message.type == aiohttp.WSMsgType.TEXT:
-                    data = json.loads(message.data)
-                    if data.get("audio"):
-                        if first_byte_time == 0:
-                            first_byte_time = time.time() - start_time
-                        
-                        # Since we requested ulaw_8000, we can send it directly to Twilio
-                        ulaw_8k = base64.b64decode(data["audio"])
-                        await communicator.send_media(base64.b64encode(ulaw_8k).decode())
-                    
-                    if data.get("isFinal"):
-                        break
-                elif message.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
-                    break
+        # OpenAI-compatible audio/speech endpoint
+        url = "https://api.xiaomimimo.com/v1/audio/speech"
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": self.model,
+            "input": text,
+            "voice": self.voice_id,
+            "response_format": "pcm",  # raw PCM at MIMO_TTS_SAMPLE_RATE Hz
+        }
 
-        headers = {"xi-api-key": self.api_key}
+        session = aiohttp_session or aiohttp.ClientSession()
+        should_close = aiohttp_session is None
         try:
-            if ws_to_use:
-                await _stream_on_ws(ws_to_use)
-            else:
-                session = aiohttp_session if aiohttp_session else aiohttp.ClientSession()
-                should_close = aiohttp_session is None
-                try:
-                    async with session.ws_connect(url, headers=headers) as ws:
-                        await _stream_on_ws(ws)
-                finally:
-                    if should_close: await session.close()
-            
-            self.last_latency = first_byte_time
-            logger.info(f"🔊 [MimoTTS] Complete. First byte: {first_byte_time:.3f}s")
+            async with session.post(url, json=payload, headers=headers) as resp:
+                if resp.status != 200:
+                    error = await resp.text()
+                    logger.error(f"❌ [MimoTTS] API Error {resp.status}: {error}")
+                    return
+
+                pcm_bytes = await resp.read()
+                first_byte_time = time.time() - start_time
+
+                # Convert PCM 24kHz → mulaw 8kHz for telephony
+                pcm_8k, _ = audioop.ratecv(pcm_bytes, 2, 1, MIMO_TTS_SAMPLE_RATE, 8000, None)
+                mulaw = audioop.lin2ulaw(pcm_8k, 2)
+
+                await communicator.send_media(base64.b64encode(mulaw).decode())
+                self.last_latency = first_byte_time
+                logger.info(
+                    f"🔊 [MimoTTS] Done. Latency: {first_byte_time:.3f}s | "
+                    f"PCM: {len(pcm_bytes)}B → mulaw: {len(mulaw)}B"
+                )
         except Exception as e:
             logger.error(f"❌ [MimoTTS] Error: {e}")
+        finally:
+            if should_close:
+                await session.close()

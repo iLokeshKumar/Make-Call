@@ -406,7 +406,6 @@ class VoicePipeline:
             el_ws = None
             c_ws = None
             sv_ws = None
-            mimo_ws = None
             
             try:
                 # 1. Setup persistent connections if needed
@@ -426,15 +425,6 @@ class VoicePipeline:
                     el_headers = {"xi-api-key": el_api_key}
                     el_ws = await session.ws_connect(el_url, headers=el_headers)
                     logger.info(f"🎯 ElevenLabs TTS Persistent WebSocket Connected (voice={el_voice}, model={el_model})")
-                
-                elif self.tts_provider == "mimo":
-                    mimo_api_key = self.integration_keys.get("MIMO_API_KEY")
-                    mimo_voice = self.tts_service.voice_id
-                    mimo_model = self.tts_service.model
-                    mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=ulaw_8000"
-                    mimo_headers = {"xi-api-key": mimo_api_key}
-                    mimo_ws = await session.ws_connect(mimo_url, headers=mimo_headers)
-                    logger.info(f"🎯 Mimo TTS Persistent WebSocket Connected (voice={mimo_voice}, model={mimo_model})")
                 
                 # Setup Cartesia Persistent Connection if using it
                 if self.tts_provider == "cartesia":
@@ -492,16 +482,6 @@ class VoicePipeline:
                             dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
                             logger.info("🎯 Deepgram TTS Persistent WebSocket (Re)Connected")
 
-                    elif self.tts_provider == "mimo":
-                        if not mimo_ws or mimo_ws.closed:
-                            mimo_api_key = self.integration_keys.get("MIMO_API_KEY")
-                            mimo_voice = self.tts_service.voice_id
-                            mimo_model = self.tts_service.model
-                            mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=ulaw_8000"
-                            mimo_headers = {"xi-api-key": mimo_api_key}
-                            mimo_ws = await session.ws_connect(mimo_url, headers=mimo_headers)
-                            logger.info("🎯 Mimo TTS Persistent WebSocket (Re)Connected")
-
                     elif self.tts_provider == "sarvam":
                         if not sv_ws or sv_ws.closed:
                             sv_api_key = self.integration_keys.get("SARVAM_API_KEY")
@@ -547,7 +527,7 @@ class VoicePipeline:
                         if self.tts_provider == "deepgram": active_ws = dg_ws
                         elif self.tts_provider == "elevenlabs": active_ws = el_ws
                         elif self.tts_provider == "sarvam": active_ws = sv_ws
-                        elif self.tts_provider == "mimo": active_ws = mimo_ws
+                        # mimo is REST-based — no persistent WebSocket, active_ws stays None
 
                         self.current_tts_task = asyncio.create_task(
                             self.tts_service.speak(
@@ -573,7 +553,6 @@ class VoicePipeline:
                 if el_ws: await el_ws.close()
                 if c_ws: await c_ws.close()
                 if sv_ws: await sv_ws.close()
-                if mimo_ws: await mimo_ws.close()
 
     async def _handle_barge_in(self, reason: str = "Unknown"):
         """Interrupts current AI activities."""
