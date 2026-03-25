@@ -53,6 +53,7 @@ class VoicePipeline:
         self.audio_encoding = audio_encoding
         self.audio_sample_rate = audio_sample_rate
         self.last_customer_speech_time = time.time()
+        self.last_rio_speech_end_time = time.time()
         
         # Basic Initialization (Core loop attributes)
         self.sentence_queue = asyncio.Queue()
@@ -323,35 +324,78 @@ class VoicePipeline:
             logger.info("📜 Post-call transcript flush complete.")
 
     async def _silence_watcher(self):
-        """Re-engages customer after prolonged silence with context-aware phrases."""
-        SILENCE_THRESHOLD = 15  # seconds - reduced for proactive selling
-        CHECK_INTERVAL = 10     # check frequently for high responsiveness
+        """
+        Fires ONLY when:
+        1. Rio finished speaking (is_rio_speaking = False, queue empty)
+        2. Customer has NOT spoken since Rio finished
+        3. Silence has lasted > threshold since Rio stopped
+        """
+        SILENCE_THRESHOLD = 15.0  # seconds after Rio finishes speaking
+        CHECK_INTERVAL = 10.0
 
         while True:
             await asyncio.sleep(CHECK_INTERVAL)
-            silence_duration = time.time() - self.last_customer_speech_time
 
-            # Only fire if: customer is silent, Rio is NOT speaking, queue is empty
-            if (silence_duration > SILENCE_THRESHOLD 
-                    and not self.is_rio_speaking 
-                    and self.sentence_queue.empty()):
-            
-                # Select phrase based on the last action context
+            # Skip if Rio is still talking or has more queued
+            if self.is_rio_speaking or not self.sentence_queue.empty():
+                continue
+
+            # How long since Rio finished speaking?
+            silence_since_rio_finished = time.time() - self.last_rio_speech_end_time
+        
+            # How long since customer last spoke?
+            silence_since_customer_spoke = time.time() - self.last_customer_speech_time
+
+            # Only fire if:
+            # - Rio finished speaking > threshold ago
+            # - Customer hasn't spoken since Rio finished (customer spoke BEFORE Rio finished)
+            if (silence_since_rio_finished > SILENCE_THRESHOLD 
+                    and self.last_customer_speech_time < self.last_rio_speech_end_time):
+
                 if self.last_context_type == "pricing":
                     phrase = "Take your time — that's a big decision and I'm happy to walk through it."
                 elif self.last_context_type == "demo":
                     phrase = "Does that answer your question, or would you like me to go deeper on any part?"
                 else:
                     phrase = "Still there? Happy to answer anything."
-                
-                logger.info(f"🔔 [Silence Watcher] {silence_duration:.1f}s of silence in '{self.last_context_type}' context — re-engaging")
+
+                logger.info(f"🔔 [Silence Watcher] {silence_since_rio_finished:.1f}s since Rio finished — re-engaging")
                 await self.sentence_queue.put(phrase)
-            
-                # Reset timer so we don't spam immediately again
-                self.last_customer_speech_time = time.time()
-                
-                # Reset context after re-engaging to avoid repetitive phrases
+
+                # Reset so it doesn't fire again immediately
+                self.last_rio_speech_end_time = time.time()
                 self.last_context_type = "general"
+
+    # async def _silence_watcher(self):
+    #     """Re-engages customer after prolonged silence with context-aware phrases."""
+    #     SILENCE_THRESHOLD = 15  # seconds - reduced for proactive selling
+    #     CHECK_INTERVAL = 10     # check frequently for high responsiveness
+
+    #     while True:
+    #         await asyncio.sleep(CHECK_INTERVAL)
+    #         silence_duration = time.time() - self.last_customer_speech_time
+
+    #         # Only fire if: customer is silent, Rio is NOT speaking, queue is empty
+    #         if (silence_duration > SILENCE_THRESHOLD 
+    #                 and not self.is_rio_speaking 
+    #                 and self.sentence_queue.empty()):
+            
+    #             # Select phrase based on the last action context
+    #             if self.last_context_type == "pricing":
+    #                 phrase = "Take your time — that's a big decision and I'm happy to walk through it."
+    #             elif self.last_context_type == "demo":
+    #                 phrase = "Does that answer your question, or would you like me to go deeper on any part?"
+    #             else:
+    #                 phrase = "Still there? Happy to answer anything."
+                
+    #             logger.info(f"🔔 [Silence Watcher] {silence_duration:.1f}s of silence in '{self.last_context_type}' context — re-engaging")
+    #             await self.sentence_queue.put(phrase)
+            
+    #             # Reset timer so we don't spam immediately again
+    #             self.last_customer_speech_time = time.time()
+                
+    #             # Reset context after re-engaging to avoid repetitive phrases
+    #             self.last_context_type = "general"
 
 
     async def _speaker_loop(self):
@@ -378,7 +422,7 @@ class VoicePipeline:
                     el_api_key = self.integration_keys.get("ELEVENLABS_API_KEY")
                     el_voice = self.tts_service.voice_id  # already decrypted via _get_decrypted_integration_keys
                     el_model = self.tts_service.model
-                    el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=pcm_16000"
+                    el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=ulaw_8000"
                     el_headers = {"xi-api-key": el_api_key}
                     el_ws = await session.ws_connect(el_url, headers=el_headers)
                     logger.info(f"🎯 ElevenLabs TTS Persistent WebSocket Connected (voice={el_voice}, model={el_model})")
@@ -387,7 +431,7 @@ class VoicePipeline:
                     mimo_api_key = self.integration_keys.get("MIMO_API_KEY")
                     mimo_voice = self.tts_service.voice_id
                     mimo_model = self.tts_service.model
-                    mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=pcm_16000"
+                    mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=ulaw_8000"
                     mimo_headers = {"xi-api-key": mimo_api_key}
                     mimo_ws = await session.ws_connect(mimo_url, headers=mimo_headers)
                     logger.info(f"🎯 Mimo TTS Persistent WebSocket Connected (voice={mimo_voice}, model={mimo_model})")
@@ -434,7 +478,7 @@ class VoicePipeline:
                             el_api_key = self.integration_keys.get("ELEVENLABS_API_KEY")
                             el_voice = self.tts_service.voice_id
                             el_model = self.tts_service.model
-                            el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=pcm_16000"
+                            el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=ulaw_8000"
                             el_headers = {"xi-api-key": el_api_key}
                             el_ws = await session.ws_connect(el_url, headers=el_headers)
                             logger.info("🎯 ElevenLabs TTS Persistent WebSocket (Re)Connected")
@@ -453,7 +497,7 @@ class VoicePipeline:
                             mimo_api_key = self.integration_keys.get("MIMO_API_KEY")
                             mimo_voice = self.tts_service.voice_id
                             mimo_model = self.tts_service.model
-                            mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=pcm_16000"
+                            mimo_url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{mimo_voice}/stream-input?model_id={mimo_model}&output_format=ulaw_8000"
                             mimo_headers = {"xi-api-key": mimo_api_key}
                             mimo_ws = await session.ws_connect(mimo_url, headers=mimo_headers)
                             logger.info("🎯 Mimo TTS Persistent WebSocket (Re)Connected")
@@ -495,6 +539,7 @@ class VoicePipeline:
                             logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
                         finally:
                             self.is_rio_speaking = False
+                            self.last_rio_speech_end_time = time.time()
                             self.sentence_queue.task_done()
                     else:
                         # Determine which persistent WS to pass as generic 'ws_to_use'
@@ -519,6 +564,7 @@ class VoicePipeline:
                             logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
                         finally:
                             self.is_rio_speaking = False
+                            self.last_rio_speech_end_time = time.time()
                             self.sentence_queue.task_done() 
             
             finally:

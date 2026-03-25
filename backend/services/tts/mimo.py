@@ -11,7 +11,13 @@ logger = logging.getLogger(__name__)
 class MimoTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Mimo"
-        self.model = model or "mimo_turbo_v2_5" or "mimo-v2-tts"
+        # Priority: 1. Passed model 2. DB Credential 3. Default
+        db_model = get_credential("MIMO_TTS_MODEL")
+        if model and ("mimo" in model or "eleven_" in model or "multilingual" in model):
+            self.model = model
+        else:
+            self.model = db_model or "mimo_turbo_v2_5"
+            
         self.api_key = api_key
         self.voice_id = voice_id or get_credential("MIMO_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
         self.last_latency = 0
@@ -26,7 +32,7 @@ class MimoTTS:
 
         start_time = time.time()
         first_byte_time = 0
-        url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model}&output_format=pcm_16000"
+        url = f"wss://api.xiaomimimo.com/v1/text-to-speech/{self.voice_id}/stream-input?model_id={self.model}&output_format=ulaw_8000"
         
         async def _stream_on_ws(ws):
             nonlocal first_byte_time
@@ -46,9 +52,8 @@ class MimoTTS:
                         if first_byte_time == 0:
                             first_byte_time = time.time() - start_time
                         
-                        pcm_16k = base64.b64decode(data["audio"])
-                        pcm_8k, resample_state = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, resample_state)
-                        ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
+                        # Since we requested ulaw_8000, we can send it directly to Twilio
+                        ulaw_8k = base64.b64decode(data["audio"])
                         await communicator.send_media(base64.b64encode(ulaw_8k).decode())
                     
                     if data.get("isFinal"):
