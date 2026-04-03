@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Save, Brain, Bell, Shield, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff } from "lucide-react";
+import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
@@ -10,6 +10,60 @@ const themeOptions = [
     { value: "dark", label: "Dark", icon: Moon },
     { value: "system", label: "System", icon: Monitor },
 ] as const;
+
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const CRM_BASE = `${API_BASE}/crm`;
+
+const COMPANY_SETTING_KEYS = {
+    systemInstruction: ["SYSTEM_INSTRUCTION", "system_instruction"],
+    sttProvider: ["STT_PROVIDER", "stt_provider"],
+    llmProvider: ["LLM_PROVIDER", "llm_provider"],
+    ttsProvider: ["TTS_PROVIDER", "tts_provider"],
+    telephonyEngine: ["TELEPHONY_ENGINE", "telephony_engine"],
+    aiVerbosity: ["AI_VERBOSITY", "ai_verbosity"],
+} as const;
+
+const INTEGRATION_KEY_ALIASES: Record<string, string> = {
+    PHONE_NUMBER_FROM: "TWILIO_PHONE_NUMBER",
+    WHATSAPP_NUMBER_FROM: "WHATSAPP_NUMBER",
+    SMTP_SERVER: "SMTP_HOST",
+};
+
+function readSettingValue(
+    settings: Record<string, string>,
+    keys: readonly [string, string],
+    fallback: string
+) {
+    return settings[keys[0]] ?? settings[keys[1]] ?? fallback;
+}
+
+function normalizeIntegrationValues(keysData: Record<string, string>) {
+    return {
+        ...keysData,
+        PHONE_NUMBER_FROM: keysData.PHONE_NUMBER_FROM ?? keysData.TWILIO_PHONE_NUMBER ?? "",
+        WHATSAPP_NUMBER_FROM: keysData.WHATSAPP_NUMBER_FROM ?? keysData.WHATSAPP_NUMBER ?? "",
+        SMTP_SERVER: keysData.SMTP_SERVER ?? keysData.SMTP_HOST ?? "",
+        SARVAM_STT_MODEL:
+            keysData.SARVAM_STT_MODEL ||
+            keysData.SMALLEST_STT_MODEL ||
+            "",
+        SARVAM_VOICE_ID: keysData.SARVAM_VOICE_ID || keysData.SMALLEST_VOICE_ID || "",
+    };
+}
+
+function isMaskedValue(value: string) {
+    return value.startsWith("***") || value.includes("...");
+}
+
+function isSecretIntegrationKey(key: string) {
+    return /(API_KEY|AUTH_TOKEN|PASSWORD|TOKEN|SECRET)/.test(key);
+}
+
+type RoleOption = {
+    id: number;
+    name: string;
+    description?: string;
+};
 
 export default function SettingsPage() {
     const { theme, setTheme } = useTheme();
@@ -30,37 +84,48 @@ export default function SettingsPage() {
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
     const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
-
-    const API_BASE = "http://localhost:6060";
-    const CRM_BASE = `${API_BASE}/crm`;
+    const [roles, setRoles] = useState<RoleOption[]>([]);
+    const [inviteEmail, setInviteEmail] = useState("");
+    const [inviteRoleId, setInviteRoleId] = useState<number | null>(null);
+    const [inviteExpiresHours, setInviteExpiresHours] = useState(72);
+    const [inviteMessage, setInviteMessage] = useState<string | null>(null);
+    const [isInviting, setIsInviting] = useState(false);
+    const hasAdminAccess = user?.role === "company_admin" || user?.role === "company_owner";
 
     useEffect(() => {
         const fetchSettingsAndKeys = async () => {
+            if (!token) {
+                setLoading(false);
+                return;
+            }
+
             try {
-                // Fetch General Settings
-                const res = await fetch(`${CRM_BASE}/settings`, {
-                    headers: { "Authorization": `Bearer ${token}` }
-                });
-                if (res.status === 401) {
+                const [settingsRes, keysRes] = await Promise.all([
+                    fetch(`${CRM_BASE}/company-settings`, {
+                        headers: { "Authorization": `Bearer ${token}` }
+                    }),
+                    fetch(`${CRM_BASE}/company-integrations`, {
+                        headers: { "Authorization": `Bearer ${token}` }
+                    }),
+                ]);
+
+                if (settingsRes.status === 401 || keysRes.status === 401) {
                     sessionTimeout();
                     return;
                 }
-                const data = await res.json();
-                setSystemInstruction(data.system_instruction || "");
-                setSttProvider(data.stt_provider || "deepgram");
-                setLlmProvider(data.llm_provider || "mistral");
-                setTtsProvider(data.tts_provider || "cartesia");
-                setTelephonyEngine(data.telephony_engine || "twilio");
-                setAiVerbosity(data.ai_verbosity || "2");
-                
-                // Fetch Encrypted Integration Keys
-                const keysRes = await fetch(`${CRM_BASE}/integrations/keys`, {
-                    headers: { "Authorization": `Bearer ${token}` }
-                });
+
+                if (settingsRes.ok) {
+                    const data = await settingsRes.json() as Record<string, string>;
+                    setSystemInstruction(readSettingValue(data, COMPANY_SETTING_KEYS.systemInstruction, ""));
+                    setSttProvider(readSettingValue(data, COMPANY_SETTING_KEYS.sttProvider, "deepgram"));
+                    setLlmProvider(readSettingValue(data, COMPANY_SETTING_KEYS.llmProvider, "mistral"));
+                    setTtsProvider(readSettingValue(data, COMPANY_SETTING_KEYS.ttsProvider, "cartesia"));
+                    setTelephonyEngine(readSettingValue(data, COMPANY_SETTING_KEYS.telephonyEngine, "twilio"));
+                    setAiVerbosity(readSettingValue(data, COMPANY_SETTING_KEYS.aiVerbosity, "2"));
+                }
+
                 if (keysRes.ok) {
-                    const keysData = await keysRes.json();
-                    
-                    // Initialize with defaults if empty, but merge in whatever the server sent
+                    const keysData = normalizeIntegrationValues(await keysRes.json() as Record<string, string>);
                     const defaultKeys = {
                         DEEPGRAM_API_KEY: "",
                         ELEVENLABS_API_KEY: "",
@@ -113,78 +178,173 @@ export default function SettingsPage() {
                         MIMO_VOICE_ID: "",
                         MIMO_TTS_MODEL: "",
                         MIMO_API_KEY: "",
-                        MIMO_MODEL: ""
+                        MIMO_MODEL: "",
+                        SMALLEST_API_KEY: "",
+                        SMALLEST_STT_MODEL: "",
+                        SMALLEST_TTS_MODEL: "",
+                        MISTRAL_TTS_MODEL: "",
                     };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
-
             } catch (error) {
                 console.error("Error fetching settings:", error);
             } finally {
                 setLoading(false);
             }
         };
+
         fetchSettingsAndKeys();
     }, [token, sessionTimeout]);
+
+    useEffect(() => {
+        if (!token || !hasAdminAccess) return;
+        const controller = new AbortController();
+
+        const fetchRoles = async () => {
+            try {
+                const res = await fetch(`${API_BASE}/admin/roles`, {
+                    headers: { Authorization: `Bearer ${token}` },
+                    signal: controller.signal,
+                });
+                if (!res.ok) {
+                    console.warn("Failed to load roles", res.status);
+                    return;
+                }
+                const data: RoleOption[] = await res.json();
+                setRoles(data);
+                if (!inviteRoleId && data.length) {
+                    setInviteRoleId(data[0].id);
+                }
+            } catch (err) {
+                if ((err as DOMException).name === "AbortError") {
+                    return;
+                }
+                console.error("Failed to load roles", err);
+            }
+        };
+
+        fetchRoles();
+        return () => controller.abort();
+    }, [token, hasAdminAccess, inviteRoleId]);
 
 
     const handleSave = async () => {
         console.log("💾 [Settings] Starting save operation...");
         setSaving(true);
         setSaveSuccess(false);
+
         try {
-            // Save General Settings
-            console.log("📤 [Settings] Patching general settings:", {
-                stt: sttProvider, llm: llmProvider, tts: ttsProvider, telephony: telephonyEngine
-            });
-            const res = await fetch(`${CRM_BASE}/settings`, {
-                method: "PATCH",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${token}`
-                },
-                body: JSON.stringify({
-                    system_instruction: systemInstruction,
-                    stt_provider: sttProvider,
-                    llm_provider: llmProvider,
-                    tts_provider: ttsProvider,
-                    telephony_engine: telephonyEngine,
-                    ai_verbosity: aiVerbosity
+            const settingsPayload = {
+                items: [
+                    { key: "SYSTEM_INSTRUCTION", value: systemInstruction, is_secret: false },
+                    { key: "STT_PROVIDER", value: sttProvider, is_secret: false },
+                    { key: "LLM_PROVIDER", value: llmProvider, is_secret: false },
+                    { key: "TTS_PROVIDER", value: ttsProvider, is_secret: false },
+                    { key: "TELEPHONY_ENGINE", value: telephonyEngine, is_secret: false },
+                    { key: "AI_VERBOSITY", value: aiVerbosity, is_secret: false },
+                ],
+            };
+
+              const normalizedIntegrationValues = Object.entries(apiKeys).reduce<Record<string, string>>((acc, [rawKey, rawValue]) => {
+                  const normalizedKey = INTEGRATION_KEY_ALIASES[rawKey] ?? rawKey;
+                  acc[normalizedKey] = rawValue;
+                  return acc;
+              }, {});
+
+              const integrationValues = { ...normalizedIntegrationValues };
+              if (integrationValues.SARVAM_STT_MODEL && !integrationValues.SMALLEST_STT_MODEL) {
+                  integrationValues.SMALLEST_STT_MODEL = integrationValues.SARVAM_STT_MODEL;
+              }
+              if (integrationValues.SARVAM_VOICE_ID && !integrationValues.SMALLEST_VOICE_ID) {
+                  integrationValues.SMALLEST_VOICE_ID = integrationValues.SARVAM_VOICE_ID;
+              }
+
+              const integrationPayload = {
+                  items: Object.entries(integrationValues)
+                      .filter(([, value]) => typeof value === "string")
+                      .map(([key, value]) => ({
+                          key,
+                          value: value.trim(),
+                          is_secret: isSecretIntegrationKey(key),
+                      }))
+                      .filter((item) => item.value && !isMaskedValue(item.value)),
+              };
+
+            const [res, keysRes] = await Promise.all([
+                fetch(`${CRM_BASE}/company-settings`, {
+                    method: "PATCH",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}`
+                    },
+                    body: JSON.stringify(settingsPayload),
                 }),
-            });
-            console.log("📥 [Settings] General settings response status:", res.status);
-            
-            if (res.status === 401) {
-                console.error("❌ [Settings] Unauthorized (General)");
+                fetch(`${CRM_BASE}/company-integrations`, {
+                    method: "PATCH",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Authorization": `Bearer ${token}`
+                    },
+                    body: JSON.stringify(integrationPayload),
+                }),
+            ]);
+
+            if (res.status === 401 || keysRes.status === 401) {
                 sessionTimeout();
                 return;
             }
-            
-            // Save Integration Keys
-            const changedKeys = Object.entries(apiKeys).filter(([k, v]) => v && !v.startsWith("***") && !v.includes("..."));
-            console.log("📤 [Settings] Patching integration keys. Changed count:", changedKeys.length);
-            
-            const keysRes = await fetch(`${CRM_BASE}/integrations/keys`, {
-                method: "PATCH",
-                headers: {
-                    "Content-Type": "application/json",
-                    "Authorization": `Bearer ${token}`
-                },
-                body: JSON.stringify(apiKeys),
-            });
-            console.log("📥 [Settings] Integration keys response status:", keysRes.status);
 
-            if (res.ok && keysRes.ok) {
-                console.log("✨ [Settings] Save successful!");
-                setSaveSuccess(true);
-                setTimeout(() => setSaveSuccess(false), 3000);
-            } else {
-                console.error("❌ [Settings] Save failed:", res.status, keysRes.status);
+            if (!res.ok || !keysRes.ok) {
+                throw new Error(`Save failed (${res.status}/${keysRes.status})`);
             }
+
+            setSaveSuccess(true);
+            setTimeout(() => setSaveSuccess(false), 3000);
         } catch (error) {
             console.error("❌ [Settings] Error saving settings:", error);
         } finally {
             setSaving(false);
+        }
+    };
+
+    const handleSendInvite = async () => {
+        if (!inviteEmail.trim()) {
+            setInviteMessage("Please enter the invitee's email address.");
+            return;
+        }
+        const roleId = inviteRoleId ?? roles[0]?.id;
+        if (!roleId) {
+            setInviteMessage("No roles available for invitations.");
+            return;
+        }
+
+        setIsInviting(true);
+        setInviteMessage(null);
+        try {
+            const res = await fetch(`${API_BASE}/auth/invites`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    Authorization: `Bearer ${token}`,
+                },
+                body: JSON.stringify({
+                    email: inviteEmail.trim(),
+                    role_id: roleId,
+                    expires_in_hours: inviteExpiresHours,
+                }),
+            });
+
+            const data = await res.json();
+            if (res.ok) {
+                setInviteMessage(`Invite sent to ${inviteEmail.trim()}.`);
+                setInviteEmail("");
+            } else {
+                setInviteMessage(data.detail || "Failed to send invite.");
+            }
+        } catch (err) {
+            setInviteMessage("Network error while sending invite.");
+        } finally {
+            setIsInviting(false);
         }
     };
 
@@ -215,6 +375,73 @@ export default function SettingsPage() {
                     </div>
                 )}
             </div>
+
+            {hasAdminAccess && (
+                <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-4 animate-in fade-in duration-300">
+                    <div className="flex items-center justify-between">
+                        <div>
+                            <h2 className="text-lg font-bold text-slate-900 dark:text-white">Invite a teammate</h2>
+                            <p className="text-sm text-slate-500 dark:text-slate-400">
+                                Send an invitation link that expires in a few days.
+                            </p>
+                        </div>
+                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
+                            Owner Only
+                        </span>
+                    </div>
+                    <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr_1fr] items-end">
+                        <div>
+                            <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Email</label>
+                            <input
+                                type="email"
+                                value={inviteEmail}
+                                onChange={(e) => setInviteEmail(e.target.value)}
+                                placeholder="jane@company.com"
+                                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                            />
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Role</label>
+                            <select
+                                value={inviteRoleId ?? ""}
+                                onChange={(e) => setInviteRoleId(Number(e.target.value))}
+                                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                            >
+                                {roles.length === 0 && <option value="">Loading roles...</option>}
+                                {roles.map((role) => (
+                                    <option key={role.id} value={role.id}>
+                                        {role.name.replace(/_/g, " ")}
+                                    </option>
+                                ))}
+                            </select>
+                        </div>
+                        <div>
+                            <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Expires (hours)</label>
+                            <input
+                                type="number"
+                                min={1}
+                                max={168}
+                                value={inviteExpiresHours}
+                                onChange={(e) => setInviteExpiresHours(Number(e.target.value))}
+                                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+                            />
+                        </div>
+                        <button
+                            type="button"
+                            onClick={handleSendInvite}
+                            disabled={isInviting}
+                            className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold py-2 text-sm uppercase tracking-wide shadow-lg shadow-emerald-500/30 hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            {isInviting ? "Sending..." : "Send Invite"}
+                        </button>
+                    </div>
+                    {inviteMessage && (
+                        <p className={`text-xs ${inviteMessage.includes("sent") ? "text-emerald-500" : "text-red-500"}`}>
+                            {inviteMessage}
+                        </p>
+                    )}
+                </div>
+            )}
 
             {/* Tabs */}
             <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-800 pb-2">
@@ -298,7 +525,7 @@ export default function SettingsPage() {
                 </div>
 
                 {/* Telephony Configuration */}
-                {user?.role === "admin" && (
+                {hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600">
@@ -369,7 +596,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* AI Configuration Tab */}
-                {activeTab === "persona" && user?.role === "admin" && (
+                {activeTab === "persona" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
@@ -396,6 +623,7 @@ export default function SettingsPage() {
                                         <option value="sarvam">Sarvam</option>
                                         <option value="cartesia">Cartesia</option>
                                         <option value="elevenlabs">ElevenLabs</option>
+                                        <option value="smallest">Smallest</option>
                                     </select>
                                 </div>
 
@@ -413,7 +641,7 @@ export default function SettingsPage() {
                                         <option value="perplexity">Perplexity</option>
                                         <option value="openrouter">OpenRouter (Inference)</option>
                                         <option value="cerebras">Cerebras (Inference)</option>
-                                        <option value="mimo">Mimo (Inference)</option>
+                                        <option value="mimo">Mimo</option>
                                     </select>
                                 </div>
 
@@ -430,6 +658,8 @@ export default function SettingsPage() {
                                         <option value="sarvam">Sarvam</option>
                                         <option value="deepgram">Deepgram</option>
                                         <option value="mimo">Mimo</option>
+                                        <option value="mistral">Mistral</option>
+                                        <option value="smallest">Smallest</option>
                                     </select>
                                 </div>
                             </div>
@@ -490,7 +720,7 @@ export default function SettingsPage() {
 
 
                 {/* Integrations Keys Tab */}
-                {activeTab === "keys" && user?.role === "admin" && (
+                {activeTab === "keys" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-green-400 to-emerald-600">
@@ -507,8 +737,8 @@ export default function SettingsPage() {
                                 "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SARVAM_VOICE_ID", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL"],
                                 "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL"],
                                 "Email (SMTP)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Enrichment": ["APOLLO_API_KEY"]
@@ -550,7 +780,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* Save Button */}
-                {user?.role === "admin" && (
+                {hasAdminAccess && (
                     <div className="flex justify-end pt-12">
                         <button
                             onClick={handleSave}

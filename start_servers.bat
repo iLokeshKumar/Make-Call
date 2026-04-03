@@ -2,7 +2,7 @@
 echo Starting Rio CRM System...
 
 :: Start Backend
-start "Rio Backend (FastAPI)" cmd /k "cd backend && myenvironment\Scripts\python.exe main.py"
+start "Rio Backend (FastAPI)" cmd /k "cd backend && myenvironment\Scripts\python.exe -m uvicorn main:app --host 0.0.0.0 --port 6060 --reload"
 :: Start Frontend
 start "Rio Dashboard (Next.js)" cmd /k "cd frontend && npm run dev"
 

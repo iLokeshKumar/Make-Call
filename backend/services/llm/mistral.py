@@ -1,7 +1,7 @@
 import json
 import logging
 import asyncio
-from mistralai import Mistral
+from mistralai.client import Mistral
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 

@@ -2025,6 +2025,16 @@ async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instructi
         stt_model_name = "nova-2"
         tts_provider_name = "Deepgram"
         tts_model_name = "aura-asteria-en"
+    elif engine_type == "mistral-smallest":
+        stt_provider_name = "Smallest"
+        stt_model_name = "pulse"
+        tts_provider_name = "Smallest"
+        tts_model_name = "lightning-v3.1"
+    elif engine_type == "mistral-mistral":
+        stt_provider_name = "Deepgram"  # Default STT
+        stt_model_name = "nova-2"
+        tts_provider_name = "Mistral"
+        tts_model_name = "mistral-tts"
 
     # --- Low Latency Support ---
     sentence_queue = asyncio.Queue()

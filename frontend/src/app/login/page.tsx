@@ -11,19 +11,26 @@ export default function LoginPage() {
     const [mfaRequired, setMfaRequired] = useState(false);
     const [mfaToken, setMfaToken] = useState("");
     const [unverified, setUnverified] = useState(false);
+    const [verificationEmail, setVerificationEmail] = useState("");
     const [successMessage, setSuccessMessage] = useState("");
     const [isLoading, setIsLoading] = useState(false);
+    const [isResendLoading, setIsResendLoading] = useState(false);
     const { login } = useAuth();
 
     const handleResend = async () => {
-        setIsLoading(true);
+        const targetEmail = verificationEmail || username;
+        if (!targetEmail) {
+            setError("Enter the email you used to register so we can resend the link.");
+            return;
+        }
+        setIsResendLoading(true);
         setError("");
         setSuccessMessage("");
         try {
-            const res = await fetch("http://localhost:6060/auth/resend-verification", {
+            const res = await fetch("http://localhost:6060/auth/verify-email/resend", {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ username }),
+                body: JSON.stringify({ email: targetEmail }),
             });
             const data = await res.json();
             if (res.ok) {
@@ -34,7 +41,7 @@ export default function LoginPage() {
         } catch (err) {
             setError("Failed to resend link.");
         } finally {
-            setIsLoading(false);
+            setIsResendLoading(false);
         }
     };
 
@@ -64,16 +71,20 @@ export default function LoginPage() {
             const data = await res.json();
 
             if (!res.ok) {
-                if (res.status === 403 && data.detail === "MFA_REQUIRED") {
+                const detail = typeof data.detail === "object" ? data.detail : undefined;
+                const errorCode = detail?.code ?? data.detail;
+                const errorMessage = detail?.message ?? data.detail;
+                if (res.status === 403 && errorCode === "MFA_REQUIRED") {
                     setMfaRequired(true);
                     return;
                 }
-                if (res.status === 403 && data.detail === "EMAIL_UNVERIFIED") {
+                if (res.status === 403 && errorCode === "EMAIL_UNVERIFIED") {
                     setError("Please verify your email before logging in.");
                     setUnverified(true);
+                    setVerificationEmail(detail?.email ?? username);
                     return;
                 }
-                throw new Error(data.detail || "Invalid username or password");
+                throw new Error(errorMessage || "Invalid username or password");
             }
 
             login(data.access_token);
@@ -90,25 +101,25 @@ export default function LoginPage() {
                 <h1 className="text-2xl font-bold text-center text-gray-900 dark:text-gray-100">
                     {mfaRequired ? "MFA Verification" : "Sign in to Rio CRM"}
                 </h1>
-                {error && (
-                    <div className="p-3 text-sm text-red-500 bg-red-100 rounded dark:bg-red-900/30">
-                        {error}
-                        {unverified && (
-                            <button
-                                onClick={handleResend}
-                                disabled={isLoading}
-                                className="ml-2 underline font-bold hover:text-red-700 disabled:opacity-50"
-                            >
-                                Resend Link
-                            </button>
-                        )}
-                    </div>
-                )}
-                {successMessage && (
-                    <div className="p-3 text-sm text-green-500 bg-green-100 rounded dark:bg-green-900/30">
-                        {successMessage}
-                    </div>
-                )}
+                    {error && (
+                        <div className="p-3 text-sm text-red-500 bg-red-100 rounded dark:bg-red-900/30 flex items-center justify-between gap-3">
+                            <span>{error}</span>
+                            {unverified && (
+                                <button
+                                    onClick={handleResend}
+                                    disabled={isResendLoading}
+                                    className="ml-2 underline font-bold hover:text-red-700 disabled:opacity-50 text-right"
+                                >
+                                    {isResendLoading ? "Sending…" : "Resend Link"}
+                                </button>
+                            )}
+                        </div>
+                    )}
+                    {successMessage && (
+                        <div className="p-3 text-sm text-green-500 bg-green-100 rounded dark:bg-green-900/30">
+                            {successMessage}
+                        </div>
+                    )}
                 <form onSubmit={handleSubmit} className="space-y-4">
                     {!mfaRequired ? (
                         <>

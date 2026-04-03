@@ -8,7 +8,13 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def send_whatsapp_message(to_phone: str, body: str, account_sid: str = None, auth_token: str = None, from_whatsapp_number: str = None):
+def send_whatsapp_message(
+    to_phone: str,
+    body: str,
+    account_sid: str = None,
+    auth_token: str = None,
+    from_whatsapp_number: str = None,
+):
     """
     Sends a WhatsApp message using Twilio.
     Args:
@@ -24,7 +30,7 @@ def send_whatsapp_message(to_phone: str, body: str, account_sid: str = None, aut
 
     if not all([account_sid, auth_token, from_whatsapp_number]):
         logger.error("Missing Twilio/WhatsApp configuration in .env.")
-        return False
+        return {"success": False, "message_sid": None, "to_phone": to_phone, "from_phone": from_whatsapp_number}
 
     try:
         client = Client(account_sid, auth_token)
@@ -47,17 +53,28 @@ def send_whatsapp_message(to_phone: str, body: str, account_sid: str = None, aut
         )
         
         logger.info(f"WhatsApp message sent to {target_phone}. SID: {message.sid}")
-        return True
+        return {
+            "success": True,
+            "message_sid": message.sid,
+            "to_phone": target_phone,
+            "from_phone": sender_phone,
+        }
     except Exception as e:
         logger.error(f"Failed to send WhatsApp message: {str(e)}")
-        return False
+        return {
+            "success": False,
+            "message_sid": None,
+            "to_phone": target_phone if 'target_phone' in locals() else to_phone,
+            "from_phone": sender_phone if 'sender_phone' in locals() else from_whatsapp_number,
+            "error": str(e),
+        }
 
 if __name__ == "__main__":
     # Test script (requires .env configuration)
     print("Testing WhatsApp Service...")
     # Replace with a real number for manual test
     success = send_whatsapp_message("+919876543210", "This is a test WhatsApp message from the Rio CRM Service. 🚀")
-    if success:
+    if success.get("success"):
         print("Test WhatsApp message sent!")
     else:
         print("Test WhatsApp message failed. Check .env configuration and console logs.")

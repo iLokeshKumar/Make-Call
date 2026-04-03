@@ -1,11 +1,13 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { User, Mail, Lock, Phone, UserCircle } from "lucide-react";
 
 export default function RegisterPage() {
+    const [companyName, setCompanyName] = useState("");
+    const [companySlug, setCompanySlug] = useState("");
     const [username, setUsername] = useState("");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
@@ -16,18 +18,26 @@ export default function RegisterPage() {
     const [isLoading, setIsLoading] = useState(false);
     const router = useRouter();
 
+    const derivedSlug = useMemo(() => {
+        if (companySlug.trim()) return companySlug.trim().toLowerCase().replace(/\s+/g, "-");
+        return companyName.trim().toLowerCase().replace(/\s+/g, "-");
+    }, [companySlug, companyName]);
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError("");
         setIsLoading(true);
 
         try {
-            const res = await fetch("http://localhost:6060/register", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({
-                    username,
-                    email,
+                const res = await fetch("http://localhost:6060/companies/register", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({
+                        company_name: companyName,
+                        company_slug: derivedSlug,
+                        username,
+                        admin_email: email,
+                        email,
                     password,
                     first_name: firstName,
                     last_name: lastName,
@@ -40,7 +50,11 @@ export default function RegisterPage() {
                 throw new Error(errData.detail || "Registration failed");
             }
 
-            router.push("/login?registered=true");
+            const data = await res.json();
+            if (data.access_token) {
+                localStorage.setItem("token", data.access_token);
+            }
+            router.push("/");
         } catch (err: any) {
             setError(err.message);
         } finally {
@@ -65,51 +79,54 @@ export default function RegisterPage() {
                 )}
 
                 <form onSubmit={handleSubmit} className="space-y-5">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                                <UserCircle size={16} className="mr-2 text-violet-500" />
-                                First Name
-                            </label>
-                            <input
-                                type="text"
-                                required
-                                value={firstName}
-                                onChange={(e) => setFirstName(e.target.value)}
-                                className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                                placeholder="John"
-                            />
-                        </div>
-                        <div className="space-y-2">
-                            <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                                <UserCircle size={16} className="mr-2 text-blue-500" />
-                                Last Name
-                            </label>
-                            <input
-                                type="text"
-                                required
-                                value={lastName}
-                                onChange={(e) => setLastName(e.target.value)}
-                                className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                                placeholder="Doe"
-                            />
-                        </div>
-                    </div>
-
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                     <div className="space-y-2">
-                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                            <User size={16} className="mr-2 text-violet-500" />
-                            Username
+                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                            Company Name
                         </label>
                         <input
                             type="text"
                             required
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
+                            value={companyName}
+                            onChange={(e) => setCompanyName(e.target.value)}
                             className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                            placeholder="johndoe123"
+                            placeholder="Rio CRM"
                         />
                     </div>
+                    <div className="space-y-2">
+                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                            Company Slug
+                        </label>
+                        <input
+                            type="text"
+                            required
+                            value={companySlug}
+                            onChange={(e) => setCompanySlug(e.target.value)}
+                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
+                            placeholder="rio-crm"
+                        />
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Slug must be lowercase letters, numbers, and hyphens. Defaults to company name if empty.
+                        </p>
+                    </div>
+                </div>
+
+                <div className="space-y-2">
+                    <label className="text-sm font-semibold text-slate-700 dark:text-slate-300">
+                        Username
+                    </label>
+                    <input
+                        type="text"
+                        required
+                        value={username}
+                        onChange={(e) => setUsername(e.target.value)}
+                        className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
+                        placeholder="rio"
+                    />
+                    <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Username must be unique (case-insensitive) and will be used to log in.
+                    </p>
+                </div>
 
                     <div className="space-y-2">
                         <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
@@ -154,6 +171,9 @@ export default function RegisterPage() {
                             className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
                             placeholder="••••••••"
                         />
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                            Password must be 6+ characters and include uppercase, lowercase, number, and special symbol; cannot include username, first/last name, or phone.
+                        </p>
                     </div>
 
                     <button

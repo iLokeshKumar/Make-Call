@@ -5,7 +5,7 @@ import asyncio
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
-from credentials_service import get_credential
+from credentials_service import get_company_setting_value
 
 logger = logging.getLogger(__name__)
 

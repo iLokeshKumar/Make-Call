@@ -14,13 +14,26 @@ import { useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { maskEmail, maskPhone } from "@/utils/security";
 
+type LoginHistoryEntry = {
+    id: number;
+    created_at?: string;
+    login_time?: string;
+    ip_address?: string;
+    user_agent?: string;
+    location?: string;
+    device?: string;
+};
+
 export default function ProfilePage() {
-    const { user, token, refreshUser, googleStatus, refreshGoogleStatus, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    const { user, token, refreshUser, googleStatus, refreshGoogleStatus, logoutAll, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
     const [isSaving, setIsSaving] = useState(false);
     const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
     const [otpValue, setOtpValue] = useState("");
+    const [loginHistory, setLoginHistory] = useState<LoginHistoryEntry[]>([]);
+    const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+    const [isLogoutAllLoading, setIsLogoutAllLoading] = useState(false);
     const [isRequestingOtp, setIsRequestingOtp] = useState(false);
     const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
     const [otpError, setOtpError] = useState("");
@@ -70,6 +83,54 @@ export default function ProfilePage() {
         }
     };
 
+    const getInitials = () => {
+        const first = (user?.first_name || "").trim();
+        const last = (user?.last_name || "").trim();
+        if (!first && !last) {
+            const un = user?.username || "U";
+            return un.slice(0, 2).toUpperCase();
+        }
+        const parts = `${first} ${last}`.trim().split(/\s+/);
+        if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+        return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+    };
+
+    const fetchLoginHistory = async () => {
+        if (!token) return;
+        setIsHistoryLoading(true);
+        try {
+            const res = await fetch("http://localhost:6060/auth/login-history", {
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                setLoginHistory(await res.json());
+            } else {
+                console.warn("Failed login history", await res.text());
+            }
+        } catch (err) {
+            console.error("Error loading login history", err);
+        } finally {
+            setIsHistoryLoading(false);
+        }
+    };
+
+    const formatLoginTimestamp = (entry: LoginHistoryEntry) => {
+        const ts = entry.created_at ?? entry.login_time;
+        if (!ts) return "Unknown";
+        const parsed = new Date(ts);
+        return Number.isNaN(parsed.getTime()) ? "Unknown" : parsed.toLocaleString();
+    };
+
+    const handleLogoutAll = async () => {
+        if (!token) return;
+        setIsLogoutAllLoading(true);
+        try {
+            await logoutAll();
+        } finally {
+            setIsLogoutAllLoading(false);
+        }
+    };
+
     // Add this near the top of ProfilePage component
     const hasHandledCode = useRef(false);
 
@@ -110,6 +171,7 @@ export default function ProfilePage() {
     useEffect(() => {
         if (token) {
             refreshGoogleStatus();
+            fetchLoginHistory();
         }
     }, [token]);
 
@@ -139,6 +201,37 @@ export default function ProfilePage() {
             setIsConnectingGoogle(false);
         }
     };
+
+    useEffect(() => {
+        const code = searchParams.get("code");
+        const state = searchParams.get("state");
+        if (!code || !token) return;
+        const submitCallback = async () => {
+            try {
+                const res = await fetch("http://localhost:6060/auth/google/callback", {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        Authorization: `Bearer ${token}`,
+                    },
+                    body: JSON.stringify({ code, state }),
+                });
+                if (!res.ok) throw new Error("Failed to finish Google OAuth.");
+                await refreshUser();
+                await refreshGoogleStatus();
+            } catch (err) {
+                console.error("Google callback error:", err);
+            } finally {
+                setIsConnectingGoogle(false);
+                const params = new URLSearchParams(window.location.search);
+                params.delete("code");
+                params.delete("state");
+                const base = window.location.pathname;
+                window.history.replaceState({}, "", `${base}?${params.toString()}`);
+            }
+        };
+        submitCallback();
+    }, [searchParams.toString(), token, refreshUser, refreshGoogleStatus]);
 
     const handleDisconnectGoogle = async () => {
         if (!window.confirm("Disconnect your Google account? You won't be able to generate Meet links automatically.")) return;
@@ -285,18 +378,21 @@ export default function ProfilePage() {
                     </div>
                 </div>
 
-                <form onSubmit={handleSave} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <form onSubmit={handleSave} className="space-y-8">
 
-                    {/* Left Column: Avatar & Quick Info */}
-                    <div className="lg:col-span-1 space-y-6">
-                        <div className="glass-panel p-8 rounded-3xl flex flex-col items-center text-center space-y-4">
+                    {/* Avatar and Profile Info */}
+                    <div className="glass-panel p-8 rounded-3xl flex flex-col items-center text-center space-y-4">
                             <div className="relative group">
-                                <div className="h-32 w-32 rounded-full bg-gradient-to-br from-violet-600 to-blue-600 p-1 shadow-2xl shadow-violet-500/20">
+                                <div className="h-24 w-24 rounded-full bg-gradient-to-br from-violet-600 to-blue-600 p-1 shadow-2xl shadow-violet-500/20">
                                     <div className="h-full w-full rounded-full bg-slate-900 flex items-center justify-center overflow-hidden">
                                         {formData.profile_picture_url ? (
                                             <img src={formData.profile_picture_url} alt="Profile" className="h-full w-full object-cover" />
+                                        ) : user?.profile_picture_url ? (
+                                            <img src={user.profile_picture_url} alt="Profile" className="h-full w-full object-cover" />
                                         ) : (
-                                            <UserIcon size={48} className="text-slate-700" />
+                                            <div className="flex items-center justify-center h-full w-full text-2xl font-bold text-white bg-gradient-to-br from-violet-500 to-blue-500">
+                                                {getInitials()}
+                                            </div>
                                         )}
                                     </div>
                                 </div>
@@ -310,14 +406,14 @@ export default function ProfilePage() {
                                 <button
                                     type="button"
                                     onClick={() => document.getElementById('profile-upload')?.click()}
-                                    className="absolute bottom-1 right-1 h-10 w-10 bg-slate-800 border border-slate-700 rounded-full flex items-center justify-center text-violet-400 hover:text-white hover:bg-violet-600 transition-all shadow-lg"
+                                    className="absolute bottom-0 right-0 h-8 w-8 bg-slate-800 border border-slate-700 rounded-full flex items-center justify-center text-violet-400 hover:text-white hover:bg-violet-600 transition-all shadow-lg"
                                 >
-                                    <Camera size={18} />
+                                    <Camera size={14} />
                                 </button>
                             </div>
 
                             <div className="space-y-1">
-                                <h2 className="text-xl font-bold text-white">{user?.first_name || 'User'} {user?.last_name || ''}</h2>
+                                <h2 className="text-lg font-bold text-white">{user?.first_name || 'User'} {user?.last_name || ''}</h2>
                                 <p className="text-xs font-mono text-violet-400 uppercase tracking-widest">@{user?.username}</p>
                             </div>
 
@@ -333,18 +429,8 @@ export default function ProfilePage() {
                             </div>
                         </div>
 
-                        {/* Read-Only Alert */}
-                        <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 flex gap-3">
-                            <Lock className="text-amber-500 shrink-0" size={18} />
-                            <p className="text-[11px] text-amber-200/80 leading-relaxed font-medium">
-                                Username and email are immutable for security. Contact an admin if you need to update these.
-                            </p>
-                        </div>
-                    </div>
-
-                    {/* Right Column: Edit Fields */}
-                    <div className="lg:col-span-2 space-y-6">
-                        <div className="glass-panel p-8 rounded-3xl space-y-8">
+                    {/* Personal Information Form */}
+                    <div className="glass-panel p-8 rounded-3xl space-y-8">
 
                             {/* Personal Section */}
                             <div className="space-y-6">
@@ -477,94 +563,148 @@ export default function ProfilePage() {
                             </div>
                         </div>
 
-                        {/* Connected Accounts Section */}
-                        <div className="glass-panel p-8 rounded-3xl space-y-6">
-                            <div className="flex items-center space-x-2 text-slate-400 border-b border-white/5 pb-2">
-                                <Globe size={16} />
-                                <span className="text-xs font-bold uppercase tracking-wider">Connected Accounts</span>
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-6">
-                                {/* Proactive Warning Banner */}
-                                {googleStatus && googleStatus.status !== "valid" && googleStatus.status !== "disconnected" && (
-                                    <div className={clsx(
-                                        "p-4 rounded-2xl border flex items-start gap-3 animate-in fade-in slide-in-from-top-2",
-                                        googleStatus.status === "expiring_soon" ? "bg-amber-500/10 border-amber-500/20 text-amber-200" : "bg-red-500/10 border-red-500/20 text-red-200"
-                                    )}>
-                                        <AlertCircle className={googleStatus.status === "expiring_soon" ? "text-amber-500" : "text-red-500"} size={20} />
-                                        <div className="space-y-1">
-                                            <p className="text-sm font-bold">
-                                                {googleStatus.status === "expiring_soon" ? "Connection Expiring Soon" : "Connection Expired"}
-                                            </p>
-                                            <p className="text-xs opacity-80 leading-relaxed">
-                                                {googleStatus.message} Reconnect now to ensure your Google Meet links are generated without issues.
-                                            </p>
-                                            <button 
-                                                onClick={handleConnectGoogle}
-                                                className="mt-2 text-xs font-black uppercase tracking-widest py-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/20 transition-all border border-white/10"
-                                            >
-                                                Reconnect Now
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
-
-                                <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-violet-500/30 transition-all group">
-                                    <div className="flex items-center space-x-4">
-                                        <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-white text-slate-900 font-bold shadow-lg">
-                                            G
-                                        </div>
-                                        <div>
-                                            <div className="flex items-center gap-2">
-                                                <p className="font-bold text-white">Google Calendar</p>
-                                                {googleStatus && (
-                                                    <span className={clsx(
-                                                        "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-tighter",
-                                                        googleStatus.status === "valid" ? "bg-emerald-500/20 text-emerald-400" :
-                                                        googleStatus.status === "expiring_soon" ? "bg-amber-500/20 text-amber-400" :
-                                                        googleStatus.status === "expired" ? "bg-red-500/20 text-red-400" :
-                                                        "bg-slate-500/20 text-slate-400"
-                                                    )}>
-                                                        {googleStatus.status.replace("_", " ")}
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <p className="text-xs text-slate-500">
-                                                {user?.google_account_email ? `Connected: ${user.google_account_email}` : "For Google Meet integration"}
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    {user?.google_account_email ? (
-                                        <button
-                                            type="button"
-                                            onClick={handleDisconnectGoogle}
-                                            className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500 hover:text-white transition-all"
-                                        >
-                                            <XCircle size={14} />
-                                            <span>Disconnect</span>
-                                        </button>
-                                    ) : (
-                                        <button
-                                            type="button"
-                                            onClick={handleConnectGoogle}
-                                            disabled={isConnectingGoogle}
-                                            className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
-                                        >
-                                            {isConnectingGoogle ? <RefreshCw size={14} className="animate-spin" /> : <ExternalLink size={14} />}
-                                            <span>Connect Google</span>
-                                        </button>
-                                    )}
+                    {/* Read-Only Alert */}
+                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4">
+                        <div className="flex gap-2">
+                            <Lock className="text-amber-500 shrink-0 mt-0.5" size={14} />
+                            <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                                Username and email are immutable for security.
+                            </p>
+                        </div>
+                    </div>
+                        <div className="glass-panel p-8 rounded-3xl space-y-4">
+                            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                                <div>
+                                    <h3 className="text-lg font-bold">Login History</h3>
+                                    <p className="text-xs text-slate-400">Recent sign-ins and devices. Use 'Sign out everywhere' to revoke all sessions.</p>
                                 </div>
+                                <button
+                                    type="button"
+                                    onClick={handleLogoutAll}
+                                    disabled={isLogoutAllLoading}
+                                    className="px-4 py-2 rounded-lg bg-red-500 text-white text-xs font-bold uppercase tracking-widest hover:bg-red-600 transition-all disabled:opacity-50"
+                                >
+                                    {isLogoutAllLoading ? "Signing out..." : "Sign out everywhere"}
+                                </button>
                             </div>
+
+                            {isHistoryLoading ? (
+                                <div className="text-sm text-slate-400">Loading history…</div>
+                            ) : loginHistory.length === 0 ? (
+                                <div className="text-sm text-slate-400">No login history available yet.</div>
+                            ) : (
+                                <div className="overflow-auto max-h-64">
+                                    <table className="w-full text-left text-xs text-slate-300 border-collapse">
+                                        <thead>
+                                            <tr className="text-slate-400 uppercase text-[10px] tracking-wider">
+                                                <th className="px-2 py-2">When</th>
+                                                <th className="px-2 py-2">IP</th>
+                                                <th className="px-2 py-2">User Agent</th>
+                                                <th className="px-2 py-2">Location</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {loginHistory.map((entry) => (
+                                                <tr key={entry.id} className="hover:bg-slate-900/40">
+                                                    <td className="px-2 py-2">{formatLoginTimestamp(entry)}</td>
+                                                    <td className="px-2 py-2">{entry.ip_address || "-"}</td>
+                                                    <td className="px-2 py-2 text-[11px] max-w-[240px] truncate" title={entry.user_agent}>{entry.user_agent || "-"}</td>
+                                                    <td className="px-2 py-2">{entry.location || "Unknown"}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
                         </div>
 
-                        {/* MFA Section */}
-                        <div className="glass-panel p-8 rounded-3xl overflow-hidden relative">
-                            <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
-                                <Shield size={120} className="text-violet-400" />
+                        {/* Security (MFA) */}
+                        <div className="glass-panel p-8 rounded-3xl space-y-4">
+                            <div className="flex items-center space-x-2 text-slate-400">
+                                <Shield size={16} />
+                                <span className="text-xs font-bold uppercase tracking-wider">Security</span>
                             </div>
                             <MFASetup />
+                        </div>
+
+                        {/* Google Integration */}
+                        <div className="glass-panel p-8 rounded-3xl space-y-4">
+                            <div className="flex items-center space-x-2 text-slate-400">
+                                <Globe size={16} />
+                                <span className="text-xs font-bold uppercase tracking-wider">Google Integration</span>
+                            </div>
+
+                            {/* Proactive Warning Banner */}
+                            {googleStatus && googleStatus.status !== "valid" && googleStatus.status !== "disconnected" && (
+                                <div className={clsx(
+                                    "p-4 rounded-2xl border flex items-start gap-3 animate-in fade-in slide-in-from-top-2",
+                                    googleStatus.status === "expiring_soon" ? "bg-amber-500/10 border-amber-500/20 text-amber-200" : "bg-red-500/10 border-red-500/20 text-red-200"
+                                )}>
+                                    <AlertCircle className={googleStatus.status === "expiring_soon" ? "text-amber-500" : "text-red-500"} size={20} />
+                                    <div className="space-y-1">
+                                        <p className="text-sm font-bold">
+                                            {googleStatus.status === "expiring_soon" ? "Connection Expiring Soon" : "Connection Expired"}
+                                        </p>
+                                        <p className="text-xs opacity-80 leading-relaxed">
+                                            {googleStatus.message} Reconnect now to ensure your Google Meet links are generated without issues.
+                                        </p>
+                                        <button 
+                                            onClick={handleConnectGoogle}
+                                            className="mt-2 text-xs font-black uppercase tracking-widest py-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/20 transition-all border border-white/10"
+                                        >
+                                            Reconnect Now
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
+
+                            <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-violet-500/30 transition-all group">
+                                <div className="flex items-center space-x-4">
+                                    <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-white text-slate-900 font-bold shadow-lg">
+                                        G
+                                    </div>
+                                    <div>
+                                        <div className="flex items-center gap-2">
+                                            <p className="font-bold text-white">Google Calendar</p>
+                                            {googleStatus && (
+                                                <span className={clsx(
+                                                    "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-tighter",
+                                                    googleStatus.status === "valid" ? "bg-emerald-500/20 text-emerald-400" :
+                                                    googleStatus.status === "expiring_soon" ? "bg-amber-500/20 text-amber-400" :
+                                                    googleStatus.status === "expired" ? "bg-red-500/20 text-red-400" :
+                                                    "bg-slate-500/20 text-slate-400"
+                                                )}>
+                                                    {googleStatus.status.replace("_", " ")}
+                                                </span>
+                                            )}
+                                        </div>
+                                        <p className="text-xs text-slate-500">
+                                            {user?.google_account_email ? `Connected: ${user.google_account_email}` : "For Google Meet integration"}
+                                        </p>
+                                    </div>
+                                </div>
+
+                                {user?.google_account_email ? (
+                                    <button
+                                        type="button"
+                                        onClick={handleDisconnectGoogle}
+                                        className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500 hover:text-white transition-all"
+                                    >
+                                        <XCircle size={14} />
+                                        <span>Disconnect</span>
+                                    </button>
+                                ) : (
+                                    <button
+                                        type="button"
+                                        onClick={handleConnectGoogle}
+                                        disabled={isConnectingGoogle}
+                                        className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
+                                    >
+                                        {isConnectingGoogle ? <RefreshCw size={14} className="animate-spin" /> : <ExternalLink size={14} />}
+                                        <span>Connect Google</span>
+                                    </button>
+                                )}
+                            </div>
                         </div>
 
                         {/* Danger Zone */}
@@ -594,7 +734,6 @@ export default function ProfilePage() {
                                 </button>
                             </div>
                         </div>
-                    </div>
                 </form>
             </div>
 

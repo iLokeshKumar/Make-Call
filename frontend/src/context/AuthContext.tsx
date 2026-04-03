@@ -3,10 +3,26 @@
 import React, { createContext, useContext, useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 
+interface Company {
+    id: number;
+    name: string;
+    domain?: string;
+    website?: string;
+    logo_url?: string;
+    primary_color: string;
+    is_active: boolean;
+    subscription_tier: string;
+    max_users: number;
+    features_enabled: string;
+}
+
+type UserRole = "company_admin" | "company_owner" | "sales_representative";
+
 interface User {
+    id: number;
     username: string;
     email: string;
-    role: "admin" | "sales_rep";
+    role: UserRole;
     mfa_enabled: boolean;
     is_active: boolean;
     email_verified: boolean;
@@ -14,9 +30,11 @@ interface User {
     last_name?: string;
     phone_number?: string;
     profile_picture_url?: string;
+    company_id: number;
     company_name?: string;
     company_website?: string;
     google_account_email?: string;
+    company?: Company;
 }
 
 export interface GoogleStatus {
@@ -34,6 +52,7 @@ interface AuthContextType {
     logout: () => void;
     refreshUser: () => Promise<void>;
     refreshGoogleStatus: () => Promise<void>;
+    logoutAll: () => Promise<void>;
     isLoading: boolean;
     isSessionExpired: boolean;
     sessionTimeout: () => void;
@@ -51,6 +70,7 @@ const AuthContext = createContext<AuthContextType>({
     logout: () => { },
     refreshUser: async () => { },
     refreshGoogleStatus: async () => { },
+    logoutAll: async () => { },
     isLoading: true,
     isSessionExpired: false,
     sessionTimeout: () => { },
@@ -105,6 +125,12 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         }
     }, []);
 
+    const normalizeRole = (role?: string): UserRole => {
+        if (role === "company_owner") return "company_owner";
+        if (role === "company_admin") return "company_admin";
+        return "sales_representative";
+    };
+
     const fetchUser = async (authToken: string) => {
         try {
             const res = await fetch("http://localhost:6060/users/me", {
@@ -112,7 +138,10 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
             });
             if (res.ok) {
                 const userData = await res.json();
-                setUser(userData);
+                setUser({
+                    ...userData,
+                    role: normalizeRole(userData.role),
+                });
             } else if (res.status === 401) {
                 sessionTimeout();
             } else {
@@ -151,6 +180,23 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
         // We don't call logout() here yet, we wait for the user to click OK
     };
 
+    const logoutAll = async () => {
+        if (!token) return;
+        try {
+            const res = await fetch("http://localhost:6060/auth/logout-all", {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.ok) {
+                logout();
+            } else {
+                console.warn("logout-all failed", await res.text());
+            }
+        } catch (err) {
+            console.error("logout-all error", err);
+        }
+    };
+
     const refreshUser = async () => {
         if (token) {
             await fetchUser(token);
@@ -175,7 +221,7 @@ export const AuthProvider = ({ children }: { children: React.ReactNode }) => {
 
     return (
         <AuthContext.Provider value={{
-            user, token, googleStatus, login, logout, refreshUser, refreshGoogleStatus, isLoading, isSessionExpired, sessionTimeout,
+            user, token, googleStatus, login, logout, logoutAll, refreshUser, refreshGoogleStatus, isLoading, isSessionExpired, sessionTimeout,
             showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft
         }}>
             {children}

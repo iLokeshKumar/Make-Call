@@ -5,7 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
-  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog
+  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -17,6 +17,7 @@ const navItems = [
   { name: "Inventory", href: "/inventory", icon: Package, adminOnly: true },
   { name: "Calls", href: "/calls", icon: Phone },
   { name: "Profile", href: "/profile", icon: UserCog },
+  { name: "Company", href: "/company-profile", icon: Building2, adminOnly: true },
   { name: "Settings", href: "/settings", icon: Settings, adminOnly: true },
   { name: "Analytics", href: "/analytics", icon: Activity },
 ];
@@ -67,7 +68,9 @@ export default function Sidebar() {
   // Timer State
   const REVEAL_DURATION = 120; // 2 minutes in seconds
 
-  const filteredItems = navItems.filter(item => !item.adminOnly || user?.role === 'admin');
+  const filteredItems = navItems.filter(
+    (item) => !item.adminOnly || ["admin", "company_admin", "company_owner"].includes(user?.role || "")
+  );
 
   const handleRequestReveal = async () => {
     if (showPersonalDetails) {
@@ -164,7 +167,7 @@ export default function Sidebar() {
             {!isCollapsed && (
               <div className="animate-in fade-in slide-in-from-left-2 duration-300">
                 <h1 className="text-xl font-bold tracking-tight truncate max-w-[180px]">
-                  <span className="gradient-text">{user?.company_name || "Rio"}</span>
+                  <span className="gradient-text">{user?.company_name || ""}</span>
                   <span className="text-slate-700 dark:text-slate-200 ml-1">CRM</span>
                 </h1>
                 <p className="text-[10px] text-slate-500 dark:text-slate-400 font-medium uppercase tracking-tighter">Digital Sales Representative</p>

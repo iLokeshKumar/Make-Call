@@ -1,58 +1,214 @@
-import sys
 import os
-import uuid
+import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, WebSocket, Depends
+from fastapi import FastAPI, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from database import init_db, get_session, engine
-from models.models import SystemSettings, Interaction, Lead, Product, User, Appointment, Demo
+from database import engine, init_db
+from models.models import Company, Interaction, Lead, User, utc_now
+from pipelines.voice_pipeline import VoicePipeline
+from routes import admin, analytics, auth, automation, call_task, campaign, crm, quote, requirement, templates, telephony, tracking
+from services.next_action_service import dispatch_next_action
+from services.outcome_service import apply_call_outcome, classify_outcome_from_transcript
+from services.post_call_service import extract_and_save_requirements
+from services.llm import get_llm_service
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import setup_logger
-from rag_service import sync_products_to_chroma
-from utils.config import PORT
-from communicators import TwilioCommunicator, ExotelCommunicator, EnableXCommunicator
-from pipelines.voice_pipeline import VoicePipeline
-from utils import settings_cache
 
-# Setup logger
 logger = setup_logger(__name__)
+
+
+def get_company_setting_value(session: Session, company_id: int, key: str) -> str | None:
+    from credentials_service import get_company_setting_value as _get_value
+
+    return _get_value(session, company_id, key)
+
+
+def resolve_call_context(session: Session, user_id: str | None, lead_id: str | None) -> tuple[User | None, Lead | None]:
+    target_user = None
+    lead = None
+
+    if user_id and user_id.isdigit():
+        target_user = session.get(User, int(user_id))
+
+    if lead_id and lead_id.isdigit():
+        lead = session.get(Lead, int(lead_id))
+        if lead and not target_user and lead.owner_user_id:
+            target_user = session.get(User, lead.owner_user_id)
+
+    if not target_user:
+        target_user = session.exec(select(User).order_by(User.id.asc())).first()
+
+    return target_user, lead
+
+
+def ensure_interaction(
+    session: Session,
+    target_user: User | None,
+    lead: Lead | None,
+    interaction_id: str | None,
+    source: str,
+) -> str:
+    if interaction_id and interaction_id.isdigit():
+        return interaction_id
+
+    interaction = Interaction(
+        company_id=target_user.company_id if target_user else (lead.company_id if lead else 0),
+        lead_id=lead.id if lead else None,
+        user_id=target_user.id if target_user else None,
+        type="call",
+        channel="call",
+        direction="inbound",
+        source=source,
+        content="Voice Call",
+        status="active",
+        session_id=interaction_id,
+        started_at=utc_now(),
+        created_by=target_user.id if target_user else None,
+        updated_by=target_user.id if target_user else None,
+    )
+    session.add(interaction)
+    session.commit()
+    session.refresh(interaction)
+    return str(interaction.id)
+
+
+async def run_media_stream(websocket: WebSocket, source: str) -> None:
+    await websocket.accept()
+
+    user_id = websocket.query_params.get("user_id")
+    lead_id = websocket.query_params.get("lead_id")
+    raw_interaction_id = websocket.query_params.get("interaction_id")
+    call_task_id = websocket.query_params.get("call_task_id")
+
+    with Session(engine) as session:
+        target_user, lead = resolve_call_context(session, user_id, lead_id)
+        if not target_user and not lead:
+            await websocket.close()
+            return
+
+        interaction_id = ensure_interaction(session, target_user, lead, raw_interaction_id, source)
+        lead_context = get_comprehensive_lead_context(session, lead.id) if lead else None
+
+        company = session.get(Company, target_user.company_id) if target_user else None
+        company_name = company.name if company else "Rio CRM"
+
+        system_prompt = (
+            get_company_setting_value(session, target_user.company_id, "SYSTEM_PROMPT")
+            if target_user
+            else None
+        ) or "You are Rio, a concise inside-sales voice assistant."
+        stt_provider = (
+            get_company_setting_value(session, target_user.company_id, "STT_PROVIDER")
+            if target_user
+            else None
+        ) or "deepgram"
+        llm_provider = (
+            get_company_setting_value(session, target_user.company_id, "LLM_PROVIDER")
+            if target_user
+            else None
+        ) or "mistral"
+        tts_provider = (
+            get_company_setting_value(session, target_user.company_id, "TTS_PROVIDER")
+            if target_user
+            else None
+        ) or "cartesia"
+
+        communicator = telephony.get_communicator_for_source(source, websocket)
+        transcript_accumulator: list[str] = []
+        pipeline = VoicePipeline(
+            communicator=communicator,
+            interaction_id=interaction_id,
+            system_prompt=system_prompt,
+            transcript_accumulator=transcript_accumulator,
+            session=session,
+            stt_provider=stt_provider,
+            llm_provider=llm_provider,
+            tts_provider=tts_provider,
+            company_name=company_name,
+            user=target_user,
+            lead_context=lead_context,
+        )
+
+        call_status = "completed"
+        try:
+            await pipeline.run()
+        except Exception as exc:
+            call_status = "failed"
+            logger.error("Voice pipeline failed for interaction %s: %s", interaction_id, exc, exc_info=True)
+        finally:
+            pipeline.flush_transcript()
+            db_interaction = session.get(Interaction, int(interaction_id)) if interaction_id.isdigit() else None
+            if db_interaction:
+                db_interaction.status = "completed" if call_status == "completed" else "failed"
+                db_interaction.ended_at = utc_now()
+                db_interaction.updated_by = target_user.id if target_user else None
+                session.add(db_interaction)
+                session.commit()
+
+            if call_task_id and call_task_id.isdigit() and target_user:
+                try:
+                    transcript = db_interaction.transcript if db_interaction else None
+                    raw_status = "completed" if call_status == "completed" else "failed"
+                    outcome_confidence = None
+                    if call_status == "completed" and transcript:
+                        classification = await classify_outcome_from_transcript(None, transcript)
+                        raw_status = classification["normalized_outcome"]
+                        outcome_confidence = classification.get("confidence")
+
+                    apply_call_outcome(
+                        session=session,
+                        company_id=target_user.company_id,
+                        actor_user_id=target_user.id,
+                        task_id=int(call_task_id),
+                        interaction_id=int(interaction_id) if interaction_id.isdigit() else None,
+                        raw_status=raw_status,
+                        transcript=transcript,
+                        confidence=outcome_confidence,
+                    )
+                except Exception as exc:
+                    logger.warning("Could not update CallTask %s: %s", call_task_id, exc)
+
+            if db_interaction and db_interaction.lead_id and db_interaction.transcript and target_user:
+                try:
+                    llm_service = get_llm_service(
+                        "mistral",
+                        "You extract structured B2B sales requirements from transcripts.",
+                    )
+                    saved = await extract_and_save_requirements(
+                        session=session,
+                        llm_service=llm_service,
+                        company_id=target_user.company_id,
+                        actor_user_id=target_user.id,
+                        interaction_id=db_interaction.id,
+                        lead_id=db_interaction.lead_id,
+                        transcript=db_interaction.transcript,
+                    )
+                    if saved:
+                        dispatch_result = dispatch_next_action(
+                            session=session,
+                            company_id=target_user.company_id,
+                            actor_user_id=target_user.id,
+                            lead_id=db_interaction.lead_id,
+                            requirement=saved,
+                        )
+                        logger.info("Post-call next action result: %s", dispatch_result)
+                except Exception as exc:
+                    logger.warning("Post-call processing failed for interaction %s: %s", interaction_id, exc)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup logic
     init_db()
-    logger.info("✓ Database initialized")
-    
-    # Heavy startup tasks in background
-    async def startup_tasks():
-        try:
-            from rag_service import seed_knowledge_if_empty
-            seed_knowledge_if_empty()
-            with Session(engine) as session:
-                products = session.exec(select(Product)).all()
-                sync_products_to_chroma(products)
-            logger.info("✓ Background startup tasks (RAG sync) complete")
-        except Exception as e:
-            logger.error(f"❌ Error in background startup tasks: {e}")
-
-    import asyncio
-    asyncio.create_task(startup_tasks())
-    
-    # Fast startup tasks
-    with Session(engine) as session:
-        settings_cache.load(session)
-    
     yield
 
-app = FastAPI(lifespan=lifespan)
 
-# Middleware
+app = FastAPI(title="Multi-Tenant CRM API", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -61,238 +217,34 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Routes
-from routes import auth, crm, telephony, analytics
 app.include_router(auth.router)
-app.include_router(crm.router)
-app.include_router(telephony.router)
 app.include_router(analytics.router)
+app.include_router(admin.router)
+app.include_router(automation.router)
+app.include_router(crm.router)
+app.include_router(campaign.router)
+app.include_router(quote.router)
+app.include_router(requirement.router)
+app.include_router(call_task.router)
+app.include_router(templates.router)
+app.include_router(telephony.router)
+app.include_router(tracking.router)
 
-# Serve uploads
-import os
 uploads_path = os.path.join(os.getcwd(), "uploads")
-if not os.path.exists(uploads_path):
-    os.makedirs(uploads_path, exist_ok=True)
+os.makedirs(uploads_path, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
 
+
 @app.get("/")
-async def index():
-    return {"message": "Rio CRM Voice API is running"}
+async def root():
+    return {"message": "API is running"}
+
 
 @app.websocket("/media-stream")
-async def handle_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
-    """Unified media-stream handler using VoicePipeline."""
-    logger.info("⚡ [WS] Incoming connection to /media-stream")
-    await websocket.accept()
-    
-    # Robust Interaction ID parsing
-    interaction_id = websocket.query_params.get("interaction_id")
-    
-    # If interaction_id is a session string or missing, create a placeholder Interaction record immediately 
-    # so we have a numeric ID for latency logging and linking.
-    if not interaction_id or not interaction_id.isdigit():
-        try:
-            db_i = Interaction(
-                lead_id=int(websocket.query_params.get("lead_id", "0")),
-                type="call",
-                content="Inbound Call",
-                timestamp=datetime.now(timezone.utc),
-                created_by="Rio AI"
-            )
-            session.add(db_i)
-            session.commit()
-            session.refresh(db_i)
-            interaction_id = str(db_i.id)
-            logger.info(f"✨ Created numeric Interaction ID: {interaction_id} (Replaced session string)")
-        except Exception as e:
-            fallback_id = f"session_{uuid.uuid4().hex[:8]}"
-            logger.warning(f"⚠️ Failed to create numeric Interaction ID: {e}. Using fallback: {fallback_id}")
-            interaction_id = fallback_id
-    
-    # Pre-fetch lead context
-    lead_id = websocket.query_params.get("lead_id", "0")
-    lead_context = None
-    try:
-        lid = int(lead_id)
-        if lid > 0:
-            lead_context = get_comprehensive_lead_context(session, lid)
-            if lead_context:
-                logger.info(f"📋 [Lead Pre-fetch] Loaded comprehensive context for lead #{lid}")
-    except (ValueError, TypeError) as e:
-        logger.error(f"❌ Error during lead pre-fetch: {e}")
-        pass
+async def media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "twilio")
 
-    # Identify relevant user for settings & branding
-    # Ideally, we look up the Lead first, then find which User 'owns' this lead or which User initiated the call.
-    # For now, we attempt to find the user from the lead's 'created_by' or default to the primary admin.
-    target_user = None
-    if lead_id and int(lead_id) > 0:
-        lead_obj = session.get(Lead, int(lead_id))
-        if lead_obj and lead_obj.created_by:
-            target_user = session.exec(select(User).where(User.username == lead_obj.created_by)).first()
-    
-    if not target_user:
-        target_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
-    
-    user_id = target_user.id if target_user else None
-    all_settings = settings_cache.get_all(user_id)
-    
-    if target_user:
-        logger.info(f"👤 Using settings/branding for User: {target_user.username} (ID: {user_id}) | Company: {target_user.company_name}")
-    else:
-        logger.warning("⚠️ No users found in database!")
-
-    company_name = target_user.company_name if target_user and target_user.company_name else "Rio CRM"
-    company_website = target_user.company_website if target_user and target_user.company_website else "https://rio-crm.example.com/"
-    
-    system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
-    logger.info(f"📜 Original System Prompt (first 50 chars): {system_prompt[:50]}...")
-
-    # Inject dynamic company name into system prompt if not already present
-    placeholders = ["{company_name}", "Yexis Electronics (Chennai)", "Yexis Electronics", "Rio CRM"]
-    replaced = False
-    for ph in placeholders:
-        if ph in system_prompt:
-            system_prompt = system_prompt.replace(ph, company_name)
-            logger.info(f"✅ Replaced placeholder '{ph}' with '{company_name}' in prompt.")
-            replaced = True
-            break
-    if not replaced:
-        logger.warning("⚠️ No matching placeholders found in system prompt for branding.")
-        
-    stt_provider = all_settings.get("stt_provider", "deepgram")
-    llm_provider = all_settings.get("llm_provider", "mistral")
-    tts_provider = all_settings.get("tts_provider", "cartesia")
-    
-    # 1. Instantiate Communicator (Defaulting to Twilio for /media-stream)
-    communicator = TwilioCommunicator(websocket)
-    
-    # 2. Setup Voice Pipeline (Context will be loaded proactively if lead_id found in stream)
-    transcript_accumulator = []
-    try:
-        pipeline = VoicePipeline(
-            communicator, 
-            interaction_id, 
-            system_prompt, 
-            transcript_accumulator, 
-            session,
-            stt_provider=stt_provider,
-            llm_provider=llm_provider,
-            tts_provider=tts_provider,
-            company_name=company_name,
-            user=target_user,
-            lead_context=None, # Loaded proactively by pipeline
-        )
-        logger.info(f"📞 Twilio connection established | Interaction: {interaction_id} | Providers: STT={stt_provider}, LLM={llm_provider}, TTS={tts_provider} | Company: {company_name}")
-    except Exception as e:
-        logger.error(f"❌ [WS] Failed to initialize VoicePipeline: {e}")
-        await websocket.close()
-        return
-    
-    try:
-        await pipeline.run()
-    except Exception as e:
-        logger.error(f"❌ Pipeline Error: {e}")
-    finally:
-        logger.info(f"👋 Pipeline finished for session: {interaction_id}")
 
 @app.websocket("/exotel-media-stream")
-async def handle_exotel_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
-    """Exotel media-stream handler — PCM s16le 8kHz, stream_sid at root."""
-    logger.info("⚡ [WS] Incoming connection to /exotel-media-stream")
-    # Attempt to bypass ngrok browser warning by sending the header in the handshake
-    try:
-        await websocket.accept(headers=[(b"ngrok-skip-browser-warning", b"true")])
-    except TypeError:
-        # Fallback for FastAPI versions that don't support headers in accept()
-        await websocket.accept()
-
-    interaction_id = websocket.query_params.get("interaction_id")
-    lead_id = websocket.query_params.get("lead_id", "0")
-
-    # Ensure numeric Interaction ID
-    if not interaction_id or not interaction_id.isdigit():
-        try:
-            db_i = Interaction(
-                lead_id=int(lead_id),
-                type="call",
-                content="Inbound Call",
-                timestamp=datetime.now(timezone.utc),
-                created_by="Rio AI"
-            )
-            session.add(db_i)
-            session.commit()
-            session.refresh(db_i)
-            interaction_id = str(db_i.id)
-            logger.info(f"✨ [Exotel] Created numeric Interaction ID: {interaction_id}")
-        except Exception as e:
-            interaction_id = f"exo_{uuid.uuid4().hex[:8]}"
-            logger.warning(f"⚠️ [Exotel] Failed to create numeric ID: {e}. Using fallback: {interaction_id}")
-
-    # Pre-fetch lead context
-    lead_id = websocket.query_params.get("lead_id", "0")
-    lead_context = None
-    try:
-        lid = int(lead_id)
-        if lid > 0:
-            lead_context = get_comprehensive_lead_context(session, lid)
-            if lead_context:
-                logger.info(f"📋 [Lead Pre-fetch] Exotel: Loaded comprehensive context for lead #{lid}")
-    except (ValueError, TypeError) as e:
-        logger.error(f"❌ Error during exotel lead pre-fetch: {e}")
-        pass
-
-    # Exotel user identification
-    target_user = None
-    if lead_id and int(lead_id) > 0:
-        lead_obj = session.get(Lead, int(lead_id))
-        if lead_obj and lead_obj.created_by:
-            target_user = session.exec(select(User).where(User.username == lead_obj.created_by)).first()
-    
-    if not target_user:
-        target_user = session.exec(select(User).where(User.id == 1)).first() or session.exec(select(User)).first()
-    
-    user_id = target_user.id if target_user else None
-    all_settings = settings_cache.get_all(user_id)
-    company_name = target_user.company_name if target_user and target_user.company_name else "Rio CRM"
-
-    system_prompt = all_settings.get("system_instruction", "You are a helpful assistant.")
-    for ph in ["{company_name}", "Yexis Electronics (Chennai)", "Yexis Electronics", "Rio CRM"]:
-        if ph in system_prompt:
-            system_prompt = system_prompt.replace(ph, company_name)
-            break
-
-    stt_provider = all_settings.get("stt_provider", "deepgram")
-    llm_provider = all_settings.get("llm_provider", "mistral")
-    tts_provider = all_settings.get("tts_provider", "cartesia")
-
-    communicator = ExotelCommunicator(websocket)
-
-    pipeline = VoicePipeline(
-        communicator,
-        interaction_id,
-        system_prompt,
-        [],
-        session,
-        stt_provider=stt_provider,
-        llm_provider=llm_provider,
-        tts_provider=tts_provider,
-        company_name=company_name,
-        user=target_user,
-        lead_context=lead_context,
-        audio_encoding="linear16",
-        audio_sample_rate=8000,
-    )
-
-    logger.info(f"📞 Exotel connection | Interaction: {interaction_id} | Lead: {lead_id}")
-    try:
-        await pipeline.run()
-    except Exception as e:
-        logger.error(f"❌ Exotel Pipeline Error: {e}")
-    finally:
-        logger.info(f"👋 Exotel pipeline finished: {interaction_id}")
-
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=PORT, reload=True)
+async def exotel_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "exotel")

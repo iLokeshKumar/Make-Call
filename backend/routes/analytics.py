@@ -1,10 +1,28 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select, func, text
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from database import get_session
 from models.models import LatencyLog, User
-from auth import get_current_active_user
+from auth import get_current_user
+from services.analytics_service import (
+    create_alert,
+    evaluate_alerts,
+    get_campaign_drilldown,
+    get_engagement_summary,
+    get_quote_timeline_csv,
+    list_alerts,
+)
+from pydantic import BaseModel
+from decimal import Decimal
+
+
+class AlertRequest(BaseModel):
+    metric: str
+    threshold: Decimal
+    direction: str = "gte"
+    channel: str = "email"
+
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
 
@@ -13,8 +31,9 @@ async def get_latency_analytics(
     days: int = 7,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
+    scope: str = "mine",  # mine | all (company_admin only)
     session: Session = Depends(get_session),
-    current_user: User = Depends(get_current_active_user)
+    current_user: User = Depends(get_current_user)
 ):
     """
     Real-time latency analytics from LatencyLog table.
@@ -34,7 +53,7 @@ async def get_latency_analytics(
         cutoff_end = datetime.now(timezone.utc) + timedelta(days=1)
 
     # Per-engine aggregates (turn-level rows)
-    engine_rows = session.exec(
+    engine_query = (
         select(
             LatencyLog.engine,
             func.count(LatencyLog.id).label("rows"),
@@ -48,9 +67,15 @@ async def get_latency_analytics(
         .where(LatencyLog.created_at >= cutoff_start)
         .where(LatencyLog.created_at < cutoff_end)
         .where(LatencyLog.engine.is_not(None))
-        .group_by(LatencyLog.engine)
-        .order_by(func.avg(LatencyLog.total_ms))
-    ).all()
+        .where(LatencyLog.company_id == current_user.company_id)
+    )
+
+    if scope != "all":
+        engine_query = engine_query.where(LatencyLog.user_id == current_user.id)
+
+    engine_query = engine_query.group_by(LatencyLog.engine).order_by(func.avg(LatencyLog.total_ms))
+
+    engine_rows = session.exec(engine_query).all()
 
     engines = [
         {
@@ -67,7 +92,7 @@ async def get_latency_analytics(
     ]
 
     # Per-interaction (call-level) aggregates
-    interaction_rows = session.exec(
+    interaction_query = (
         select(
             LatencyLog.interaction_id,
             LatencyLog.engine,
@@ -85,7 +110,14 @@ async def get_latency_analytics(
         .where(LatencyLog.created_at >= cutoff_start)
         .where(LatencyLog.created_at < cutoff_end)
         .where(LatencyLog.interaction_id.is_not(None))
-        .group_by(
+        .where(LatencyLog.company_id == current_user.company_id)
+    )
+
+    if scope != "all":
+        interaction_query = interaction_query.where(LatencyLog.user_id == current_user.id)
+
+    interaction_query = (
+        interaction_query.group_by(
             LatencyLog.interaction_id,
             LatencyLog.engine,
             LatencyLog.stt_model,
@@ -94,7 +126,9 @@ async def get_latency_analytics(
         )
         .order_by(LatencyLog.interaction_id.desc())
         .limit(50)
-    ).all()
+    )
+
+    interaction_rows = session.exec(interaction_query).all()
 
     interactions = [
         {
@@ -117,20 +151,23 @@ async def get_latency_analytics(
     # Model-level breakdowns (STT / LLM / TTS)
     def fetch_model_stats(model_col, ms_col, provider_col):
         rows = session.exec(
-            select(
-                model_col,
-                provider_col,
-                func.count(LatencyLog.id).label("rows"),
-                func.avg(ms_col).label("avg"),
-                func.min(ms_col).label("min"),
-                func.max(ms_col).label("max"),
+            (
+                select(
+                    model_col,
+                    provider_col,
+                    func.count(LatencyLog.id).label("rows"),
+                    func.avg(ms_col).label("avg"),
+                    func.min(ms_col).label("min"),
+                    func.max(ms_col).label("max"),
+                )
+                .where(LatencyLog.created_at >= cutoff_start)
+                .where(LatencyLog.created_at < cutoff_end)
+                .where(LatencyLog.company_id == current_user.company_id)
+                .where(ms_col > 0)
+                .where(model_col.is_not(None))
+                .group_by(model_col, provider_col)
+                .order_by(func.avg(ms_col))
             )
-            .where(LatencyLog.created_at >= cutoff_start)
-        .where(LatencyLog.created_at < cutoff_end)
-            .where(ms_col > 0)
-            .where(model_col.is_not(None))
-            .group_by(model_col, provider_col)
-            .order_by(func.avg(ms_col))
         ).all()
         return [
             {
@@ -170,6 +207,9 @@ async def get_latency_analytics(
         for r in trend_raw
     ]
 
+    total_turns = sum(e["rows"] for e in engines)
+    total_calls = len(set(r.interaction_id for r in interaction_rows))
+
     return {
         "engines": engines,
         "interactions": interactions,
@@ -179,7 +219,112 @@ async def get_latency_analytics(
         "trend": trend,
         "meta": {
             "days": days,
-            "total_turns": sum(e["rows"] for e in engines),
-            "total_calls": len(interactions),
+            "total_turns": total_turns,
+            "total_calls": total_calls,
         },
     }
+
+
+@router.get("/my-latency")
+async def get_my_latency_logs(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+    limit: int = 100,
+    offset: int = 0,
+):
+    """Return latency logs belonging to current authenticated user."""
+    if limit < 1 or limit > 1000:
+        raise HTTPException(status_code=400, detail="limit must be 1..1000")
+
+    rows = session.exec(
+        select(LatencyLog)
+        .where(LatencyLog.user_id == current_user.id)
+        .order_by(LatencyLog.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    ).all()
+
+    return {
+        "user_id": current_user.id,
+        "total": len(rows),
+        "logs": [
+            {
+                "id": r.id,
+                "interaction_id": r.interaction_id,
+                "engine": r.engine,
+                "stt_ms": r.stt_ms,
+                "llm_ms": r.llm_ms,
+                "tts_ms": r.tts_ms,
+                "total_ms": r.total_ms,
+                "stt_provider": r.stt_provider,
+                "llm_provider": r.llm_provider,
+                "tts_provider": r.tts_provider,
+                "created_at": r.created_at,
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/engagement-summary")
+async def engagement_summary(
+    days: int = 7,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    if days < 1:
+        raise HTTPException(status_code=400, detail="days must be >= 1")
+    return get_engagement_summary(session, current_user.company_id, lookback_days=days)
+
+
+@router.get("/campaign-drilldown")
+async def campaign_drilldown(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    return get_campaign_drilldown(session, current_user.company_id, campaign_id)
+
+
+@router.get("/quote/export")
+async def quote_export(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    csv = get_quote_timeline_csv(session, current_user.company_id)
+    headers = {
+        "Content-Disposition": "attachment; filename=quote_timeline.csv",
+    }
+    return Response(content=csv, media_type="text/csv", headers=headers)
+
+
+@router.get("/alerts")
+async def analytics_alerts(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    return list_alerts(session, current_user.company_id)
+
+
+@router.post("/alerts")
+async def analytics_alert_create(
+    payload: AlertRequest,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    return create_alert(
+        session=session,
+        company_id=current_user.company_id,
+        metric=payload.metric,
+        threshold=payload.threshold,
+        direction=payload.direction,
+        channel=payload.channel,
+    )
+
+
+@router.post("/alerts/evaluate")
+async def analytics_alert_evaluate(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    return evaluate_alerts(session, current_user.company_id)

@@ -36,6 +36,54 @@ interface AnalyticsData {
   meta: { days: number; total_turns: number; total_calls: number };
 }
 
+interface SummaryData {
+  campaign_conversion_trends: Array<{
+    name: string;
+    responded: number;
+    sent: number;
+    conversion_rate: number;
+    campaign_id?: number;
+  }>;
+  quote_timeline_export: Array<{
+    quote_id: number;
+    quote_number: string;
+    status: string;
+    dates: Record<string, string | null>;
+  }>;
+  campaign_status_over_time: Array<{
+    day: string;
+    status: string;
+    count: number;
+  }>;
+  campaign_funnel: Array<{
+    status: string;
+    count: number;
+    percent: number;
+  }>;
+}
+
+interface CampaignDrillPoint {
+  day: string;
+  status: string;
+  count: number;
+}
+
+interface AlertInfo {
+  id: number;
+  metric: string;
+  threshold: number;
+  direction: string;
+  channel: string;
+  last_triggered_at?: string | null;
+}
+
+interface SummaryData {
+  campaign_conversion_trends: Array<{ name: string; responded: number; sent: number; conversion_rate: number }>;
+  quote_timeline_export: Array<{ quote_id: number; quote_number: string; status: string; dates: Record<string, string | null> }>;
+  campaign_status_over_time: Array<{ day: string; status: string; count: number }>;
+  campaign_funnel: Array<{ status: string; count: number; percent: number }>;
+}
+
 // Helpers
 
 const fms = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`;
@@ -140,8 +188,43 @@ export default function AnalyticsDashboard() {
   const [tab, setTab]               = useState<"engines" | "calls" | "models" | "trend">("engines");
   const [expandedCall, setExpandedCall] = useState<number | null>(null);
   const [lastAt, setLastAt]         = useState(new Date());
+  const [summary, setSummary] = useState<SummaryData | null>(null);
+  const [summaryLoading, setSummaryLoading] = useState(false);
+  const [drilldown, setDrilldown] = useState<CampaignDrillPoint[]>([]);
+  const [drilldownLoading, setDrilldownLoading] = useState(false);
+  const [selectedCampaign, setSelectedCampaign] = useState<number | null>(null);
+  const [alerts, setAlerts] = useState<AlertInfo[]>([]);
+  const [alertMetric, setAlertMetric] = useState("quote.viewed");
+  const [alertThreshold, setAlertThreshold] = useState(1);
+  const [alertDirection, setAlertDirection] = useState<"gte" | "lte">("gte");
+  const [alertChannel, setAlertChannel] = useState("email");
+  const [alertLoading, setAlertLoading] = useState(false);
+  const [alertMessage, setAlertMessage] = useState<string | null>(null);
 
   const API_BASE = "http://localhost:6060";
+
+  const loadSummary = useCallback(async () => {
+    if (!token) return;
+    setSummaryLoading(true);
+    try {
+      let url = `${API_BASE}/analytics/engagement-summary?days=${days}`;
+      if (days === 0 && startDate && endDate) {
+        url = `${API_BASE}/analytics/engagement-summary?start_date=${startDate}&end_date=${endDate}`;
+      }
+      const res = await fetch(url, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
+      if (res.ok) {
+        setSummary(await res.json());
+      }
+    } finally {
+      setSummaryLoading(false);
+    }
+  }, [token, days, startDate, endDate, sessionTimeout]);
 
   const load = useCallback(async (silent = false) => {
     if (!token) return;
@@ -164,14 +247,100 @@ export default function AnalyticsDashboard() {
     }
   }, [token, days, startDate, endDate]);
 
+  const loadAlerts = useCallback(async () => {
+    if (!token) return;
+    try {
+      const res = await fetch(`${API_BASE}/analytics/alerts`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
+      if (res.ok) {
+        setAlerts(await res.json());
+      }
+    } catch (err) {
+      console.error("Failed to load alerts", err);
+    }
+  }, [token, sessionTimeout]);
+
+  const createAlert = useCallback(async () => {
+    if (!token) return;
+    setAlertLoading(true);
+    setAlertMessage(null);
+    try {
+      const res = await fetch(`${API_BASE}/analytics/alerts`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          metric: alertMetric,
+          threshold: alertThreshold,
+          direction: alertDirection,
+          channel: alertChannel,
+        }),
+      });
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
+      if (!res.ok) {
+        throw new Error("Unable to create alert");
+      }
+      setAlertMessage("Alert created");
+      await loadAlerts();
+    } catch (err) {
+      setAlertMessage((err as Error).message);
+    } finally {
+      setAlertLoading(false);
+    }
+  }, [alertChannel, alertDirection, alertMetric, alertThreshold, loadAlerts, sessionTimeout, token]);
+
+  const evaluateAlerts = useCallback(async () => {
+    if (!token) return;
+    setAlertLoading(true);
+    setAlertMessage(null);
+    try {
+      const res = await fetch(`${API_BASE}/analytics/alerts/evaluate`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
+      if (!res.ok) {
+        throw new Error("Evaluation failed");
+      }
+      const triggered = await res.json();
+      const message =
+        triggered.length > 0
+          ? `Triggered: ${triggered.map((item: { metric: string; value: number; threshold: number }) => `${item.metric} (${item.value} vs ${item.threshold})`).join(", ")}`
+          : "No alerts triggered";
+      setAlertMessage(message);
+      await loadAlerts();
+    } catch (err) {
+      setAlertMessage((err as Error).message);
+    } finally {
+      setAlertLoading(false);
+    }
+  }, [loadAlerts, sessionTimeout, token]);
+
   useEffect(() => { load(); }, [load]);
   useEffect(() => {
     const id = setInterval(() => load(true), 30_000);
     return () => clearInterval(id);
   }, [load]);
+  useEffect(() => {
+    loadSummary();
+    loadAlerts();
+  }, [loadSummary, loadAlerts]);
 
-  const best  = data?.engines[0];
-  const worst = data?.engines.at(-1);
+  const best  = data?.engines?.[0];
+  const worst = data?.engines?.at(-1);
 
   return (
     <div className="space-y-6 pb-12">
@@ -417,6 +586,151 @@ export default function AnalyticsDashboard() {
               {data.trend.length > 0 && <DoDSummary trend={data.trend} />}
             </div>
           )}
+          {summary && (
+            <div className="space-y-4 rounded-3xl border border-white/10 bg-white/5 p-5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-lg font-semibold text-white">Campaign & quote insights</h3>
+                <span className="text-xs text-slate-400">{summaryLoading ? "Loading…" : "Live"}</span>
+              </div>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {summary.campaign_funnel.slice(0, 4).map((item) => (
+                  <div key={item.status} className="rounded-2xl border border-white/10 bg-white/10 p-3 text-sm">
+                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">{item.status}</p>
+                    <p className="text-2xl font-semibold text-white">{item.count}</p>
+                    <p className="text-xs text-slate-400">{item.percent}%</p>
+                  </div>
+                ))}
+              </div>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Conversion trends</p>
+                  <div className="mt-2 space-y-2 text-sm text-slate-200">
+                    {summary.campaign_conversion_trends.slice(0, 3).map((row) => (
+                      <div key={row.name} className="flex items-center justify-between">
+                        <span>{row.name}</span>
+                        <span className="text-xs text-slate-400">{row.conversion_rate}%</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Campaign status over time</p>
+                  <div className="mt-2 grid gap-1 text-xs text-slate-400">
+                    {summary.campaign_status_over_time.slice(-4).map((row) => (
+                      <div key={`${row.day}-${row.status}`} className="flex justify-between">
+                        <span>{row.day}</span>
+                        <span>{row.status}</span>
+                        <span>{row.count}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Quote timeline export</p>
+                <ul className="mt-2 space-y-2 text-sm text-slate-200">
+                  {summary.quote_timeline_export.slice(0, 3).map((quote) => (
+                    <li key={quote.quote_id} className="rounded-xl border border-white/5 px-3 py-2">
+                      <p className="font-semibold">{quote.quote_number}</p>
+                      <p className="text-xs text-slate-400">{quote.status}</p>
+                      <p className="text-xs text-slate-500">Created {quote.dates.created_at ?? "—"}</p>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            </div>
+          )}
+          <div className="space-y-4 rounded-3xl border border-white/10 bg-white/5 p-5">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-semibold text-white">Engagement alerts</h3>
+              <button
+                type="button"
+                onClick={evaluateAlerts}
+                disabled={alertLoading}
+                className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-400 hover:text-white transition"
+              >
+                Evaluate now
+              </button>
+            </div>
+            <div className="grid gap-3 md:grid-cols-4">
+              <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">
+                Metric
+                <select
+                  value={alertMetric}
+                  onChange={(event) => setAlertMetric(event.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-transparent px-3 py-2 text-white outline-none"
+                >
+                  {["quote.viewed", "quote.accepted", "quote.rejected", "email.open", "email.reply", "campaign.responded"].map((metric) => (
+                    <option key={metric} value={metric}>
+                      {metric}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">
+                Threshold
+                <input
+                  type="number"
+                  min={0}
+                  value={alertThreshold}
+                  onChange={(event) => setAlertThreshold(Number(event.target.value) || 0)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-transparent px-3 py-2 text-white outline-none"
+                />
+              </label>
+              <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">
+                Direction
+                <select
+                  value={alertDirection}
+                  onChange={(event) => setAlertDirection(event.target.value as "gte" | "lte")}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-transparent px-3 py-2 text-white outline-none"
+                >
+                  <option value="gte">≥</option>
+                  <option value="lte">≤</option>
+                </select>
+              </label>
+              <label className="block text-xs uppercase tracking-[0.3em] text-slate-400">
+                Channel
+                <select
+                  value={alertChannel}
+                  onChange={(event) => setAlertChannel(event.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-transparent px-3 py-2 text-white outline-none"
+                >
+                  <option value="email">Email</option>
+                  <option value="whatsapp">WhatsApp</option>
+                  <option value="quote">Quote</option>
+                </select>
+              </label>
+            </div>
+            <button
+              type="button"
+              onClick={createAlert}
+              disabled={alertLoading}
+              className="w-full rounded-2xl border border-white/20 bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white transition hover:opacity-90 disabled:opacity-50"
+            >
+              {alertLoading ? "Working…" : "Create alert"}
+            </button>
+            {alertMessage && <p className="text-xs text-slate-400">{alertMessage}</p>}
+            <div className="space-y-2">
+              {alerts.length === 0 ? (
+                <p className="text-xs text-slate-500">No rules configured yet.</p>
+              ) : (
+                <ul className="space-y-2 text-sm text-slate-200">
+                  {alerts.map((alert) => (
+                    <li key={alert.id} className="rounded-2xl border border-white/10 bg-white/5 px-3 py-2">
+                      <div className="flex items-center justify-between text-xs uppercase tracking-[0.3em] text-slate-400">
+                        <span>{alert.metric}</span>
+                        <span>{alert.direction === "gte" ? "≥" : "≤"} {alert.threshold}</span>
+                      </div>
+                      <p className="text-[10px] text-slate-500">Channel: {alert.channel}</p>
+                      <p className="text-[10px] text-slate-500">
+                        Last triggered: {alert.last_triggered_at ? new Date(alert.last_triggered_at).toLocaleString() : "never"}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          </div>
         </>
       )}
     </div>

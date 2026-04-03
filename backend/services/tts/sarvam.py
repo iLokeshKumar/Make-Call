@@ -67,8 +67,14 @@ class SarvamTTS:
             logger.error("❌ [SarvamTTS] API Key missing!")
             return
 
-        # FORCE HTTP Reversion: Always use REST API even if a WS is provided
-        logger.debug(f"ℹ️ [SarvamTTS] Using REST API for: '{text[:40]}...'")
+        if ws_to_use:
+            logger.info(f"[SarvamTTS] Using WebSocket for: '{text[:40]}...'")
+            streamed = await self._speak_ws(text, communicator, ws_to_use)
+            if streamed:
+                return
+            logger.warning("⚠️ [SarvamTTS] WebSocket returned no audio; falling back to REST.")
+
+        logger.info(f"[SarvamTTS] Using REST API for: '{text[:40]}...'")
         await self._speak_http(text, communicator, aiohttp_session)
 
     # WebSocket path
@@ -76,6 +82,7 @@ class SarvamTTS:
         """Send one sentence over the already-open persistent WebSocket."""
         start = time.time()
         first_byte = 0.0
+        audio_sent = False
         header_stripped = False
         leftover = b""  # partial PCM carry-over for resampling alignment
 
@@ -113,6 +120,8 @@ class SarvamTTS:
                             first_byte = time.time() - start
                             logger.info(f"⚡ [SarvamTTS WS] First byte: {first_byte:.3f}s")
 
+                        audio_sent = True
+
                         mulaw = _resample_to_mulaw_8k(chunk, self.WS_SAMPLE_RATE)
                         await communicator.send_media(base64.b64encode(mulaw).decode("utf-8"))
 
@@ -129,10 +138,15 @@ class SarvamTTS:
                     logger.warning("⚠️ [SarvamTTS WS] Connection closed/error mid-stream.")
                     break
 
+                if not audio_sent and (time.time() - start) > 3:
+                    logger.warning("⚠️ [SarvamTTS WS] No audio chunks received after 3s; aborting websocket stream.")
+                    break
+
         except Exception as e:
             logger.error(f"❌ [SarvamTTS WS] Error: {e}")
 
         self.last_latency = first_byte
+        return audio_sent
 
     # HTTP fallback path (original implementation)
     async def _speak_http(self, text: str, communicator, aiohttp_session=None):

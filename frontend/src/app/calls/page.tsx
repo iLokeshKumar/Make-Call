@@ -10,7 +10,9 @@ interface Interaction {
     id: number;
     type: string;
     content: string;
-    timestamp: string;
+    timestamp?: string;
+    started_at?: string;
+    created_at?: string;
     transcript?: string;
     lead_name?: string;
 }
@@ -149,7 +151,12 @@ export default function CallsPage() {
                                             {getInteractionTitle(call)}
                                         </p>
                                         <p className="text-xs text-slate-400 dark:text-slate-500">
-                                            {new Date(call.timestamp).toLocaleString()}
+                                            {(() => {
+                                                const ts = call.started_at ?? call.created_at ?? call.timestamp;
+                                                if (!ts) return "Unknown";
+                                                const date = new Date(ts);
+                                                return Number.isNaN(date.getTime()) ? "Unknown" : date.toLocaleString();
+                                            })()}
                                         </p>
                                     </div>
                                 </div>

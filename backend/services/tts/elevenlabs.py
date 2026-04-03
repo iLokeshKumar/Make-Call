@@ -1,8 +1,9 @@
 import base64
 import logging
+import os
+import json
 import time
 import aiohttp
-from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
 
@@ -11,14 +12,14 @@ class ElevenLabsTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "ElevenLabs"
 
-        db_model = get_credential("ELEVENLABS_TTS_MODEL")
+        db_model = os.getenv("ELEVENLABS_TTS_MODEL")
         if model and ("eleven_" in model or "multilingual" in model):
             self.model = model
         else:
             self.model = db_model or "eleven_turbo_v2_5"
 
         self.api_key = api_key
-        self.voice_id = voice_id or get_credential("ELEVENLABS_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
+        self.voice_id = voice_id or os.getenv("ELEVENLABS_VOICE_ID") or "CwhOLp6mAE7h9asvUURR"
         self.last_latency = 0
 
         if not self.api_key:
@@ -29,8 +30,16 @@ class ElevenLabsTTS:
             logger.error("❌ [ElevenLabsTTS] API Key missing!")
             return
 
+        if ws_to_use:
+            logger.info(f"🎧 [ElevenLabsTTS] Using WebSocket for: '{text[:60]}...'")
+            await self._speak_ws(text, communicator, ws_to_use)
+            return
+
+        logger.info(f"🎧 [ElevenLabsTTS] Using REST API for: '{text[:60]}...'")
+        await self._speak_http(text, communicator, aiohttp_session)
+
+    async def _speak_http(self, text: str, communicator, aiohttp_session=None):
         start_time = time.time()
-        # REST endpoint — ulaw_8000 is natively supported by ElevenLabs
         url = f"https://api.elevenlabs.io/v1/text-to-speech/{self.voice_id}"
         headers = {
             "xi-api-key": self.api_key,
@@ -45,15 +54,40 @@ class ElevenLabsTTS:
             async with session.post(url, json=payload, params=params, headers=headers) as resp:
                 if resp.status != 200:
                     error = await resp.text()
-                    logger.error(f"❌ [ElevenLabsTTS] API Error {resp.status}: {error}")
+                    logger.error(f"❌ [ElevenLabsTTS] REST API Error {resp.status}: {error}")
                     return
                 audio_bytes = await resp.read()
                 first_byte_time = time.time() - start_time
                 await communicator.send_media(base64.b64encode(audio_bytes).decode())
                 self.last_latency = first_byte_time
-                logger.info(f"🔊 [ElevenLabsTTS] Done. Latency: {first_byte_time:.3f}s | Bytes: {len(audio_bytes)}")
+                logger.info(f"🔊 [ElevenLabsTTS REST] Done. Latency: {first_byte_time:.3f}s | Bytes: {len(audio_bytes)}")
         except Exception as e:
-            logger.error(f"❌ [ElevenLabsTTS] Error: {e}")
+            logger.error(f"❌ [ElevenLabsTTS REST] Error: {e}")
         finally:
             if should_close:
                 await session.close()
+
+    async def _speak_ws(self, text: str, communicator, ws):
+        logger.info("🔊 [ElevenLabsTTS WS] Streaming via websocket.")
+        start_time = time.time()
+        first_byte_time = None
+        payload = {
+            "text": text,
+            "model_id": self.model,
+        }
+        try:
+            await ws.send_json(payload)
+            async for msg in ws:
+                if msg.type == aiohttp.WSMsgType.BINARY:
+                    if first_byte_time is None:
+                        first_byte_time = time.time() - start_time
+                        self.last_latency = first_byte_time
+                    await communicator.send_media(base64.b64encode(msg.data).decode())
+                elif msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    if data.get("status") == "done" or data.get("done"):
+                        break
+                elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                    break
+        except Exception as e:
+            logger.error(f"❌ [ElevenLabsTTS WS] Error: {e}")

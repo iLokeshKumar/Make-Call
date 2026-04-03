@@ -1,46 +1,46 @@
 import json
 import base64
 import logging
+import os
 import time
 import aiohttp
-from credentials_service import get_credential
 
 logger = logging.getLogger(__name__)
+
 
 class DeepgramTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Deepgram"
-        
-        # Priority: 1. Passed model (if likely Deepgram) 2. DB Credential 3. Default
-        db_model = get_credential("DEEPGRAM_TTS_MODEL")
-        
-        # Guard against picking up 'eleven_turbo' or 'sonic-english' if passed as generic tts_model
+        self.voice_id = voice_id or os.getenv("DEEPGRAM_VOICE") or "aura-asteria-en"
+        self.api_key = api_key or os.getenv("DEEPGRAM_API_KEY")
+
         if model and ("aura-" in model or "nova-" in model):
             self.model = model
         else:
-            self.model = db_model or voice_id or get_credential("DEEPGRAM_VOICE") or "aura-asteria-en"
-            
-        self.api_key = api_key
+            self.model = (
+                os.getenv("DEEPGRAM_TTS_MODEL") or self.voice_id or "aura-asteria-en"
+            )
+
         self.last_latency = 0
-        
+
         if not self.api_key:
             logger.warning("DeepgramTTS initialized without an API key! Streams will fail.")
 
     async def speak(self, text: str, communicator, ws_to_use=None, aiohttp_session=None, **kwargs):
         if not self.api_key:
-            logger.error("❌ [DeepgramTTS] API Key missing!")
+            logger.error("🚫 [DeepgramTTS] API Key missing!")
             return
 
         start_time = time.time()
         first_byte_time = 0
         url = f"wss://api.deepgram.com/v1/speak?model={self.model}&encoding=mulaw&sample_rate=8000"
         headers = {"Authorization": f"Token {self.api_key}"}
-        
+
         async def _stream_on_ws(ws):
             nonlocal first_byte_time
             await ws.send_json({"type": "Speak", "text": text})
             await ws.send_json({"type": "Flush"})
-            
+
             async for message in ws:
                 if message.type == aiohttp.WSMsgType.BINARY:
                     if first_byte_time == 0:
@@ -63,9 +63,10 @@ class DeepgramTTS:
                     async with session.ws_connect(url, headers=headers) as ws:
                         await _stream_on_ws(ws)
                 finally:
-                    if should_close: await session.close()
-            
+                    if should_close:
+                        await session.close()
+
             self.last_latency = first_byte_time
             logger.info(f"✅ [DeepgramTTS] Complete. First byte: {first_byte_time:.3f}s")
         except Exception as e:
-            logger.error(f"❌ [DeepgramTTS] Error: {e}")
+            logger.error(f"🚫 [DeepgramTTS] Error: {e}")

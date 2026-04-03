@@ -53,22 +53,27 @@ export default function InventoryPage() {
         }
     }, [token, itemsPerPage, sessionTimeout]);
 
+    const hasAdminAccess = user?.role === "company_admin" || user?.role === "company_owner";
+
     useEffect(() => {
-        if (!isLoading && user?.role !== "admin") {
+        if (!isLoading && !hasAdminAccess) {
             router.push("/");
         }
     }, [user, isLoading, router]);
 
     useEffect(() => {
-        if (user?.role === "admin") {
+        if (hasAdminAccess) {
             fetchInventory(currentPage);
         }
-    }, [user, fetchInventory, currentPage]);
+    }, [hasAdminAccess, fetchInventory, currentPage]);
 
     const handleOpenModal = (product?: Product) => {
         if (product) {
             setEditingProduct(product);
-            setFormData(product);
+            setFormData({
+                ...product,
+                price: product.price?.toString() ?? "",
+            });
         } else {
             setEditingProduct(null);
             setFormData({ name: "", stock: 0, price: "" });
@@ -96,8 +101,10 @@ export default function InventoryPage() {
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            const res = await fetch(`${CRM_BASE}/inventory`, {
-                method: "POST",
+            const url = editingProduct && editingProduct.id ? `${CRM_BASE}/inventory/${editingProduct.id}` : `${CRM_BASE}/inventory`;
+            const method = editingProduct && editingProduct.id ? "PUT" : "POST";
+            const res = await fetch(url, {
+                method,
                 headers: {
                     "Content-Type": "application/json",
                     "Authorization": `Bearer ${token}`
@@ -110,6 +117,8 @@ export default function InventoryPage() {
             }
             if (res.ok) {
                 setIsModalOpen(false);
+                setEditingProduct(null);
+                setFormData({ name: "", stock: 0, price: "" });
                 fetchInventory();
             }
         } catch (error) {
@@ -267,7 +276,13 @@ export default function InventoryPage() {
                                                 type="number"
                                                 required
                                                 value={formData.stock}
-                                                onChange={(e) => setFormData({ ...formData, stock: parseInt(e.target.value) })}
+                                                onChange={(e) => {
+                                                    const parsed = parseInt(e.target.value, 10);
+                                                    setFormData({
+                                                        ...formData,
+                                                        stock: Number.isNaN(parsed) ? 0 : parsed,
+                                                    });
+                                                }}
                                                 className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-white/80 dark:bg-slate-800/60 backdrop-blur-sm p-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400 shadow-sm"
                                             />
                                         </div>
