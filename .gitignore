@@ -65,7 +65,7 @@ dist-ssr/
 
 # Claude
 .claude/
-.continuation_handoff.md
-.implementation_backlog.md
-.multi-tenant_plan.md
-.overall_architecture.md
+continuation_handoff.md
+implementation_backlog.md
+multi-tenant_plan.md
+overall_architecture.md
