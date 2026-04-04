@@ -1,4 +1,5 @@
-import { Copy, MessageSquareText } from "lucide-react";
+import { Check, Copy, MessageSquareText } from "lucide-react";
+import { useState } from "react";
 
 type TranscriptPanelProps = {
   transcript?: string | null;
@@ -29,11 +30,14 @@ function parseTranscript(transcript?: string | null): TranscriptLine[] {
 
 export default function TranscriptPanel({ transcript }: TranscriptPanelProps) {
   const items = parseTranscript(transcript);
+  const [copied, setCopied] = useState(false);
 
   async function copyTranscript() {
     if (!transcript) return;
     try {
       await navigator.clipboard.writeText(transcript);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
     } catch (error) {
       console.error("Failed to copy transcript", error);
     }
@@ -49,9 +53,14 @@ export default function TranscriptPanel({ transcript }: TranscriptPanelProps) {
         <button
           type="button"
           onClick={copyTranscript}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 dark:border-white/10 dark:text-slate-200"
+          className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-semibold transition-colors ${
+            copied
+              ? "border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/30 dark:bg-emerald-500/10 dark:text-emerald-300"
+              : "border-slate-200 text-slate-700 dark:border-white/10 dark:text-slate-200"
+          }`}
         >
-          <Copy className="h-4 w-4" /> Copy
+          {copied ? <Check className="h-4 w-4" /> : <Copy className="h-4 w-4" />}
+          {copied ? "Copied" : "Copy"}
         </button>
       </div>
 

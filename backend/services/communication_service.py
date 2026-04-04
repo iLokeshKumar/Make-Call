@@ -24,9 +24,15 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_tracking_base(company: Company | None) -> str:
+    # Priority:
+    # 1. TRACKING_BASE_URL — explicit override (use this in production)
+    # 2. FRONTEND_URL — frontend base (e.g. http://localhost:3006 in dev)
+    # 3. DOMAIN — ngrok/public backend URL
+    # 4. Backend localhost fallback
+    # company.website is intentionally excluded — it is a branding field, not a routing endpoint
     return (
         os.getenv("TRACKING_BASE_URL")
-        or (company.website.rstrip("/") if company and company.website else None)
+        or os.getenv("FRONTEND_BASE_URL")
         or os.getenv("DOMAIN")
         or "http://localhost:6060"
     )

@@ -323,10 +323,16 @@ def _update_campaign_recipient_for_outcome(
         )
         return
 
-    if retry_after_hours is not None:
-        from datetime import timedelta
+    # if retry_after_hours is not None:
+    #     from datetime import timedelta
 
+    #     recipient.next_run_at = utc_now() + timedelta(hours=retry_after_hours)
+    # session.add(recipient)
+    # session.commit()
+
+    if retry_after_hours is not None:
         recipient.next_run_at = utc_now() + timedelta(hours=retry_after_hours)
+        recipient.status = "active"  # ← ADD THIS so the worker picks it up again
     session.add(recipient)
     session.commit()
 
@@ -373,13 +379,20 @@ def apply_call_outcome(
         task.status = "completed"
         task.completed_at = now
         task.retry_after = None
+    # elif retry_policy["should_retry"]:
+    #     task.status = "retry_scheduled"
+    #     task.retry_after = now if retry_policy["retry_after_hours"] is None else now.replace()
+    #     if retry_policy["retry_after_hours"] is not None:
+    #         from datetime import timedelta
+
+    #         task.retry_after = now + timedelta(hours=retry_policy["retry_after_hours"])
+    #     task.scheduled_at = task.retry_after
+    #     task.completed_at = None
+
     elif retry_policy["should_retry"]:
         task.status = "retry_scheduled"
-        task.retry_after = now if retry_policy["retry_after_hours"] is None else now.replace()
-        if retry_policy["retry_after_hours"] is not None:
-            from datetime import timedelta
-
-            task.retry_after = now + timedelta(hours=retry_policy["retry_after_hours"])
+        retry_hours = retry_policy["retry_after_hours"]
+        task.retry_after = now + timedelta(hours=retry_hours) if retry_hours else now
         task.scheduled_at = task.retry_after
         task.completed_at = None
     else:

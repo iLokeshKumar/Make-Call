@@ -10,7 +10,7 @@ from twilio.rest import Client as TwilioClient
 from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, VoiceResponse
 
-from auth import PermissionChecker
+from auth import PermissionChecker, get_current_user
 from communicators import ExotelCommunicator, TwilioCommunicator
 from credentials_service import get_company_credential
 from database import engine, get_session
@@ -116,13 +116,8 @@ async def twilio_status_callback(
     interaction_id = request.query_params.get("interaction_id")
     user_id = request.query_params.get("user_id")
 
-    if not call_task_id or not call_task_id.isdigit() or not user_id or not user_id.isdigit():
-        return {"status": "ignored", "reason": "missing_task_or_user"}
-
-    actor_user = session.get(User, int(user_id))
-    if not actor_user:
-        return {"status": "ignored", "reason": "user_not_found"}
-
+    # Always persist status on the interaction — needed for real-time polling by frontend.
+    actor_user = session.get(User, int(user_id)) if user_id and user_id.isdigit() else None
     db_interaction = None
     if interaction_id and interaction_id.isdigit():
         db_interaction = session.get(Interaction, int(interaction_id))
@@ -133,9 +128,19 @@ async def twilio_status_callback(
                 "provider_call_status": CallStatus,
             }
             db_interaction.updated_at = utc_now()
-            db_interaction.updated_by = actor_user.id
+            if actor_user:
+                db_interaction.updated_by = actor_user.id
             session.add(db_interaction)
             session.commit()
+
+    # Outcome processing only for terminal state with a valid call task
+    TERMINAL = {"completed", "busy", "no-answer", "failed", "canceled"}
+    if CallStatus not in TERMINAL:
+        return {"status": "tracked", "call_status": CallStatus}
+    if not call_task_id or not call_task_id.isdigit() or int(call_task_id) == 0:
+        return {"status": "tracked", "call_status": CallStatus}
+    if not actor_user:
+        return {"status": "tracked", "call_status": CallStatus}
 
     transcript = db_interaction.transcript if db_interaction else None
     result = apply_call_outcome(
@@ -148,6 +153,27 @@ async def twilio_status_callback(
         transcript=transcript,
     )
     return {"status": "processed", "result": result}
+
+
+@router.get("/call-status")
+async def get_call_status(
+    interaction_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Poll endpoint for real-time call status. Returns provider_call_status from metadata."""
+    interaction = session.get(Interaction, interaction_id)
+    if not interaction or interaction.company_id != current_user.company_id:
+        raise HTTPException(status_code=404, detail="Interaction not found")
+
+    metadata = interaction.metadata_json or {}
+    raw = metadata.get("provider_call_status", "initiated")
+    TERMINAL = {"completed", "busy", "no-answer", "failed", "canceled"}
+    return {
+        "interaction_id": interaction_id,
+        "call_status": raw,
+        "is_terminal": raw in TERMINAL,
+    }
 
 
 @router.post("/outbound/callback")

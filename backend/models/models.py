@@ -192,6 +192,7 @@ class Lead(AuditMixin, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    ism_stage: Optional[str] = Field(default="new", max_length=50)
 
 
 class Campaign(AuditMixin, table=True):
@@ -537,8 +538,8 @@ class EngagementEvent(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     company_id: int = Field(foreign_key="companies.id", index=True)
     lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
-    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
-    quote_id: Optional[int] = Field(default=None, foreign_key="quotes.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id")
+    quote_id: Optional[int] = Field(default=None, foreign_key="quotes.id")
     channel: Optional[str] = Field(default=None, max_length=50)
     event_type: str = Field(max_length=100)
     payload: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))

@@ -33,10 +33,10 @@ def resolve_call_context(session: Session, user_id: str | None, lead_id: str | N
     target_user = None
     lead = None
 
-    if user_id and user_id.isdigit():
+    if user_id and user_id.isdigit() and int(user_id) != 0:
         target_user = session.get(User, int(user_id))
 
-    if lead_id and lead_id.isdigit():
+    if lead_id and lead_id.isdigit() and int(lead_id) != 0:
         lead = session.get(Lead, int(lead_id))
         if lead and not target_user and lead.owner_user_id:
             target_user = session.get(User, lead.owner_user_id)
@@ -54,16 +54,35 @@ def ensure_interaction(
     interaction_id: str | None,
     source: str,
 ) -> str:
-    if interaction_id and interaction_id.isdigit():
-        return interaction_id
+    # 1. Valid interaction_id provided — verify it exists and reuse it
+    if interaction_id and interaction_id.isdigit() and int(interaction_id) != 0:
+        existing = session.get(Interaction, int(interaction_id))
+        if existing:
+            return interaction_id
 
+    # 2. No valid id passed — find the most recent active call interaction
+    #    for this lead/user to avoid creating duplicate interactions for
+    #    outbound calls where the interaction_id wasn't forwarded correctly.
+    query = select(Interaction).where(
+        Interaction.type == "call",
+        Interaction.status == "active",
+    )
+    if target_user:
+        query = query.where(Interaction.user_id == target_user.id)
+    if lead:
+        query = query.where(Interaction.lead_id == lead.id)
+    recent = session.exec(query.order_by(Interaction.id.desc()).limit(1)).first()
+    if recent:
+        return str(recent.id)
+
+    # 3. Nothing found — create a new interaction as last resort
     interaction = Interaction(
         company_id=target_user.company_id if target_user else (lead.company_id if lead else 0),
         lead_id=lead.id if lead else None,
         user_id=target_user.id if target_user else None,
         type="call",
         channel="call",
-        direction="inbound",
+        direction="outbound",
         source=source,
         content="Voice Call",
         status="active",
@@ -93,6 +112,17 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             return
 
         interaction_id = ensure_interaction(session, target_user, lead, raw_interaction_id, source)
+
+        # If lead wasn't resolved from WebSocket params (e.g., lead_id=0), fetch it from the
+        # reused outbound interaction so lead context and latency logging get the correct lead_id.
+        if not lead:
+            try:
+                db_interaction = session.get(Interaction, int(interaction_id))
+                if db_interaction and db_interaction.lead_id:
+                    lead = session.get(Lead, db_interaction.lead_id)
+            except (ValueError, TypeError):
+                pass
+
         lead_context = get_comprehensive_lead_context(session, lead.id) if lead else None
 
         company = session.get(Company, target_user.company_id) if target_user else None
@@ -133,6 +163,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             company_name=company_name,
             user=target_user,
             lead_context=lead_context,
+            lead_id=lead.id if lead else None,
         )
 
         call_status = "completed"
@@ -176,9 +207,11 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
 
             if db_interaction and db_interaction.lead_id and db_interaction.transcript and target_user:
                 try:
+                    mistral_api_key = get_company_setting_value(session, target_user.company_id, "MISTRAL_API_KEY")
                     llm_service = get_llm_service(
                         "mistral",
                         "You extract structured B2B sales requirements from transcripts.",
+                        api_key=mistral_api_key,
                     )
                     saved = await extract_and_save_requirements(
                         session=session,

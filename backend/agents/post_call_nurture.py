@@ -73,21 +73,28 @@ class CallSummarizer:
         return summary
     
     @staticmethod
-    def save_summary_to_crm(lead_id: int, summary: dict) -> bool:
+    def save_summary_to_crm(lead_id: int, summary: dict, company_id: int = 0, actor_user_id: int | None = None) -> bool:
         """
         Save call summary to CRM interactions table.
         """
         try:
             with Session(engine) as session:
                 interaction = Interaction(
+                    company_id=company_id,
                     lead_id=lead_id,
+                    user_id=actor_user_id,
                     type="call_summary",
+                    channel="call",
+                    direction="outbound",
+                    source="voice_pipeline",
                     content=json.dumps(summary),
-                    timestamp=datetime.now(timezone.utc)
+                    started_at=datetime.now(timezone.utc),
+                    created_by=actor_user_id,
+                    updated_by=actor_user_id,
                 )
                 session.add(interaction)
                 session.commit()
-                
+
                 print(f"✓ [SUMMARIZER] Summary saved to CRM for lead {lead_id}")
                 return True
         except Exception as e:
@@ -140,29 +147,38 @@ class CRMUpdater:
             return False
     
     @staticmethod
-    def log_interaction(lead_id: int, interaction_type: str, content: str) -> bool:
+    def log_interaction(lead_id: int, interaction_type: str, content: str, company_id: int = 0, actor_user_id: int | None = None) -> bool:
         """
         Log interaction to CRM.
-        
+
         Args:
             lead_id: ID of the lead
             interaction_type: "call" | "email" | "note" | "demo_scheduled"
             content: Interaction content
-        
+            company_id: Company the lead belongs to
+            actor_user_id: User performing the action
+
         Returns:
             Success boolean
         """
         try:
             with Session(engine) as session:
                 interaction = Interaction(
+                    company_id=company_id,
                     lead_id=lead_id,
+                    user_id=actor_user_id,
                     type=interaction_type,
+                    channel="call",
+                    direction="outbound",
+                    source="voice_pipeline",
                     content=content,
-                    timestamp=datetime.now(timezone.utc)
+                    started_at=datetime.now(timezone.utc),
+                    created_by=actor_user_id,
+                    updated_by=actor_user_id,
                 )
                 session.add(interaction)
                 session.commit()
-                
+
                 print(f"✓ [CRM_UPDATER] {interaction_type} logged for lead {lead_id}")
                 return True
         except Exception as e:
@@ -294,12 +310,12 @@ class EmailWriter:
                 from_name="Rio Sales Team"
             )
             
-            # Log to CRM
+            # Log to CRM (company_id/actor_user_id unknown here; defaults used)
             CRMUpdater.log_interaction(
                 lead_id,
                 "email_sent",
                 f"Personalized {suggested_action} email sent: {subject}"
-            )
+            )  # company_id defaults to 0 — caller should pass these if available
             
             print(f"✓ [EMAIL_WRITER] Email sent to {lead_email}")
             return True

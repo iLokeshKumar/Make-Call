@@ -4,7 +4,7 @@ from decimal import Decimal
 from sqlalchemy import case
 from sqlmodel import Session, select, func
 
-from models.models import AnalyticsAlert, EngagementEvent, CallTask, Campaign, CampaignRecipient, Quote, utc_now
+from models.models import AnalyticsAlert, EngagementEvent, CallTask, Campaign, CampaignRecipient, Interaction, Quote, utc_now
 
 
 def _query_counts(session: Session, company_id: int, model, column):
@@ -221,6 +221,87 @@ def get_quote_timeline_csv(session: Session, company_id: int, limit: int = 30) -
             )
         )
     return "\n".join(lines)
+
+
+def get_campaign_email_report(session: Session, company_id: int, campaign_id: int) -> dict:
+    """
+    Return email open/click/unsubscribe rates for a specific campaign.
+
+    Counts:
+    - emails_sent: outbound email interactions linked to this campaign
+    - opens:       email_open engagement events for leads in this campaign
+    - clicks:      email_click (or click) engagement events for leads in this campaign
+    - unsubscribes: opt_out engagement events on email channel for these leads
+    """
+    # Verify the campaign belongs to this company.
+    campaign = session.exec(
+        select(Campaign).where(Campaign.id == campaign_id, Campaign.company_id == company_id)
+    ).first()
+    if not campaign:
+        return {"error": "Campaign not found"}
+
+    # Lead IDs enrolled in this campaign.
+    enrolled_lead_ids: list[int] = list(session.exec(
+        select(CampaignRecipient.lead_id).where(
+            CampaignRecipient.campaign_id == campaign_id,
+            CampaignRecipient.company_id == company_id,
+        )
+    ).all())
+
+    if not enrolled_lead_ids:
+        return {
+            "campaign_id": campaign_id,
+            "campaign_name": campaign.name,
+            "emails_sent": 0,
+            "opens": 0,
+            "clicks": 0,
+            "unsubscribes": 0,
+            "open_rate": 0.0,
+            "click_rate": 0.0,
+            "unsubscribe_rate": 0.0,
+        }
+
+    # Emails sent via this campaign.
+    emails_sent = session.exec(
+        select(func.count(Interaction.id)).where(
+            Interaction.company_id == company_id,
+            Interaction.campaign_id == campaign_id,
+            Interaction.channel == "email",
+            Interaction.direction == "outbound",
+        )
+    ).one()
+
+    # Engagement events for enrolled leads scoped to email channel.
+    def _event_count(event_types: list[str]) -> int:
+        return session.exec(
+            select(func.count(EngagementEvent.id)).where(
+                EngagementEvent.company_id == company_id,
+                EngagementEvent.lead_id.in_(enrolled_lead_ids),  # type: ignore[arg-type]
+                EngagementEvent.event_type.in_(event_types),  # type: ignore[arg-type]
+            )
+        ).one()
+
+    opens = _event_count(["email_open", "open"])
+    clicks = _event_count(["email_click", "click"])
+    unsubscribes = _event_count(["opt_out", "unsubscribe"])
+
+    base = emails_sent or 0
+
+    def _rate(numerator: int) -> float:
+        return round((numerator / base) * 100, 1) if base > 0 else 0.0
+
+    return {
+        "campaign_id": campaign_id,
+        "campaign_name": campaign.name,
+        "campaign_status": campaign.status,
+        "emails_sent": base,
+        "opens": opens,
+        "clicks": clicks,
+        "unsubscribes": unsubscribes,
+        "open_rate": _rate(opens),
+        "click_rate": _rate(clicks),
+        "unsubscribe_rate": _rate(unsubscribes),
+    }
 
 
 def get_campaign_drilldown(session: Session, company_id: int, campaign_id: int) -> list[dict]:

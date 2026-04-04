@@ -3,6 +3,7 @@ import { CalendarClock, ClipboardCheck } from "lucide-react";
 type NextActionCardProps = {
   nextAction?: string | null;
   dueAt?: string | null;
+  onMarkReviewed?: () => void;
 };
 
 function humanize(value?: string | null) {
@@ -17,7 +18,7 @@ function formatDate(value?: string | null) {
   return date.toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
 }
 
-export default function NextActionCard({ nextAction, dueAt }: NextActionCardProps) {
+export default function NextActionCard({ nextAction, dueAt, onMarkReviewed }: NextActionCardProps) {
   return (
     <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
       <h2 className="mb-4 text-lg font-semibold text-slate-900 dark:text-white">Next action</h2>
@@ -32,7 +33,7 @@ export default function NextActionCard({ nextAction, dueAt }: NextActionCardProp
           <CalendarClock className="h-4 w-4" /> {formatDate(dueAt)}
         </div>
 
-        <button
+        <button onClick={onMarkReviewed}
           type="button"
           className="inline-flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:border-white/10 dark:text-slate-200"
         >

@@ -206,6 +206,7 @@ export default function SettingsPage() {
                     headers: { Authorization: `Bearer ${token}` },
                     signal: controller.signal,
                 });
+                if (res.status === 401) { sessionTimeout(); return; }
                 if (!res.ok) {
                     console.warn("Failed to load roles", res.status);
                     return;
@@ -334,6 +335,7 @@ export default function SettingsPage() {
                 }),
             });
 
+            if (res.status === 401) { sessionTimeout(); return; }
             const data = await res.json();
             if (res.ok) {
                 setInviteMessage(`Invite sent to ${inviteEmail.trim()}.`);

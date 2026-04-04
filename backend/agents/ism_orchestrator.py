@@ -27,7 +27,7 @@ from typing import Literal
 
 from sqlmodel import Session, select
 
-from models.models import CallTask, Lead, utc_now
+from models.models import CallTask, Campaign, CampaignRecipient, Lead, utc_now
 from services.communication_service import get_company_setting_value, send_email_to_lead
 from services.message_render_service import render_template_by_id
 from services.next_action_service import dispatch_next_action, handle_inbound_quote_request
@@ -301,13 +301,13 @@ def _default_message(lead: Lead, stage: str, channel: str) -> str:
 
 def _advance_stage(lead: Lead, actor_user_id: int, session: Session) -> str:
     """Move lead to next ISM stage and persist."""
-    current = lead.status or "new"
+    current = lead.ism_stage or "new"
     idx = _stage_index(current)
     if idx + 1 < len(ISM_STAGE_ORDER):
         next_stage = ISM_STAGE_ORDER[idx + 1]
     else:
         next_stage = current
-    lead.status = next_stage
+    lead.ism_stage = next_stage
     lead.updated_at = utc_now()
     lead.updated_by = actor_user_id
     session.add(lead)
@@ -383,7 +383,7 @@ def run_ism_cycle(
     if not lead:
         return {"lead_id": lead_id, "skipped": True, "skip_reason": "lead_not_found"}
 
-    stage = lead.status or "new"
+    stage = lead.ism_stage or "new"
 
     # Skip terminal / DNC leads.
     if stage in _TERMINAL_STAGES:
@@ -447,3 +447,110 @@ def run_ism_cycle(
         "skip_reason": None,
         **result,
     }
+
+
+# ---------------------------------------------------------------------------
+# Batch runner — called by the automation worker
+# ---------------------------------------------------------------------------
+
+def run_ism_for_company(
+    session: Session,
+    company_id: int,
+    actor_user_id: int,
+    limit: int = 50,
+) -> list[ISMResult]:
+    """
+    Run one ISM cycle for every active, non-terminal lead in *company_id*.
+
+    The individual `run_ism_cycle` calls already enforce cooldown windows and
+    channel guards, so this function only needs to pull eligible lead IDs and
+    dispatch.  Leads where all channels are in cooldown are skipped cheaply
+    via the global-cooldown guard inside `run_ism_cycle`.
+
+    Args:
+        session:        DB session (passed in by the worker so locking is shared).
+        company_id:     Tenant boundary.
+        actor_user_id:  The user ID recorded on any created tasks/interactions.
+        limit:          Max leads to process per cycle (prevents runaway cycles).
+
+    Returns:
+        List of per-lead ISM result dicts (same shape as `run_ism_cycle`).
+    """
+    from datetime import timedelta
+
+    from models.models import Lead, utc_now
+
+    # Pull active leads that are not in terminal stages.
+    # We also pre-filter on `last_outreach_at` to avoid loading thousands of
+    # rows when most are in cooldown — the tightest cooldown window is 6h
+    # (WhatsApp), so any lead outreached in the last 6h can be skipped here.
+    min_cooldown_hours = min(_CHANNEL_COOLDOWN_HOURS.values())
+    cutoff = utc_now() - timedelta(hours=min_cooldown_hours)
+
+    leads = session.exec(
+        select(Lead).where(
+            Lead.company_id == company_id,
+            Lead.ism_stage.notin_(list(_TERMINAL_STAGES)),  # type: ignore[arg-type]
+        ).where(
+            (Lead.last_outreach_at == None) | (Lead.last_outreach_at <= cutoff)  # noqa: E711
+        ).order_by(
+            Lead.next_action_due_at.asc().nullsfirst(),
+            Lead.id.asc(),
+        ).limit(limit)
+    ).all()
+
+    if not leads:
+        logger.info("ISM[company=%d]: no eligible leads found", company_id)
+        return []
+
+    # Build a set of lead IDs that are actively enrolled in a running campaign
+    # so ISM doesn't double-process them.
+    active_campaign_lead_ids: set[int] = set()
+    active_enrolled = session.exec(
+        select(CampaignRecipient.lead_id).join(
+            Campaign, Campaign.id == CampaignRecipient.campaign_id
+        ).where(
+            CampaignRecipient.company_id == company_id,
+            CampaignRecipient.status == "active",
+            Campaign.status == "active",
+        )
+    ).all()
+    active_campaign_lead_ids = {lid for lid in active_enrolled if lid is not None}
+
+    logger.info(
+        "ISM[company=%d]: processing %d eligible leads (%d skipped — active campaign)",
+        company_id, len(leads), sum(1 for l in leads if l.id in active_campaign_lead_ids),
+    )
+
+    results: list[ISMResult] = []
+    for lead in leads:
+        if lead.id in active_campaign_lead_ids:
+            results.append({
+                "lead_id": lead.id,
+                "skipped": True,
+                "skip_reason": "managed_by_active_campaign",
+            })
+            continue
+        try:
+            result = run_ism_cycle(
+                session=session,
+                company_id=company_id,
+                lead_id=lead.id,
+                actor_user_id=actor_user_id,
+            )
+            results.append(result)
+        except Exception:  # noqa: BLE001
+            logger.exception("ISM[company=%d]: unhandled error for lead=%d", company_id, lead.id)
+            results.append({
+                "lead_id": lead.id,
+                "skipped": True,
+                "skip_reason": "unhandled_exception",
+            })
+
+    dispatched = sum(1 for r in results if not r.get("skipped"))
+    skipped = len(results) - dispatched
+    logger.info(
+        "ISM[company=%d]: done | leads=%d dispatched=%d skipped=%d",
+        company_id, len(leads), dispatched, skipped,
+    )
+    return results

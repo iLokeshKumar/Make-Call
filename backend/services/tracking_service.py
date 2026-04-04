@@ -21,6 +21,70 @@ CALLBACK_TERMS = {"call me", "call back", "callback", "ring me", "speak later"}
 QUOTE_TERMS = {"quote", "pricing", "price", "proposal", "estimate"}
 INTERESTED_TERMS = {"interested", "yes", "sounds good", "tell me more", "share details", "details please"}
 
+_AUTO_REPLY_TEMPLATES: dict[str, str] = {
+    "interested": "Thanks for your interest! Our team will reach out to you shortly.",
+    "callback_requested": "Got it! We've scheduled a callback for you. We'll call you soon.",
+    "quote_requested_sent": "Your quote is on its way! Please check your messages.",
+    "quote_requested_pending": "Thanks! We're preparing a custom quote for you and will send it shortly.",
+    "neutral": "Thanks for reaching out! Our team will get back to you soon.",
+}
+
+
+def _is_whatsapp_auto_reply_enabled(session: Session, company_id: int) -> bool:
+    setting = session.exec(
+        select(CompanySetting).where(
+            CompanySetting.company_id == company_id,
+            CompanySetting.key == "WHATSAPP_AUTO_REPLY_ENABLED",
+        )
+    ).first()
+    if setting is None:
+        return True  # enabled by default
+    return str(setting.value).lower() not in {"false", "0", "no", "off"}
+
+
+def _send_whatsapp_auto_reply(
+    session: Session,
+    company_id: int,
+    lead_id: int,
+    actor_user_id: int | None,
+    intent: str,
+    quote_result: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Send a contextual auto-reply WhatsApp message to the lead.
+
+    Returns the send result dict or None if auto-reply is skipped.
+    """
+    if intent in {"opt_out", "not_interested"}:
+        return None
+
+    if not _is_whatsapp_auto_reply_enabled(session, company_id):
+        return None
+
+    if intent == "quote_requested":
+        quote_sent = quote_result.get("status") in {"sent", "quote_created_and_sent"}
+        template_key = "quote_requested_sent" if quote_sent else "quote_requested_pending"
+    else:
+        template_key = intent if intent in _AUTO_REPLY_TEMPLATES else "neutral"
+
+    body = _AUTO_REPLY_TEMPLATES[template_key]
+
+    try:
+        from services.communication_service import send_whatsapp_to_lead  # local import avoids circular dep
+        return send_whatsapp_to_lead(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id or 1,
+            lead_id=lead_id,
+            body=body,
+        )
+    except Exception:
+        import logging as _logging
+        _logging.getLogger(__name__).warning(
+            "WhatsApp auto-reply failed: company=%d lead=%d intent=%s",
+            company_id, lead_id, intent,
+        )
+        return None
+
 
 def generate_tracking_token() -> str:
     return token_urlsafe(24)
@@ -385,29 +449,29 @@ def _update_lead_for_whatsapp_reply(
         lead.next_action_due_at = utc_now() + timedelta(minutes=5)
         lead.last_outreach_at = utc_now()
 
-        if lead.normalized_phone and not is_lead_opted_out(session, lead.company_id, lead.id, "call"):
-            from services.outbound_call_service import create_call_task
+        #if lead.normalized_phone and not is_lead_opted_out(session, lead.company_id, lead.id, "call"):
+        from services.outbound_call_service import create_call_task
 
-            existing_task = session.exec(
-                select(CallTask).where(
-                    CallTask.company_id == lead.company_id,
-                    CallTask.lead_id == lead.id,
-                    CallTask.status.in_(["pending", "queued", "retry_scheduled", "dialing"]),
-                    CallTask.dialer_source == "whatsapp_reply",
-                ).order_by(CallTask.created_at.desc())
-            ).first()
-            if existing_task is None:
-                created_call_task = create_call_task(
-                    session=session,
-                    company_id=lead.company_id,
-                    actor_user_id=actor_user_id or lead.owner_user_id or 1,
-                    lead_id=lead.id,
-                    assigned_user_id=lead.owner_user_id,
-                    scheduled_at=lead.next_action_due_at,
-                    notes=f"Auto-created from WhatsApp reply intent: {intent}",
-                    dialer_source="whatsapp_reply",
-                    initial_status="queued",
-                )
+        existing_task = session.exec(
+            select(CallTask).where(
+                CallTask.company_id == lead.company_id,
+                CallTask.lead_id == lead.id,
+                CallTask.status.in_(["pending", "queued", "retry_scheduled", "dialing"]),
+                CallTask.dialer_source == "whatsapp_reply",
+            ).order_by(CallTask.created_at.desc())
+        ).first()
+        if existing_task is None:
+            created_call_task = create_call_task(
+                session=session,
+                company_id=lead.company_id,
+                actor_user_id=actor_user_id or lead.owner_user_id or 1,
+                lead_id=lead.id,
+                assigned_user_id=lead.owner_user_id,
+                scheduled_at=lead.next_action_due_at,
+                notes=f"Auto-created from WhatsApp reply intent: {intent}",
+                dialer_source="whatsapp_reply",
+                initial_status="queued",
+            )
     session.add(lead)
     session.commit()
     session.refresh(lead)
@@ -462,6 +526,29 @@ def _update_lead_for_email_reply(
     return {"call_task_id": None}
 
 
+# def _progress_campaign_for_whatsapp_reply(
+#     session: Session,
+#     company_id: int,
+#     lead_id: int,
+#     interaction_id: int,
+#     actor_user_id: int | None,
+#     intent: str,
+# ) -> dict[str, Any]:
+#     recipient = _find_active_whatsapp_campaign_recipient(session, company_id, lead_id)
+#     if not recipient:
+#         return {"campaign_recipient_id": None, "campaign_status": "not_found"}
+
+#     recipient.last_contact_at = utc_now()
+#     recipient.last_interaction_id = interaction_id
+#     recipient.updated_at = utc_now()
+#     recipient.updated_by = actor_user_id
+#     recipient.next_run_at = None
+#     recipient.status = "stopped" if intent in {"opt_out", "not_interested"} else "responded"
+#     session.add(recipient)
+#     session.commit()
+#     session.refresh(recipient)
+#     return {"campaign_recipient_id": recipient.id, "campaign_status": recipient.status}
+
 def _progress_campaign_for_whatsapp_reply(
     session: Session,
     company_id: int,
@@ -470,21 +557,68 @@ def _progress_campaign_for_whatsapp_reply(
     actor_user_id: int | None,
     intent: str,
 ) -> dict[str, Any]:
+    from services.campaign_service import (
+        get_current_step,
+        schedule_campaign_recipient_next_step,
+    )
+    from services.outcome_service import (
+        OUTCOME_NOT_INTERESTED,
+        OUTCOME_INTERESTED,
+        OUTCOME_CALLBACK_REQUESTED,
+        OUTCOME_NO_ANSWER,
+        ANSWERED_OUTCOMES,
+    )
+
     recipient = _find_active_whatsapp_campaign_recipient(session, company_id, lead_id)
     if not recipient:
         return {"campaign_recipient_id": None, "campaign_status": "not_found"}
+
+    # Map reply intent → normalized outcome
+    INTENT_TO_OUTCOME = {
+        "opt_out":            OUTCOME_NOT_INTERESTED,
+        "not_interested":     OUTCOME_NOT_INTERESTED,
+        "interested":         OUTCOME_INTERESTED,
+        "callback_requested": OUTCOME_CALLBACK_REQUESTED,
+        "quote_requested":    OUTCOME_INTERESTED,
+        "neutral":            OUTCOME_NO_ANSWER,
+    }
+    normalized_outcome = INTENT_TO_OUTCOME.get(intent, OUTCOME_NO_ANSWER)
 
     recipient.last_contact_at = utc_now()
     recipient.last_interaction_id = interaction_id
     recipient.updated_at = utc_now()
     recipient.updated_by = actor_user_id
-    recipient.next_run_at = None
-    recipient.status = "stopped" if intent in {"opt_out", "not_interested"} else "responded"
-    session.add(recipient)
-    session.commit()
-    session.refresh(recipient)
-    return {"campaign_recipient_id": recipient.id, "campaign_status": recipient.status}
 
+    if normalized_outcome in {OUTCOME_NOT_INTERESTED}:
+        # Terminal — stop the recipient
+        recipient.status = "stopped"
+        recipient.next_run_at = None
+        session.add(recipient)
+        session.commit()
+        session.refresh(recipient)
+    elif normalized_outcome in ANSWERED_OUTCOMES:
+        # Positive — advance to next campaign step
+        session.add(recipient)
+        session.commit()
+        session.refresh(recipient)
+        schedule_campaign_recipient_next_step(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id or 0,
+            recipient=recipient,
+        )
+    else:
+        # Neutral — mark responded, let worker reschedule
+        recipient.status = "responded"
+        session.add(recipient)
+        session.commit()
+        session.refresh(recipient)
+
+    return {
+        "campaign_recipient_id": recipient.id,
+        "campaign_status": recipient.status,
+        "normalized_outcome": normalized_outcome,
+    }
 
 def record_email_open(session: Session, token: str) -> dict[str, Any]:
     interaction = _get_interaction_by_token(session, token)
@@ -693,6 +827,14 @@ def ingest_whatsapp_webhook_event(
                 interaction.updated_at = utc_now()
                 session.add(interaction)
                 session.commit()
+        auto_reply_result = _send_whatsapp_auto_reply(
+            session=session,
+            company_id=company_id,
+            lead_id=lead.id,
+            actor_user_id=lead.owner_user_id,
+            intent=intent,
+            quote_result=quote_result,
+        )
         record_whatsapp_event(
             session=session,
             company_id=company_id,
@@ -706,6 +848,7 @@ def ingest_whatsapp_webhook_event(
             "company_id": company_id,
             "lead_id": lead.id,
             "intent": intent,
+            "auto_reply_sent": auto_reply_result is not None and auto_reply_result.get("success"),
             "call_task_id": lead_update_result["call_task_id"],
             **campaign_result,
             **({k: v for k, v in quote_result.items() if k != "status"}),

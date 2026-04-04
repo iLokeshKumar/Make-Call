@@ -10,7 +10,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     const { user, isLoading, isSessionExpired, logout } = useAuth();
     const router = useRouter();
 
-    const isAuthPage = pathname === "/login" || pathname === "/register";
+    const isAuthPage = pathname === "/login" || pathname === "/register" || pathname === "/invite/accept";
 
     useEffect(() => {
         if (!isLoading && !user && !isAuthPage) {
@@ -58,7 +58,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
             )}
 
             <Sidebar />
-            <main className="flex-1 overflow-y-auto bg-gray-50 dark:bg-gray-900">
+            <main className="flex-1 overflow-y-auto bg-gradient-to-br from-slate-50 via-violet-50/40 to-blue-50/30 dark:from-slate-900 dark:via-slate-900 dark:to-slate-900">
                 {!user?.email_verified && user && (
                     <div className="bg-amber-500/10 border-b border-amber-500/20 px-8 py-3 flex items-center justify-between">
                         <div className="flex items-center space-x-3 text-amber-600 dark:text-amber-400 font-medium">

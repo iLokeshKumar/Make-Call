@@ -33,7 +33,6 @@ class ElevenLabsSTT:
         self.provider = "ElevenLabs"
         self.model = model or "scribe_v1"
         self.api_key = api_key
-
         if not self.api_key:
             logger.warning("ElevenLabsSTT initialized without an API key! Transcription will fail.")
 

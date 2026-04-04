@@ -8,6 +8,7 @@ from typing import Any
 from sqlalchemy import text
 from sqlmodel import Session, select
 
+from agents.ism_orchestrator import run_ism_for_company
 from database import engine
 from models.models import User
 from services.campaign_service import run_due_campaign_recipients
@@ -32,10 +33,28 @@ _health: dict[str, Any] = {
     "total_failed_cycles": 0,
 }
 
+_paused: bool = False
+
 
 def get_worker_health() -> dict[str, Any]:
     """Return a snapshot of the latest worker-cycle health metrics."""
-    return dict(_health)
+    return {**_health, "paused": _paused}
+
+
+def pause_worker() -> dict[str, Any]:
+    """Pause the automation worker so future cycle invocations are no-ops."""
+    global _paused
+    _paused = True
+    logger.info("[worker] paused by API request")
+    return get_worker_health()
+
+
+def resume_worker() -> dict[str, Any]:
+    """Resume the automation worker after a pause."""
+    global _paused
+    _paused = False
+    logger.info("[worker] resumed by API request")
+    return get_worker_health()
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +115,10 @@ def run_worker_cycle(
     - Wraps every company in its own try/except → error isolation.
     - Records per-company and cycle-level metrics → observability.
     """
+    if _paused:
+        logger.info("[worker] cycle skipped — worker is paused")
+        return [{"status": "paused", "message": "Worker is paused. Call /automation/resume to re-enable."}]
+
     results: list[dict[str, Any]] = []
     cycle_start = datetime.utcnow()
     companies = get_company_actor_ids(session, company_id=company_id)
@@ -114,6 +137,7 @@ def run_worker_cycle(
             "status": "skipped",
             "dialer_results": None,
             "campaign_results": None,
+            "ism_results": None,
             "error": None,
             "start_at": company_start.isoformat(),
             "end_at": None,
@@ -172,6 +196,25 @@ def run_worker_cycle(
                     target_company_id,
                 )
                 metric["campaign_results"] = {"error": str(campaign_err)}
+
+            # ISM – isolated: ISM failure must NOT mask dialer/campaign results
+            try:
+                metric["ism_results"] = run_ism_for_company(
+                    session=session,
+                    company_id=target_company_id,
+                    actor_user_id=actor_user_id,
+                )
+                logger.info(
+                    "[worker] company=%s ISM completed | leads_processed=%s",
+                    target_company_id,
+                    len(metric["ism_results"]),
+                )
+            except Exception as ism_err:  # noqa: BLE001
+                logger.exception(
+                    "[worker] company=%s ISM FAILED",
+                    target_company_id,
+                )
+                metric["ism_results"] = {"error": str(ism_err)}
 
             metric["status"] = "completed"
 

@@ -1,7 +1,17 @@
+# NOTE: This file is not currently wired into the application.
+# It requires the `langgraph` package (not in requirements.txt).
+# To activate it, install langgraph and import it where needed.
 import logging
 from typing import TypedDict, List, Optional, Any
-from langgraph.graph import StateGraph, END
 from datetime import datetime
+
+try:
+    from langgraph.graph import StateGraph, END
+    _LANGGRAPH_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    StateGraph = None  # type: ignore[assignment,misc]
+    END = None  # type: ignore[assignment]
+    _LANGGRAPH_AVAILABLE = False
 
 # Setup logging
 logger = logging.getLogger(__name__)

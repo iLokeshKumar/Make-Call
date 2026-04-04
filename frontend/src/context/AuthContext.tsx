@@ -35,6 +35,7 @@ interface User {
     company_website?: string;
     google_account_email?: string;
     company?: Company;
+    created_at?: string;
 }
 
 export interface GoogleStatus {

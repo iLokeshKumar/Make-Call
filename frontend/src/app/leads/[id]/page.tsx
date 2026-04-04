@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Loader2 } from "lucide-react";
+import { ArrowLeft, Brain, Edit3, Loader2, RefreshCw, Save, Target, TrendingUp, Zap } from "lucide-react";
 
 import InteractionTimeline from "@/components/leads/interaction_timeline";
 import LeadHeader from "@/components/leads/lead_header";
@@ -32,6 +32,14 @@ type Lead = {
   industry?: string | null;
   website?: string | null;
   created_at?: string;
+  lead_score?: number | null;
+  lead_score_reasons_json?: { reasons: string[]; priority: string } | string[] | null;
+  product_interest?: string | null;
+  last_outreach_at?: string | null;
+  ism_stage?: string | null;
+  budget_range?: string | null;
+  timeline?: string | null;
+  decision_maker?: string | null;
 };
 
 type Requirement = {
@@ -62,6 +70,26 @@ type CallTask = {
   completed_at?: string | null;
 };
 
+// ISM stage display config
+const ISM_STAGE_CONFIG: Record<string, { label: string; cls: string }> = {
+  new:          { label: "New",          cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
+  contacted:    { label: "Contacted",    cls: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" },
+  engaged:      { label: "Engaged",      cls: "bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300" },
+  quote_sent:   { label: "Quote Sent",   cls: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300" },
+  negotiation:  { label: "Negotiation",  cls: "bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-300" },
+  closed_won:   { label: "Closed Won",   cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" },
+  closed_lost:  { label: "Closed Lost",  cls: "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300" },
+};
+
+function IsmStagePill({ stage }: { stage: string }) {
+  const config = ISM_STAGE_CONFIG[stage] ?? { label: stage, cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" };
+  return (
+    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${config.cls}`}>
+      {config.label}
+    </span>
+  );
+}
+
 export default function LeadDetailPage() {
   const params = useParams<{ id: string }>();
   const leadId = Number(params?.id);
@@ -85,10 +113,23 @@ export default function LeadDetailPage() {
   const [noteMessage, setNoteMessage] = useState<string | null>(null);
 
   const [callMessage, setCallMessage] = useState<string | null>(null);
+  const [callInteractionId, setCallInteractionId] = useState<number | null>(null);
+  const [callStatus, setCallStatus] = useState<string | null>(null);
 
   const [aiSummary, setAiSummary] = useState<string>("");
   const [aiLoading, setAiLoading] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
+
+  // ICP Score actions
+  const [rescoring, setRescoring] = useState(false);
+  const [enriching, setEnriching] = useState(false);
+  const [enrichToast, setEnrichToast] = useState<string | null>(null);
+
+  // Requirements editor
+  const [reqEditMode, setReqEditMode] = useState(false);
+  const [reqDraft, setReqDraft] = useState<Requirement>({});
+  const [reqSaving, setReqSaving] = useState(false);
+  const [reqMessage, setReqMessage] = useState<string | null>(null);
 
   useEffect(() => {
     async function fetchLeadDetail() {
@@ -119,7 +160,9 @@ export default function LeadDetailPage() {
         setLead(leadPayload);
 
         if (requirementRes.ok) {
-          setRequirement(await requirementRes.json());
+          const reqPayload = await requirementRes.json();
+          setRequirement(reqPayload);
+          setReqDraft(reqPayload);
         }
 
         if (interactionRes.ok) {
@@ -155,14 +198,14 @@ export default function LeadDetailPage() {
       console.log("Missing token or leadId, aborting");
       return;
     }
-    
+
     setAiLoading(true);
     setAiError(null);
 
     try {
       const url = `${API_BASE}/crm/ai-insights?lead_id=${leadId}`;
       console.log("Fetching AI summary from:", url);
-      
+
       const response = await fetch(url, {
         headers: { Authorization: `Bearer ${token}` },
       });
@@ -232,6 +275,76 @@ export default function LeadDetailPage() {
   useEffect(() => {
     if (leadId && token) fetchAiSummary();
   }, [leadId, token, fetchAiSummary]);
+
+  async function handleRescore() {
+    if (!token || !leadId) return;
+    setRescoring(true);
+    try {
+      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/rescore`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) throw new Error("Re-score failed");
+      const updated = await res.json();
+      setLead((curr) => curr ? { ...curr, ...updated } : curr);
+    } catch (err) {
+      console.error("Rescore error:", err);
+    } finally {
+      setRescoring(false);
+    }
+  }
+
+  async function handleEnrich() {
+    if (!token || !leadId) return;
+    setEnriching(true);
+    setEnrichToast(null);
+    try {
+      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/enrich`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) throw new Error("Enrichment failed");
+      const payload = await res.json();
+      setEnrichToast(payload?.message || "Enrichment complete.");
+      // Refresh lead data
+      const leadRes = await fetch(`${API_BASE}/crm/leads/${leadId}`, { headers: { Authorization: `Bearer ${token}` } });
+      if (leadRes.ok) setLead(await leadRes.json());
+    } catch (err) {
+      setEnrichToast(err instanceof Error ? err.message : "Enrichment failed.");
+    } finally {
+      setEnriching(false);
+      setTimeout(() => setEnrichToast(null), 4000);
+    }
+  }
+
+  async function handleSaveRequirements() {
+    if (!token || !leadId) return;
+    setReqSaving(true);
+    setReqMessage(null);
+    try {
+      const res = await fetch(`${API_BASE}/requirements/${leadId}`, {
+        method: "PUT",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(reqDraft),
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) {
+        const payload = await res.json();
+        throw new Error(payload?.detail || "Save failed");
+      }
+      const saved = await res.json();
+      setRequirement(saved);
+      setReqDraft(saved);
+      setReqEditMode(false);
+      setReqMessage("Requirements saved successfully.");
+    } catch (err) {
+      setReqMessage(err instanceof Error ? err.message : "Could not save requirements.");
+    } finally {
+      setReqSaving(false);
+    }
+  }
 
   const transcript = useMemo(
     () => interactions.find((interaction) => interaction.transcript)?.transcript || "",
@@ -364,17 +477,50 @@ export default function LeadDetailPage() {
         throw new Error("Failed to delete lead");
       }
 
-      // Navigate back to leads list
       window.location.href = "/leads";
     } catch (err) {
       alert(err instanceof Error ? err.message : "Delete failed");
     }
   }
 
+  const CALL_STATUS_LABELS: Record<string, string> = {
+    initiated:    "Calling...",
+    ringing:      "Ringing...",
+    "in-progress":"In conversation",
+    completed:    "Call completed",
+    "no-answer":  "No answer",
+    busy:         "Line busy",
+    failed:       "Call failed",
+    canceled:     "Call canceled",
+  };
+  const TERMINAL_STATUSES = new Set(["completed", "no-answer", "busy", "failed", "canceled"]);
+
+  useEffect(() => {
+    if (!callInteractionId || !token) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        setCallStatus(data.call_status);
+        setCallMessage(CALL_STATUS_LABELS[data.call_status] ?? data.call_status);
+        if (data.is_terminal) {
+          clearInterval(interval);
+          setTimeout(() => { setCallInteractionId(null); setCallStatus(null); }, 4000);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [callInteractionId, token]);
+
   async function handleCall() {
     if (!token || !lead?.normalized_phone) return;
 
     setCallMessage(null);
+    setCallInteractionId(null);
+    setCallStatus(null);
     try {
       const response = await fetch(
         `${API_BASE}/make-call?to=${encodeURIComponent(lead.normalized_phone)}&lead_id=${lead.id}`,
@@ -390,11 +536,30 @@ export default function LeadDetailPage() {
       }
 
       if (!response.ok) throw new Error("Call could not be started");
+      const data = await response.json();
       setCallMessage(`Calling ${lead.name} at ${lead.normalized_phone}...`);
+      if (data.interaction_id) setCallInteractionId(data.interaction_id);
     } catch (callError) {
       setCallMessage(callError instanceof Error ? callError.message : "Failed to start the call.");
     }
   }
+
+  // Derive score reasons as a string array regardless of shape
+  const scoreReasons: string[] = useMemo(() => {
+    if (!lead?.lead_score_reasons_json) return [];
+    if (Array.isArray(lead.lead_score_reasons_json)) return lead.lead_score_reasons_json as string[];
+    const obj = lead.lead_score_reasons_json as { reasons?: string[] };
+    return Array.isArray(obj.reasons) ? obj.reasons : [];
+  }, [lead]);
+
+  const scorePriority: string = useMemo(() => {
+    if (!lead?.lead_score_reasons_json) return "";
+    if (!Array.isArray(lead.lead_score_reasons_json)) {
+      const obj = lead.lead_score_reasons_json as { priority?: string };
+      return obj.priority || "";
+    }
+    return "";
+  }, [lead]);
 
   if (loading) {
     return (
@@ -434,8 +599,60 @@ export default function LeadDetailPage() {
       />
 
       {callMessage && (
-        <div className="rounded-2xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200 animate-in fade-in slide-in-from-top-2">
+        <div className={`rounded-2xl border px-4 py-3 text-sm flex items-center gap-2 animate-in fade-in slide-in-from-top-2 ${
+          callStatus === "completed" ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/20 dark:bg-green-500/10 dark:text-green-300"
+          : callStatus === "no-answer" || callStatus === "busy" || callStatus === "failed" ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
+          : callStatus === "in-progress" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300"
+          : "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200"
+        }`}>
+          {callInteractionId && !TERMINAL_STATUSES.has(callStatus ?? "") && (
+            <span className="inline-block h-2 w-2 rounded-full bg-current animate-pulse flex-shrink-0" />
+          )}
           {callMessage}
+        </div>
+      )}
+
+      {enrichToast && (
+        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200 animate-in fade-in slide-in-from-top-2">
+          {enrichToast}
+        </div>
+      )}
+
+      {/* ISM Stage Card */}
+      {(lead.ism_stage || lead.next_action || lead.next_action_due_at) && (
+        <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
+          <div className="flex flex-wrap items-center gap-3">
+            <Zap className="h-5 w-5 text-violet-500" />
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">ISM Automation Stage</h3>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center gap-4">
+            {lead.ism_stage && (
+              <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                <span className="font-medium text-slate-800 dark:text-slate-100">Stage:</span>
+                <IsmStagePill stage={lead.ism_stage} />
+              </div>
+            )}
+            {lead.last_outreach_at && (
+              <div className="text-sm text-slate-600 dark:text-slate-300">
+                <span className="font-medium text-slate-800 dark:text-slate-100">Last outreach: </span>
+                {new Date(lead.last_outreach_at).toLocaleString()}
+              </div>
+            )}
+          </div>
+          {(lead.next_action || lead.next_action_due_at) && (
+            <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50/80 px-4 py-3 text-sm dark:border-white/10 dark:bg-slate-900/30">
+              {lead.next_action && (
+                <div className="text-slate-700 dark:text-slate-200">
+                  <span className="font-medium">Next action: </span>{lead.next_action}
+                </div>
+              )}
+              {lead.next_action_due_at && (
+                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  Due: {new Date(lead.next_action_due_at).toLocaleString()}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -478,7 +695,7 @@ export default function LeadDetailPage() {
             type="button"
             onClick={handleUpdateLead}
             disabled={updating}
-            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:scale-[1.01] disabled:opacity-60"
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01] disabled:opacity-60"
           >
             {updating ? "Saving..." : "Save updates"}
           </button>
@@ -499,10 +716,288 @@ export default function LeadDetailPage() {
             notes={lead.notes}
           />
           <NextActionCard nextAction={lead.next_action} dueAt={lead.next_action_due_at} />
+
+          {/* Sales Intelligence */}
+          {(lead.budget_range || lead.timeline || lead.decision_maker) && (
+            <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
+              <div className="flex items-center gap-2 mb-3">
+                <TrendingUp className="h-5 w-5 text-violet-500" />
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Sales Intelligence</h3>
+              </div>
+              <dl className="space-y-2 text-sm">
+                {lead.budget_range && (
+                  <div className="flex gap-2">
+                    <dt className="font-medium text-slate-700 dark:text-slate-300 min-w-[110px]">Budget:</dt>
+                    <dd className="text-slate-600 dark:text-slate-400">{lead.budget_range}</dd>
+                  </div>
+                )}
+                {lead.timeline && (
+                  <div className="flex gap-2">
+                    <dt className="font-medium text-slate-700 dark:text-slate-300 min-w-[110px]">Timeline:</dt>
+                    <dd className="text-slate-600 dark:text-slate-400">{lead.timeline}</dd>
+                  </div>
+                )}
+                {lead.decision_maker && (
+                  <div className="flex gap-2">
+                    <dt className="font-medium text-slate-700 dark:text-slate-300 min-w-[110px]">Decision Maker:</dt>
+                    <dd className="text-slate-600 dark:text-slate-400">{lead.decision_maker}</dd>
+                  </div>
+                )}
+              </dl>
+            </div>
+          )}
         </div>
 
         <div className="space-y-6 xl:col-span-2">
           <QualificationCard qualificationStatus={lead.qualification_status} requirement={requirement} />
+
+          {/* Enhanced ICP Score Card */}
+          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+              <div className="flex items-center gap-2">
+                <Target className="h-5 w-5 text-violet-500" />
+                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">ICP Score</h3>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={handleRescore}
+                  disabled={rescoring}
+                  className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
+                >
+                  <RefreshCw className={`h-3.5 w-3.5 ${rescoring ? "animate-spin" : ""}`} />
+                  {rescoring ? "Scoring..." : "Re-score Lead"}
+                </button>
+                <button
+                  type="button"
+                  onClick={handleEnrich}
+                  disabled={enriching}
+                  className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 dark:border-white/10 dark:text-slate-300 disabled:opacity-60 inline-flex items-center gap-2"
+                >
+                  <Brain className={`h-3.5 w-3.5 ${enriching ? "animate-pulse" : ""}`} />
+                  {enriching ? "Enriching..." : "Trigger Enrichment"}
+                </button>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-6">
+              {/* Score circle */}
+              {lead.lead_score != null && (
+                <div className="flex flex-col items-center gap-1">
+                  <div
+                    className={`flex h-20 w-20 items-center justify-center rounded-full border-4 text-xl font-bold shadow-inner ${
+                      lead.lead_score >= 70
+                        ? "border-emerald-400 text-emerald-600 bg-emerald-50 dark:border-emerald-500 dark:text-emerald-300 dark:bg-emerald-500/10"
+                        : lead.lead_score >= 40
+                        ? "border-amber-400 text-amber-600 bg-amber-50 dark:border-amber-500 dark:text-amber-300 dark:bg-amber-500/10"
+                        : "border-slate-300 text-slate-500 bg-slate-50 dark:border-slate-600 dark:text-slate-400 dark:bg-slate-800/40"
+                    }`}
+                  >
+                    {Math.round(lead.lead_score)}
+                  </div>
+                  <span
+                    className={`rounded-full px-2.5 py-0.5 text-xs font-semibold ${
+                      lead.lead_score >= 70
+                        ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                        : lead.lead_score >= 40
+                        ? "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
+                        : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
+                    }`}
+                  >
+                    {lead.lead_score >= 70 ? "High" : lead.lead_score >= 40 ? "Medium" : "Low"} Priority
+                  </span>
+                  {scorePriority && scorePriority !== (lead.lead_score >= 70 ? "high" : lead.lead_score >= 40 ? "medium" : "low") && (
+                    <span className="text-xs text-slate-500 dark:text-slate-400">({scorePriority})</span>
+                  )}
+                </div>
+              )}
+
+              <div className="flex-1 space-y-2 text-sm text-slate-600 dark:text-slate-300 min-w-0">
+                {lead.product_interest && (
+                  <div>
+                    <span className="font-medium text-slate-800 dark:text-slate-100">Product interest: </span>
+                    {lead.product_interest}
+                  </div>
+                )}
+                {lead.last_outreach_at && (
+                  <div>
+                    <span className="font-medium text-slate-800 dark:text-slate-100">Last outreach: </span>
+                    {new Date(lead.last_outreach_at).toLocaleString()}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {scoreReasons.length > 0 && (
+              <div className="mt-4">
+                <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Score reasons</p>
+                <div className="flex flex-wrap gap-2">
+                  {scoreReasons.map((reason) => (
+                    <span
+                      key={reason}
+                      className="rounded-lg bg-violet-100 px-2.5 py-1 text-xs font-medium text-violet-700 dark:bg-violet-500/10 dark:text-violet-300"
+                    >
+                      {reason.replace(/_/g, " ")}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {lead.lead_score == null && scoreReasons.length === 0 && !lead.product_interest && !lead.last_outreach_at && (
+              <p className="text-sm text-slate-500 dark:text-slate-400">No ICP score yet. Click Re-score Lead to generate one.</p>
+            )}
+          </div>
+
+          {/* Requirements Editor */}
+          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Requirements</h3>
+              {!reqEditMode ? (
+                <button
+                  type="button"
+                  onClick={() => { setReqEditMode(true); setReqMessage(null); }}
+                  className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 dark:border-white/10 dark:text-slate-300 hover:border-violet-400 hover:text-violet-600 transition"
+                >
+                  <Edit3 className="h-3.5 w-3.5" /> Edit
+                </button>
+              ) : (
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={handleSaveRequirements}
+                    disabled={reqSaving}
+                    className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
+                  >
+                    <Save className="h-3.5 w-3.5" />
+                    {reqSaving ? "Saving..." : "Save Requirements"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setReqEditMode(false); setReqDraft(requirement || {}); setReqMessage(null); }}
+                    className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 dark:border-white/10 dark:text-slate-300"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+
+            {reqMessage && (
+              <div className={`mb-3 rounded-xl px-4 py-2 text-sm ${
+                reqMessage.includes("success") || reqMessage.includes("saved")
+                  ? "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20"
+                  : "bg-red-50 text-red-700 border border-red-200 dark:bg-red-500/10 dark:text-red-300 dark:border-red-500/20"
+              }`}>
+                {reqMessage}
+              </div>
+            )}
+
+            {reqEditMode ? (
+              <div className="space-y-4">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-600 dark:text-slate-400">Budget Range</label>
+                    <input
+                      value={reqDraft.budget_range || ""}
+                      onChange={(e) => setReqDraft((d) => ({ ...d, budget_range: e.target.value }))}
+                      placeholder="e.g. $50k–$100k"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-600 dark:text-slate-400">Timeline</label>
+                    <input
+                      value={reqDraft.timeline || ""}
+                      onChange={(e) => setReqDraft((d) => ({ ...d, timeline: e.target.value }))}
+                      placeholder="e.g. Q2 2025"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-600 dark:text-slate-400">Decision Maker</label>
+                    <input
+                      value={reqDraft.decision_maker || ""}
+                      onChange={(e) => setReqDraft((d) => ({ ...d, decision_maker: e.target.value }))}
+                      placeholder="e.g. CTO, Procurement Head"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-xs font-semibold text-slate-600 dark:text-slate-400">Required Products</label>
+                    <input
+                      value={reqDraft.required_products || ""}
+                      onChange={(e) => setReqDraft((d) => ({ ...d, required_products: e.target.value }))}
+                      placeholder="e.g. Enterprise Plan, API Access"
+                      className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-600 dark:text-slate-400">Use Case</label>
+                  <textarea
+                    value={reqDraft.use_case || ""}
+                    onChange={(e) => setReqDraft((d) => ({ ...d, use_case: e.target.value }))}
+                    rows={3}
+                    placeholder="Describe the primary use case..."
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                  />
+                </div>
+                <div>
+                  <label className="mb-1 block text-xs font-semibold text-slate-600 dark:text-slate-400">Pain Points</label>
+                  <textarea
+                    value={reqDraft.pain_points || ""}
+                    onChange={(e) => setReqDraft((d) => ({ ...d, pain_points: e.target.value }))}
+                    rows={3}
+                    placeholder="Current challenges and pain points..."
+                    className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                  />
+                </div>
+              </div>
+            ) : (
+              <dl className="space-y-3 text-sm">
+                {requirement?.use_case && (
+                  <div>
+                    <dt className="font-medium text-slate-700 dark:text-slate-300">Use Case</dt>
+                    <dd className="mt-0.5 text-slate-600 dark:text-slate-400">{requirement.use_case}</dd>
+                  </div>
+                )}
+                {requirement?.budget_range && (
+                  <div>
+                    <dt className="font-medium text-slate-700 dark:text-slate-300">Budget Range</dt>
+                    <dd className="mt-0.5 text-slate-600 dark:text-slate-400">{requirement.budget_range}</dd>
+                  </div>
+                )}
+                {requirement?.timeline && (
+                  <div>
+                    <dt className="font-medium text-slate-700 dark:text-slate-300">Timeline</dt>
+                    <dd className="mt-0.5 text-slate-600 dark:text-slate-400">{requirement.timeline}</dd>
+                  </div>
+                )}
+                {requirement?.decision_maker && (
+                  <div>
+                    <dt className="font-medium text-slate-700 dark:text-slate-300">Decision Maker</dt>
+                    <dd className="mt-0.5 text-slate-600 dark:text-slate-400">{requirement.decision_maker}</dd>
+                  </div>
+                )}
+                {requirement?.pain_points && (
+                  <div>
+                    <dt className="font-medium text-slate-700 dark:text-slate-300">Pain Points</dt>
+                    <dd className="mt-0.5 text-slate-600 dark:text-slate-400">{requirement.pain_points}</dd>
+                  </div>
+                )}
+                {requirement?.required_products && (
+                  <div>
+                    <dt className="font-medium text-slate-700 dark:text-slate-300">Required Products</dt>
+                    <dd className="mt-0.5 text-slate-600 dark:text-slate-400">{requirement.required_products}</dd>
+                  </div>
+                )}
+                {!requirement?.use_case && !requirement?.budget_range && !requirement?.timeline && !requirement?.decision_maker && !requirement?.pain_points && !requirement?.required_products && (
+                  <p className="text-slate-400 dark:text-slate-500">No requirements recorded yet. Click Edit to add them.</p>
+                )}
+              </dl>
+            )}
+          </div>
 
           <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
             <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Add manual note</h3>
@@ -519,7 +1014,7 @@ export default function LeadDetailPage() {
                 type="button"
                 onClick={handleAddManualNote}
                 disabled={noteSaving}
-                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:scale-[1.01] disabled:opacity-60"
+                className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01] disabled:opacity-60"
               >
                 {noteSaving ? "Saving..." : "Save note"}
               </button>

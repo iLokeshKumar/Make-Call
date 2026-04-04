@@ -1,14 +1,16 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi.responses import Response
 from sqlmodel import Session, select, func, text
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from database import get_session
-from models.models import LatencyLog, User
+from models.models import AnalyticsAlert, LatencyLog, User
 from auth import get_current_user
 from services.analytics_service import (
     create_alert,
     evaluate_alerts,
     get_campaign_drilldown,
+    get_campaign_email_report,
     get_engagement_summary,
     get_quote_timeline_csv,
     list_alerts,
@@ -31,7 +33,7 @@ async def get_latency_analytics(
     days: int = 7,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
-    scope: str = "mine",  # mine | all (company_admin only)
+    scope: str = "all",  # all | mine
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user)
 ):
@@ -185,7 +187,7 @@ async def get_latency_analytics(
     llm_models = fetch_model_stats(LatencyLog.llm_model, LatencyLog.llm_ms, LatencyLog.llm_provider)
     tts_models = fetch_model_stats(LatencyLog.tts_model, LatencyLog.tts_ms, LatencyLog.tts_provider)
 
-    # Daily trend per engine
+    # Daily trend per engine — company_id filter is mandatory (tenant isolation)
     trend_raw = session.execute(
         text("""
             SELECT
@@ -196,10 +198,11 @@ async def get_latency_analytics(
             FROM latencylog
             WHERE created_at >= :cutoff_start AND created_at < :cutoff_end
               AND engine IS NOT NULL
+              AND company_id = :company_id
             GROUP BY DATE(created_at), engine
             ORDER BY day ASC, avg_ms ASC
         """),
-        {"cutoff_start": cutoff_start, "cutoff_end": cutoff_end},
+        {"cutoff_start": cutoff_start, "cutoff_end": cutoff_end, "company_id": current_user.company_id},
     ).all()
 
     trend = [
@@ -286,6 +289,18 @@ async def campaign_drilldown(
     return get_campaign_drilldown(session, current_user.company_id, campaign_id)
 
 
+@router.get("/campaign/{campaign_id}/email-report")
+async def campaign_email_report(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    result = get_campaign_email_report(session, current_user.company_id, campaign_id)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 @router.get("/quote/export")
 async def quote_export(
     session: Session = Depends(get_session),
@@ -328,3 +343,49 @@ async def analytics_alert_evaluate(
     current_user: User = Depends(get_current_user),
 ):
     return evaluate_alerts(session, current_user.company_id)
+
+
+@router.patch("/alerts/{alert_id}/enable")
+async def analytics_alert_enable(
+    alert_id: int = Path(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    alert = session.get(AnalyticsAlert, alert_id)
+    if not alert or alert.company_id != current_user.company_id:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert.enabled = True
+    session.add(alert)
+    session.commit()
+    session.refresh(alert)
+    return alert
+
+
+@router.patch("/alerts/{alert_id}/disable")
+async def analytics_alert_disable(
+    alert_id: int = Path(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    alert = session.get(AnalyticsAlert, alert_id)
+    if not alert or alert.company_id != current_user.company_id:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    alert.enabled = False
+    session.add(alert)
+    session.commit()
+    session.refresh(alert)
+    return alert
+
+
+@router.delete("/alerts/{alert_id}")
+async def analytics_alert_delete(
+    alert_id: int = Path(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    alert = session.get(AnalyticsAlert, alert_id)
+    if not alert or alert.company_id != current_user.company_id:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    session.delete(alert)
+    session.commit()
+    return {"deleted": True, "alert_id": alert_id}

@@ -424,7 +424,11 @@ export default function ProfilePage() {
                                 </div>
                                 <div className="flex justify-between text-xs">
                                     <span className="text-slate-500">Member Since</span>
-                                    <span className="text-slate-300 font-bold">Jan 2026</span>
+                                    <span className="text-slate-300 font-bold">
+                                        {user?.created_at
+                                            ? new Date(user.created_at).toLocaleDateString(undefined, { month: "short", year: "numeric" })
+                                            : "—"}
+                                    </span>
                                 </div>
                             </div>
                         </div>

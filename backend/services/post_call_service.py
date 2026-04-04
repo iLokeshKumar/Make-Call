@@ -43,10 +43,29 @@ Rules:
 
 
 def _safe_parse_json(text: str) -> dict | None:
+    if not text:
+        return None
+    # Try raw parse first
     try:
         return json.loads(text)
     except Exception:
-        return None
+        pass
+    # Strip markdown code fences (```json ... ``` or ``` ... ```)
+    import re
+    match = re.search(r"```(?:json)?\s*([\s\S]*?)```", text)
+    if match:
+        try:
+            return json.loads(match.group(1).strip())
+        except Exception:
+            pass
+    # Last resort: find first { ... } block
+    match = re.search(r"\{[\s\S]*\}", text)
+    if match:
+        try:
+            return json.loads(match.group(0))
+        except Exception:
+            pass
+    return None
 
 
 async def extract_and_save_requirements(
@@ -68,8 +87,14 @@ async def extract_and_save_requirements(
             f"CALL TRANSCRIPT:\n{transcript}\n"
         )
 
-        # Assumes your llm service has a simple generation method or equivalent
-        result_text = await llm_service.generate(prompt)
+        llm_service.add_user_message(prompt)
+        result_text = ""
+        async for chunk in llm_service.stream():
+            if chunk.get("type") == "finished":
+                result_text = chunk.get("full_reply", result_text)
+                break
+            elif chunk.get("type") == "token":
+                result_text += chunk.get("content", "")
         structured = _safe_parse_json(result_text)
 
         if not structured:

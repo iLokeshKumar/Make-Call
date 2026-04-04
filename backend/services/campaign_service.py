@@ -20,6 +20,7 @@ from services.outbound_call_service import create_call_task
 
 from services.communication_service import send_email_to_lead, send_whatsapp_to_lead
 from services.message_render_service import render_template_by_id
+from services.outcome_service import ANSWERED_OUTCOMES, normalize_call_outcome
 
 def create_campaign(
     session: Session,
@@ -587,7 +588,32 @@ def run_due_campaign_recipients(
 
             # Auto-advance only for email/whatsapp.
             # For call, advance later after call outcome is processed.
-            if result.get("channel") in {"email", "whatsapp"}:
+            # if result.get("channel") in {"email", "whatsapp"}:
+            #     updated_recipient = session.exec(
+            #         select(CampaignRecipient).where(
+            #             CampaignRecipient.id == recipient.id,
+            #             CampaignRecipient.company_id == recipient.company_id,
+            #         )
+            #     ).first()
+            #     if updated_recipient:
+            #         schedule_campaign_recipient_next_step(
+            #             session=session,
+            #             company_id=recipient.company_id,
+            #             actor_user_id=actor_user_id,
+            #             recipient=updated_recipient,
+            #         )
+
+            # results.append({"success": True, "data": result})
+
+
+
+            channel = result.get("channel")
+            step_status = result.get("status")
+
+            # For call steps: outcome_service.apply_call_outcome() drives advancement
+            # For email/whatsapp: treat a sent result as a normalized "answered" outcome
+            # to advance the step — do NOT advance on call_task_created (that waits for the real callback)
+            if channel in {"email", "whatsapp"} and step_status != "call_task_created":
                 updated_recipient = session.exec(
                     select(CampaignRecipient).where(
                         CampaignRecipient.id == recipient.id,
@@ -601,8 +627,8 @@ def run_due_campaign_recipients(
                         actor_user_id=actor_user_id,
                         recipient=updated_recipient,
                     )
-
-            results.append({"success": True, "data": result})
+            # For call steps: advancement happens inside outcome_service._update_campaign_recipient_for_outcome()
+            # when the Twilio status callback fires — nothing to do here.
 
         except Exception as e:
             results.append({

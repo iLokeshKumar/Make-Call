@@ -21,6 +21,9 @@ type Lead = {
   created_at?: string;
   city?: string | null;
   state?: string | null;
+  lead_score?: number | null;
+  product_interest?: string | null;
+  last_outreach_at?: string | null;
 };
 
 const emptyLead = {
@@ -35,6 +38,20 @@ function humanize(value?: string | null) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
+function ScoreBadge({ score }: { score?: number | null }) {
+  if (score == null) return null;
+  const pct = Math.round(score);
+  const color =
+    pct >= 70 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+    : pct >= 40 ? "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
+    : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
+  return (
+    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${color}`}>
+      ICP {pct}
+    </span>
+  );
+}
+
 export default function LeadsPage() {
   const { token, sessionTimeout } = useAuth();
   const [loading, setLoading] = useState(true);
@@ -43,6 +60,8 @@ export default function LeadsPage() {
   const [query, setQuery] = useState("");
   const [form, setForm] = useState(emptyLead);
   const [message, setMessage] = useState<string | null>(null);
+  const [callInteractionId, setCallInteractionId] = useState<number | null>(null);
+  const [callStatus, setCallStatus] = useState<string | null>(null);
 
   const fetchLeads = useCallback(async () => {
     if (!token) {
@@ -129,8 +148,47 @@ export default function LeadsPage() {
     }
   }
 
+  const CALL_STATUS_LABELS: Record<string, string> = {
+    initiated:    "Calling...",
+    ringing:      "Ringing...",
+    "in-progress":"In conversation",
+    completed:    "Call completed",
+    "no-answer":  "No answer",
+    busy:         "Line busy",
+    failed:       "Call failed",
+    canceled:     "Call canceled",
+  };
+  const TERMINAL_STATUSES = new Set(["completed", "no-answer", "busy", "failed", "canceled"]);
+
+  useEffect(() => {
+    if (!callInteractionId || !token) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await fetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const label = CALL_STATUS_LABELS[data.call_status] ?? data.call_status;
+        setCallStatus(data.call_status);
+        setMessage(msg => {
+          // preserve non-call messages
+          if (!msg || CALL_STATUS_LABELS[callStatus ?? ""] || msg.startsWith("Calling")) return label;
+          return msg;
+        });
+        if (data.is_terminal) {
+          clearInterval(interval);
+          setTimeout(() => { setCallInteractionId(null); setCallStatus(null); }, 4000);
+        }
+      } catch { /* ignore */ }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [callInteractionId, token]);
+
   async function handleCall(lead: Lead) {
     if (!token) return;
+    setCallInteractionId(null);
+    setCallStatus(null);
 
     try {
       const res = await fetch(
@@ -147,7 +205,9 @@ export default function LeadsPage() {
       }
 
       if (!res.ok) throw new Error("Call could not be started");
+      const data = await res.json();
       setMessage(`Calling ${lead.name} at ${lead.normalized_phone}...`);
+      if (data.interaction_id) setCallInteractionId(data.interaction_id);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Failed to start the call.");
     }
@@ -234,7 +294,15 @@ export default function LeadsPage() {
           </div>
 
           {message && (
-            <div className="mb-4 rounded-xl border border-violet-200 bg-violet-50 px-4 py-3 text-sm text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200">
+            <div className={`mb-4 rounded-xl border px-4 py-3 text-sm flex items-center gap-2 ${
+              callStatus === "completed" ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/20 dark:bg-green-500/10 dark:text-green-300"
+              : callStatus === "no-answer" || callStatus === "busy" || callStatus === "failed" ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
+              : callStatus === "in-progress" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300"
+              : "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200"
+            }`}>
+              {callInteractionId && !TERMINAL_STATUSES.has(callStatus ?? "") && (
+                <span className="inline-block h-2 w-2 rounded-full bg-current animate-pulse flex-shrink-0" />
+              )}
               {message}
             </div>
           )}
@@ -263,6 +331,7 @@ export default function LeadsPage() {
                             {humanize(lead.qualification_status)}
                           </span>
                         )}
+                        <ScoreBadge score={lead.lead_score} />
                       </div>
 
                       <div className="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-300">

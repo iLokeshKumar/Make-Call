@@ -3,8 +3,12 @@ from decimal import Decimal
 from pathlib import Path
 from secrets import token_urlsafe
 
+import logging
+
 from fastapi import HTTPException
 from sqlmodel import Session, select
+
+logger = logging.getLogger(__name__)
 
 from models.models import Lead, Product, Quote, QuoteCreate, QuoteItem, QuoteItemCreate, utc_now
 from services.tracking_service import record_quote_event
@@ -25,7 +29,7 @@ def generate_quote_number(session: Session, company_id: int) -> str:
                 seq = int(quote.quote_number.replace(prefix, ""))
                 max_seq = max(max_seq, seq)
             except ValueError:
-                pass
+                logger.debug("Skipping non-sequential quote number: %s", quote.quote_number)
 
     next_seq = max_seq + 1
     return f"{prefix}{next_seq:04d}"
@@ -462,8 +466,10 @@ def auto_create_quote_from_interaction(
                 "action": "auto_quote_sent",
             }
         except Exception as e:
-            # If quote creation fails, fall through to task creation
-            pass
+            logger.warning(
+                "Auto-quote creation failed for lead=%d interaction=%d product=%s: %s — falling back to call task",
+                lead_id, interaction_id, matched_product.name, e,
+            )
     
     # If no product match or quote creation failed, create a follow-up task
     task = create_call_task(

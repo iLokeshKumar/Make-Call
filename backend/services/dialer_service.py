@@ -12,7 +12,7 @@ from models.models import CallTask, Company, Interaction, Lead, OptOut, User, ut
 from services.outbound_call_service import create_call_task, get_call_task_or_404, start_call_task
 from utils.phone import normalize_phone
 from utils.url_utils import normalize_base_url
-
+from services.tracking_service import is_lead_opted_out
 
 def is_lead_callable(session: Session, company_id: int, lead_id: int) -> tuple[bool, str | None]:
     lead = session.exec(
@@ -26,14 +26,17 @@ def is_lead_callable(session: Session, company_id: int, lead_id: int) -> tuple[b
     if not lead.normalized_phone:
         return False, "missing_phone"
 
-    call_opt_out = session.exec(
-        select(OptOut).where(
-            OptOut.company_id == company_id,
-            OptOut.lead_id == lead_id,
-            OptOut.channel == "call",
-        )
-    ).first()
-    if call_opt_out:
+    # call_opt_out = session.exec(
+    #     select(OptOut).where(
+    #         OptOut.company_id == company_id,
+    #         OptOut.lead_id == lead_id,
+    #         OptOut.channel == "call",
+    #     )
+    # ).first()
+    # if call_opt_out:
+    #     return False, "opted_out"
+
+    if is_lead_opted_out(session, company_id, lead_id, "call"):
         return False, "opted_out"
 
     if (lead.status or "").lower() in {"closed_won", "closed_lost", "do_not_call"}:
@@ -140,15 +143,12 @@ def get_next_queued_task(session: Session, company_id: int) -> CallTask | None:
 
 
 def _resolve_callback_base(session: Session, company_id: int) -> str:
+    # DOMAIN env always wins — it is the ngrok/public URL Twilio can reach.
+    # company.website / company.domain are branding fields, not webhook endpoints.
+    if env_domain := os.getenv("DOMAIN"):
+        return normalize_base_url(env_domain, "https://localhost:8000")
     company = session.get(Company, company_id)
-    domain_source = (
-        company.website
-        if company and company.website
-        else company.domain
-        if company and company.domain
-        else os.getenv("DOMAIN")
-        or "localhost:8000"
-    )
+    domain_source = (company.domain if company and company.domain else None) or "localhost:8000"
     return normalize_base_url(domain_source, "https://localhost:8000")
 
 
@@ -239,7 +239,7 @@ def initiate_outbound_call(
         from_=from_number,
         url=call_url,
         status_callback=status_callback,
-        status_callback_event=["completed"],
+        status_callback_event=["initiated", "ringing", "in-progress", "completed", "busy", "no-answer", "failed", "canceled"],
         status_callback_method="POST",
     )
 

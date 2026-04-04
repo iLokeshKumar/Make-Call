@@ -5,7 +5,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
-  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2
+  ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2, Megaphone,
+  FileText, Layout, Cpu
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -14,19 +15,25 @@ import { maskEmail, maskPhone } from "@/utils/security";
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Leads", href: "/leads", icon: Users },
-  { name: "Inventory", href: "/inventory", icon: Package, adminOnly: true },
+  { name: "Campaigns", href: "/campaigns", icon: Megaphone },
   { name: "Calls", href: "/calls", icon: Phone },
+  { name: "Inventory", href: "/inventory", icon: Package, adminOnly: true },
+  { name: "Analytics", href: "/analytics", icon: Activity },
+  { name: "Quotes", href: "/quotes", icon: FileText },
+  { name: "Accounts", href: "/accounts", icon: Building2 },
+  { name: "Templates", href: "/templates", icon: Layout, adminOnly: true },
+  { name: "Automation", href: "/automation", icon: Cpu, adminOnly: true },
+  { name: "Admin", href: "/admin", icon: ShieldCheck, adminOnly: true },
   { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Company", href: "/company-profile", icon: Building2, adminOnly: true },
   { name: "Settings", href: "/settings", icon: Settings, adminOnly: true },
-  { name: "Analytics", href: "/analytics", icon: Activity },
 ];
 
 export default function Sidebar() {
   const pathname = usePathname();
   const { user, token, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
-  
+
   // Resizing State
   const [sidebarWidth, setSidebarWidth] = useState(288); // Default w-72 = 288px
   const [isResizing, setIsResizing] = useState(false);
@@ -177,7 +184,7 @@ export default function Sidebar() {
         </div>
 
         {/* Navigation */}
-        <nav className="relative flex-1 space-y-2 p-4">
+        <nav className="relative flex-1 space-y-2 overflow-y-auto p-4">
           {filteredItems.map((item, index) => {
             const isActive = pathname === item.href;
             return (
@@ -217,6 +224,17 @@ export default function Sidebar() {
         </nav>
 
         {/* User Section */}
+        {isCollapsed && (
+          <div className="p-4 border-t border-slate-200 dark:border-white/10 flex justify-center">
+            <div className="h-9 w-9 rounded-full bg-gradient-to-br from-violet-500 to-blue-500 border border-white/10 flex items-center justify-center overflow-hidden shadow-inner flex-shrink-0">
+              {user?.profile_picture_url ? (
+                <img src={user.profile_picture_url} alt="Profile" className="h-full w-full object-cover" />
+              ) : (
+                <UserIcon size={18} className="text-white/80" />
+              )}
+            </div>
+          </div>
+        )}
         {!isCollapsed && (
           <div className="relative p-4 border-t border-slate-200 dark:border-white/10 animate-in fade-in slide-in-from-bottom-2 duration-500">
             <div className="rounded-xl bg-slate-50 dark:bg-slate-800/30 p-4 border border-slate-200 dark:border-white/5 space-y-3 relative overflow-hidden">
@@ -290,7 +308,7 @@ export default function Sidebar() {
 
         <div className="relative p-4 border-t border-slate-200 dark:border-white/10">
           <div className={clsx(
-            "rounded-xl bg-slate-50 dark:bg-gradient-to-br dark:from-violet-500/10 dark:to-blue-500/10 p-4 border border-slate-200 dark:border-violet-500/20",
+            "rounded-xl bg-gradient-to-br from-violet-50 to-blue-50 dark:from-violet-500/10 dark:to-blue-500/10 p-4 border border-violet-100 dark:border-violet-500/20",
             isCollapsed ? "flex justify-center" : ""
           )}>
             <div className="flex items-center space-x-2">

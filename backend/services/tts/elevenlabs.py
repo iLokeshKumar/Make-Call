@@ -71,23 +71,30 @@ class ElevenLabsTTS:
         logger.info("🔊 [ElevenLabsTTS WS] Streaming via websocket.")
         start_time = time.time()
         first_byte_time = None
-        payload = {
-            "text": text,
-            "model_id": self.model,
-        }
         try:
-            await ws.send_json(payload)
+            # Send text chunk then flush to trigger generation
+            await ws.send_json({"text": text})
+            await ws.send_json({"text": "", "flush": True})
             async for msg in ws:
-                if msg.type == aiohttp.WSMsgType.BINARY:
+                if msg.type == aiohttp.WSMsgType.TEXT:
+                    data = json.loads(msg.data)
+                    audio_b64 = data.get("audio")
+                    if audio_b64:
+                        if first_byte_time is None:
+                            first_byte_time = time.time() - start_time
+                            self.last_latency = first_byte_time
+                        audio_bytes = base64.b64decode(audio_b64)
+                        await communicator.send_media(base64.b64encode(audio_bytes).decode())
+                    if data.get("isFinal"):
+                        break
+                elif msg.type == aiohttp.WSMsgType.BINARY:
+                    # Fallback: some ElevenLabs configs send raw binary
                     if first_byte_time is None:
                         first_byte_time = time.time() - start_time
                         self.last_latency = first_byte_time
                     await communicator.send_media(base64.b64encode(msg.data).decode())
-                elif msg.type == aiohttp.WSMsgType.TEXT:
-                    data = json.loads(msg.data)
-                    if data.get("status") == "done" or data.get("done"):
-                        break
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                     break
+            logger.info(f"🔊 [ElevenLabsTTS WS] Done. First-byte: {first_byte_time:.3f}s" if first_byte_time else "🔊 [ElevenLabsTTS WS] Done (no audio received).")
         except Exception as e:
             logger.error(f"❌ [ElevenLabsTTS WS] Error: {e}")

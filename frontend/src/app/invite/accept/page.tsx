@@ -93,9 +93,9 @@ export default function InviteAcceptPage() {
     if (fetching) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-                <div className="flex flex-col items-center space-y-3 rounded-2xl bg-white p-8 shadow-2xl">
-                    <Loader2 className="h-10 w-10 animate-spin text-violet-600" />
-                    <p className="text-sm font-semibold text-slate-600">Verifying your invite...</p>
+                <div className="flex flex-col items-center space-y-3 rounded-2xl bg-slate-900 border border-slate-800 p-8 shadow-2xl">
+                    <Loader2 className="h-10 w-10 animate-spin text-violet-400" />
+                    <p className="text-sm font-semibold text-slate-300">Verifying your invite...</p>
                 </div>
             </div>
         );
@@ -104,14 +104,14 @@ export default function InviteAcceptPage() {
     if (error || !inviteInfo) {
         return (
             <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-                <div className="w-full max-w-md rounded-2xl bg-white p-8 shadow-2xl">
+                <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-8 shadow-2xl">
                     <div className="flex flex-col items-center gap-3">
-                        <ShieldCheck className="h-12 w-12 text-red-500" />
-                        <p className="text-lg font-semibold text-slate-900">Invite Invalid</p>
-                        <p className="text-sm text-slate-500 text-center">{error || "This invite link cannot be used."}</p>
+                        <ShieldCheck className="h-12 w-12 text-red-400" />
+                        <p className="text-lg font-semibold text-white">Invite Invalid</p>
+                        <p className="text-sm text-slate-400 text-center">{error || "This invite link cannot be used."}</p>
                         <button
                             onClick={() => router.push("/register")}
-                            className="mt-4 rounded-xl bg-violet-600 px-4 py-2 text-white font-semibold"
+                            className="mt-4 rounded-xl bg-violet-600 hover:bg-violet-700 px-4 py-2 text-white font-semibold transition"
                         >
                             Return to Register
                         </button>
@@ -123,20 +123,21 @@ export default function InviteAcceptPage() {
 
     return (
         <div className="min-h-screen flex items-center justify-center bg-slate-950 px-4 py-10">
-            <div className="w-full max-w-lg space-y-6 rounded-3xl bg-white p-8 shadow-2xl">
+            <div className="w-full max-w-lg space-y-6 rounded-3xl bg-slate-900 border border-slate-800 p-8 shadow-2xl">
                 <div className="space-y-2">
-                    <p className="text-sm text-slate-500 uppercase tracking-[0.3em]">Invitation</p>
-                    <h1 className="text-3xl font-bold">
-                        Join <span className="text-violet-600">{inviteInfo.company_name}</span>
+                    <p className="text-xs text-slate-500 uppercase tracking-[0.3em]">Invitation</p>
+                    <h1 className="text-3xl font-bold text-white">
+                        Join <span className="text-violet-400">{inviteInfo.company_name}</span>
                     </h1>
-                    <p className="text-sm text-slate-500">
-                        Invited by <strong>{inviteInfo.invited_by}</strong> for the role {inviteInfo.role_name} · expires{" "}
+                    <p className="text-sm text-slate-400">
+                        Invited by <strong className="text-slate-200">{inviteInfo.invited_by}</strong> for the role{" "}
+                        <strong className="text-slate-200">{inviteInfo.role_name}</strong> · expires{" "}
                         {new Date(inviteInfo.expires_at).toLocaleString()}
                     </p>
                 </div>
 
                 {message && (
-                    <div className="rounded-2xl bg-emerald-50 p-4 text-sm text-emerald-600 border border-emerald-200">
+                    <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-sm text-emerald-400">
                         {message}
                     </div>
                 )}
@@ -148,7 +149,7 @@ export default function InviteAcceptPage() {
                             type="email"
                             value={inviteInfo.email}
                             disabled
-                            className="w-full rounded-xl border border-slate-200 bg-slate-50 px-4 py-2 text-sm text-slate-500"
+                            className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-400 cursor-not-allowed"
                         />
                     </div>
                     <div>
@@ -158,26 +159,26 @@ export default function InviteAcceptPage() {
                             value={username}
                             onChange={(e) => setUsername(e.target.value)}
                             required
-                            className="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm focus:border-violet-500 focus:outline-none"
+                            className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
                         />
                     </div>
                     <div className="grid gap-4 md:grid-cols-2">
                         <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">First Name (optional)</label>
+                            <label className="text-xs font-semibold uppercase text-slate-500">First Name <span className="normal-case text-slate-600">(optional)</span></label>
                             <input
                                 type="text"
                                 value={firstName}
                                 onChange={(e) => setFirstName(e.target.value)}
-                                className="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm focus:border-violet-500 focus:outline-none"
+                                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
                             />
                         </div>
                         <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Last Name (optional)</label>
+                            <label className="text-xs font-semibold uppercase text-slate-500">Last Name <span className="normal-case text-slate-600">(optional)</span></label>
                             <input
                                 type="text"
                                 value={lastName}
                                 onChange={(e) => setLastName(e.target.value)}
-                                className="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm focus:border-violet-500 focus:outline-none"
+                                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
                             />
                         </div>
                     </div>
@@ -188,16 +189,16 @@ export default function InviteAcceptPage() {
                             value={password}
                             onChange={(e) => setPassword(e.target.value)}
                             required
-                            className="w-full rounded-xl border border-slate-200 px-4 py-2 text-sm focus:border-violet-500 focus:outline-none"
+                            className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
                         />
                     </div>
-                    {error && <p className="text-xs text-red-500">{error}</p>}
+                    {error && <p className="text-xs text-red-400">{error}</p>}
                     <button
                         type="submit"
                         disabled={loading}
-                        className="mt-2 rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/50 hover:shadow-2xl disabled:opacity-60"
+                        className="mt-2 flex items-center justify-center rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/30 hover:from-violet-700 hover:to-blue-700 disabled:opacity-60 transition"
                     >
-                        {loading ? <Loader2 className="mx-auto h-5 w-5 animate-spin" /> : "Accept Invite & Sign In"}
+                        {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <><UserPlus className="mr-2 h-4 w-4" />Accept Invite &amp; Sign In</>}
                     </button>
                 </form>
             </div>

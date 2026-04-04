@@ -792,5 +792,191 @@ class PhaseOneTwoServicesTest(unittest.TestCase):
         self.assertEqual(url, "https://app.example.com/tracking/quote/view/quote-token")
 
 
+class TenantIsolationTest(unittest.TestCase):
+    """Verify that the company_id boundary prevents cross-tenant data access."""
+
+    def setUp(self):
+        self.engine = create_engine(
+            "sqlite://",
+            connect_args={"check_same_thread": False},
+            poolclass=StaticPool,
+        )
+        SQLModel.metadata.create_all(self.engine)
+        self.session = Session(self.engine)
+
+        # Company A
+        co_a = Company(name="Acme A", slug="acme-a")
+        self.session.add(co_a)
+        self.session.commit()
+        self.session.refresh(co_a)
+        self.co_a_id = co_a.id
+
+        user_a = User(
+            company_id=self.co_a_id, email="a@a.com", username="ua",
+            username_normalized="ua", password_hash="x", is_active=True, email_verified=True,
+        )
+        self.session.add(user_a)
+        self.session.commit()
+        self.session.refresh(user_a)
+        self.user_a_id = user_a.id
+
+        # Company B
+        co_b = Company(name="Acme B", slug="acme-b")
+        self.session.add(co_b)
+        self.session.commit()
+        self.session.refresh(co_b)
+        self.co_b_id = co_b.id
+
+        user_b = User(
+            company_id=self.co_b_id, email="b@b.com", username="ub",
+            username_normalized="ub", password_hash="x", is_active=True, email_verified=True,
+        )
+        self.session.add(user_b)
+        self.session.commit()
+        self.session.refresh(user_b)
+        self.user_b_id = user_b.id
+
+    def tearDown(self):
+        self.session.close()
+
+    def _make_lead(self, company_id: int, user_id: int, **overrides):
+        lead = Lead(
+            company_id=company_id,
+            owner_user_id=user_id,
+            name=overrides.get("name", "Test Lead"),
+            normalized_phone=overrides.get("normalized_phone", "+911111111111"),
+            email=overrides.get("email", "lead@test.com"),
+            source="manual",
+            enrichment_status="not_enriched",
+            created_by=user_id,
+            updated_by=user_id,
+        )
+        self.session.add(lead)
+        self.session.commit()
+        self.session.refresh(lead)
+        return lead
+
+    # ------------------------------------------------------------------ #
+    # Lead isolation                                                       #
+    # ------------------------------------------------------------------ #
+
+    def test_company_b_cannot_read_company_a_lead(self):
+        """Querying leads scoped to company_b must not return company_a leads."""
+        lead_a = self._make_lead(self.co_a_id, self.user_a_id, name="Lead A")
+        leads_for_b = self.session.exec(
+            select(Lead).where(Lead.company_id == self.co_b_id)
+        ).all()
+        self.assertNotIn(lead_a.id, [l.id for l in leads_for_b])
+
+    def test_is_lead_callable_returns_false_for_wrong_company(self):
+        """is_lead_callable(company_b_id, lead_a_id) → False (lead not found)."""
+        lead_a = self._make_lead(self.co_a_id, self.user_a_id)
+        callable_, reason = is_lead_callable(self.session, self.co_b_id, lead_a.id)
+        self.assertFalse(callable_)
+        self.assertEqual(reason, "lead_not_found")
+
+    def test_batch_call_tasks_skips_lead_from_other_company(self):
+        """create_batch_call_tasks with a lead from company_a scoped to company_b creates no tasks."""
+        lead_a = self._make_lead(self.co_a_id, self.user_a_id)
+        result = create_batch_call_tasks(
+            session=self.session,
+            company_id=self.co_b_id,
+            actor_user_id=self.user_b_id,
+            lead_ids=[lead_a.id],
+        )
+        self.assertEqual(result["created"], 0)
+        tasks = self.session.exec(
+            select(CallTask).where(CallTask.company_id == self.co_b_id)
+        ).all()
+        self.assertEqual(len(tasks), 0)
+
+    # ------------------------------------------------------------------ #
+    # Opt-out isolation                                                    #
+    # ------------------------------------------------------------------ #
+
+    def test_opt_out_from_company_a_does_not_affect_company_b(self):
+        """Opting a lead out in company_a must not create an OptOut row for company_b."""
+        lead_a = self._make_lead(self.co_a_id, self.user_a_id)
+        opt_out_lead_from_calls(self.session, self.co_a_id, self.user_a_id, lead_a.id)
+        opt_outs_b = self.session.exec(
+            select(OptOut).where(OptOut.company_id == self.co_b_id)
+        ).all()
+        self.assertEqual(len(opt_outs_b), 0)
+
+    # ------------------------------------------------------------------ #
+    # Engagement event isolation                                           #
+    # ------------------------------------------------------------------ #
+
+    def test_engagement_summary_only_returns_own_company_events(self):
+        """get_engagement_summary for company_b must not count company_a events."""
+        lead_a = self._make_lead(self.co_a_id, self.user_a_id)
+        # Plant an engagement event for company A
+        evt = EngagementEvent(
+            company_id=self.co_a_id,
+            lead_id=lead_a.id,
+            channel="email",
+            event_type="open",
+            payload={},
+        )
+        self.session.add(evt)
+        self.session.commit()
+
+        # Company B summary must have 0 email opens
+        summary_b = get_engagement_summary(self.session, self.co_b_id)
+        email_section = summary_b.get("email", {})
+        self.assertEqual(email_section.get("open", 0), 0)
+
+    # ------------------------------------------------------------------ #
+    # ISM orchestrator isolation                                           #
+    # ------------------------------------------------------------------ #
+
+    def test_ism_for_company_b_does_not_process_company_a_leads(self):
+        """run_ism_for_company scoped to company_b must not touch company_a leads."""
+        from agents.ism_orchestrator import run_ism_for_company
+
+        lead_a = self._make_lead(self.co_a_id, self.user_a_id)
+        original_outreach_at = lead_a.last_outreach_at
+
+        # run ISM for company_b
+        with patch("agents.ism_orchestrator._dispatch_call", return_value={"action": "queued_call_task"}):
+            run_ism_for_company(self.session, self.co_b_id, self.user_b_id)
+
+        # company_a lead must be untouched
+        self.session.refresh(lead_a)
+        self.assertEqual(lead_a.last_outreach_at, original_outreach_at)
+
+    # ------------------------------------------------------------------ #
+    # WhatsApp webhook isolation                                           #
+    # ------------------------------------------------------------------ #
+
+    def test_whatsapp_inbound_reply_routed_only_to_correct_company(self):
+        """ingest_whatsapp_webhook_event with forced_company_id=co_b must not create
+        interactions under company_a even if the phone matches a company_a lead."""
+        lead_a = self._make_lead(
+            self.co_a_id, self.user_a_id,
+            normalized_phone="+919999999999",
+            email="lead_a@example.com",
+        )
+        payload = {
+            "From": "whatsapp:+919999999999",
+            "To": "whatsapp:+911234567890",
+            "Body": "Yes I am interested",
+        }
+        result = ingest_whatsapp_webhook_event(
+            self.session,
+            payload,
+            forced_company_id=self.co_b_id,  # force company_b context
+        )
+        # Should be ignored — lead phone not found under company_b
+        self.assertIn(result["status"], {"ignored", "reply_recorded"})
+        interactions_a = self.session.exec(
+            select(Interaction).where(
+                Interaction.company_id == self.co_a_id,
+                Interaction.direction == "inbound",
+            )
+        ).all()
+        self.assertEqual(len(interactions_a), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

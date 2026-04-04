@@ -1233,6 +1233,14 @@ async def accept_invite(
     return Token(access_token=token)
 
 
+@router.post("/auth/invites/accept", response_model=Token)
+async def accept_invite_alias(
+    data: InviteAccept,
+    session: Session = Depends(get_session),
+):
+    return await accept_invite(data, session)
+
+
 @router.get("/users/me")
 async def get_me(
     session: Session = Depends(get_session),

@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
-import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare, Mail, MessageCircle } from "lucide-react";
+import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare, Mail, MessageCircle, PlayCircle, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import Pagination from "@/components/Pagination";
 
@@ -17,6 +17,12 @@ interface Interaction {
     lead_name?: string;
 }
 
+interface DialerResult {
+    attempted: number;
+    skipped: number;
+    results: Array<{ task_id: number; status: string; reason?: string }>;
+}
+
 export default function CallsPage() {
     const [calls, setCalls] = useState<Interaction[]>([]);
     const { token, sessionTimeout } = useAuth();
@@ -29,6 +35,12 @@ export default function CallsPage() {
     const [totalCalls, setTotalCalls] = useState(0);
     const [itemsPerPage] = useState(10);
     const totalPages = Math.ceil(totalCalls / itemsPerPage);
+
+    // Batch dialer state
+    const [dialLimit, setDialLimit] = useState(10);
+    const [dialerRunning, setDialerRunning] = useState(false);
+    const [dialerResult, setDialerResult] = useState<DialerResult | null>(null);
+    const [dialerError, setDialerError] = useState<string | null>(null);
 
     const API_BASE = "http://localhost:6060";
     const CRM_BASE = `${API_BASE}/crm`;
@@ -61,6 +73,27 @@ export default function CallsPage() {
     useEffect(() => {
         fetchCalls(currentPage);
     }, [fetchCalls, currentPage]);
+
+    async function handleRunBatch() {
+        if (!token) return;
+        setDialerRunning(true);
+        setDialerResult(null);
+        setDialerError(null);
+        try {
+            const res = await fetch(`${API_BASE}/call-tasks/run-batch?limit=${dialLimit}`, {
+                method: "POST",
+                headers: { Authorization: `Bearer ${token}` },
+            });
+            if (res.status === 401) { sessionTimeout(); return; }
+            if (!res.ok) throw new Error((await res.json()).detail || `Server ${res.status}`);
+            setDialerResult(await res.json());
+            fetchCalls(currentPage);
+        } catch (e) {
+            setDialerError(e instanceof Error ? e.message : "Batch dial failed");
+        } finally {
+            setDialerRunning(false);
+        }
+    }
 
     const toggleExpand = (id: number) => {
         setExpandedCall(expandedCall === id ? null : id);
@@ -102,6 +135,61 @@ export default function CallsPage() {
                 <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
                     Track and analyze your AI voice interactions
                 </p>
+            </div>
+
+            {/* Batch Dialer */}
+            <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
+                <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+                    <div>
+                        <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Batch dialer</h2>
+                        <p className="text-sm text-slate-500 dark:text-slate-400">Run queued call tasks for all leads in sequence.</p>
+                    </div>
+                    <div className="flex items-center gap-3">
+                        <div className="flex items-center gap-2 text-sm text-slate-600 dark:text-slate-300">
+                            <label className="font-medium">Limit</label>
+                            <input
+                                type="number"
+                                value={dialLimit}
+                                onChange={(e) => setDialLimit(Math.max(1, Math.min(100, Number(e.target.value))))}
+                                className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+                                min={1} max={100}
+                            />
+                        </div>
+                        <button
+                            onClick={handleRunBatch}
+                            disabled={dialerRunning}
+                            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
+                        >
+                            {dialerRunning ? <Loader2 className="h-4 w-4 animate-spin" /> : <PlayCircle className="h-4 w-4" />}
+                            {dialerRunning ? "Dialing..." : "Run batch"}
+                        </button>
+                    </div>
+                </div>
+
+                {dialerError && (
+                    <div className="mt-3 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-sm text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300">
+                        {dialerError}
+                    </div>
+                )}
+
+                {dialerResult && (
+                    <div className="mt-4 space-y-2">
+                        <div className="flex gap-4 text-sm font-medium text-slate-700 dark:text-slate-200">
+                            <span className="text-emerald-600 dark:text-emerald-400">Attempted: {dialerResult.attempted ?? dialerResult.results?.length ?? 0}</span>
+                            <span className="text-amber-600 dark:text-amber-400">Skipped: {dialerResult.skipped ?? 0}</span>
+                        </div>
+                        {Array.isArray(dialerResult.results) && dialerResult.results.length > 0 && (
+                            <div className="max-h-40 overflow-y-auto space-y-1 rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-slate-900/40">
+                                {dialerResult.results.map((r, i) => (
+                                    <div key={i} className="flex items-center gap-2 text-xs text-slate-600 dark:text-slate-300">
+                                        <span className={`h-2 w-2 rounded-full flex-shrink-0 ${r.status === "dialing" || r.status === "initiated" ? "bg-emerald-500" : r.status === "skipped" ? "bg-amber-400" : "bg-red-400"}`} />
+                                        Task #{r.task_id} — {r.status}{r.reason ? ` (${r.reason})` : ""}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
             </div>
 
             {error && (
