@@ -4,7 +4,7 @@ from typing import Generator
 from dotenv import load_dotenv
 from sqlmodel import SQLModel, Session, create_engine, select
 
-from models.models import Permission
+from models.models import Permission, Role, RolePermission
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(current_dir, ".env"))
@@ -72,7 +72,44 @@ def seed_permissions(session: Session) -> None:
     session.commit()
 
 
+_SALES_REP_PERMISSIONS = {
+    "lead.read_own", "lead.create", "lead.update_own",
+    "interaction.read_own", "interaction.read_company",
+    "product.read",
+    "appointment.read", "appointment.manage",
+    "campaign.read",
+    "call_task.read", "call_task.manage",
+    "quote.read", "quote.manage", "quote.send",
+    "analytics.read_company",
+    "requirements.read", "requirements.manage",
+    "user.read",
+}
+
+
+def patch_sales_rep_permissions(session: Session) -> None:
+    """
+    Idempotent — ensures every sales_representative role in every company
+    has the current set of sales permissions. Safe to run on every startup.
+    """
+    sales_roles = session.exec(
+        select(Role).where(Role.name == "sales_representative")
+    ).all()
+
+    existing_keys = {p.key for p in session.exec(select(Permission)).all()}
+
+    for role in sales_roles:
+        existing_perms = set(session.exec(
+            select(RolePermission.permission_key).where(RolePermission.role_id == role.id)
+        ).all())
+        for key in _SALES_REP_PERMISSIONS:
+            if key in existing_keys and key not in existing_perms:
+                session.add(RolePermission(role_id=role.id, permission_key=key))
+
+    session.commit()
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine)
     with Session(engine) as session:
         seed_permissions(session)
+        patch_sales_rep_permissions(session)

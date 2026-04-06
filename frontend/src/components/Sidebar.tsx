@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
   ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2, Megaphone,
-  FileText, Layout, Cpu
+  FileText, Layout, Cpu, BookOpen, LayoutGrid
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -23,10 +23,12 @@ const navItems = [
   { name: "Accounts", href: "/accounts", icon: Building2 },
   { name: "Templates", href: "/templates", icon: Layout, adminOnly: true },
   { name: "Automation", href: "/automation", icon: Cpu, adminOnly: true },
+  { name: "Kanban", href: "/leads/kanban", icon: LayoutGrid },
+  { name: "Objections", href: "/objections", icon: BookOpen },
   { name: "Admin", href: "/admin", icon: ShieldCheck, adminOnly: true },
   { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Company", href: "/company-profile", icon: Building2, adminOnly: true },
-  { name: "Settings", href: "/settings", icon: Settings, adminOnly: true },
+  { name: "Settings", href: "/settings", icon: Settings },
 ];
 
 export default function Sidebar() {

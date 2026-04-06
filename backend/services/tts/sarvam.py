@@ -51,11 +51,12 @@ class SarvamTTS:
     # We receive at 22050 and resample down ourselves.
     WS_SAMPLE_RATE = 22050
 
-    def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
+    def __init__(self, api_key: str = None, voice_id: str = None, model: str = None, language: str = "en-IN"):
         self.provider = "Sarvam"
         self.model = model or "bulbul:v3"
         self.api_key = api_key
         self.speaker = voice_id or "ritu"
+        self.target_language_code = language or "en-IN"
         self.last_latency = 0.0
 
         if not self.api_key:
@@ -160,7 +161,7 @@ class SarvamTTS:
         }
         payload = {
             "text": text,
-            "target_language_code": "en-IN",
+            "target_language_code": self.target_language_code,
             "speaker": self.speaker,
             "model": self.model,
             "pace": 1.1,
@@ -189,13 +190,24 @@ class SarvamTTS:
             logger.error(f"❌ [SarvamTTS HTTP] Error: {e}")
 
     # Helper: build the WS connect config frame (sent once after connect)
-    @classmethod
-    def ws_config_frame(cls, model: str, speaker: str) -> str:
+    def ws_config_frame(self, model: str, speaker: str) -> str:
         """Returns the JSON string to send immediately after WS handshake."""
         return json.dumps({
             "model": model,
             "speaker": speaker,
-            "target_language_code": "en-IN",
+            "target_language_code": self.target_language_code,
+            "speech_sample_rate": self.WS_SAMPLE_RATE,
+            "pace": 1.1,
+            "enable_preprocessing": True,
+        })
+
+    @classmethod
+    def ws_config_frame_static(cls, model: str, speaker: str, language: str = "en-IN") -> str:
+        """Static version for callers that don't have an instance."""
+        return json.dumps({
+            "model": model,
+            "speaker": speaker,
+            "target_language_code": language,
             "speech_sample_rate": cls.WS_SAMPLE_RATE,
             "pace": 1.1,
             "enable_preprocessing": True,

@@ -61,7 +61,7 @@ def compute_icp_score(
     score = 0.0
     reasons: list[str] = []
 
-    # --- Profile completeness ---
+    # Profile completeness
     if lead.email:
         score += 20
         reasons.append("lead_has_email")
@@ -87,7 +87,7 @@ def compute_icp_score(
         score += 15
         reasons.append("already_enriched")
 
-    # --- Interaction history (shows we've reached them before) ---
+    # Interaction history (shows we've reached them before)
     ic = interaction_counts or {}
     if ic.get("call", 0) >= 1:
         score += 8
@@ -99,7 +99,7 @@ def compute_icp_score(
         score += 6
         reasons.append("prior_email_contact")
 
-    # --- Engagement signals (they responded/interacted) ---
+    # Engagement signals (they responded/interacted)
     ec = engagement_counts or {}
     if ec.get("reply", 0) >= 1 or ec.get("whatsapp_reply", 0) >= 1:
         score += 10

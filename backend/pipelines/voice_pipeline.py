@@ -22,6 +22,7 @@ from tool_adapter import execute_mcp_tool, get_mistral_tools
 from utils.encryption import decrypt_value
 from utils.audio import clean_voice_text
 from utils.lead_utils import get_comprehensive_lead_context
+from services import sentiment_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -63,7 +64,8 @@ class VoicePipeline:
                  stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
                  company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
                  company_website: str = None, lead_id: int = None,
-                 audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000): #made changes for exotel. specified audio_encoding and audio_sample_rate as str & int respectively.
+                 audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000,
+                 lead_language: str = "en-IN"): #made changes for exotel. specified audio_encoding and audio_sample_rate as str & int respectively.
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
@@ -85,7 +87,8 @@ class VoicePipeline:
         self.stt_provider = stt_provider or "deepgram"
         self.llm_provider = llm_provider or "mistral"
         self.tts_provider = tts_provider or "cartesia"
-        
+        self.lead_language = lead_language or "en-IN"
+
         self.audio_encoding = audio_encoding
         self.audio_sample_rate = audio_sample_rate
         self.last_customer_speech_time = time.time()
@@ -169,14 +172,35 @@ class VoicePipeline:
         self.llm_service = get_llm_service(self.llm_provider, full_system_prompt, api_key=llm_api_key, model=llm_model)
         self.tts_service = get_tts_service(self.tts_provider, api_key=tts_api_key, voice_id=tts_voice, model=tts_model)
         self.stt_service = get_stt_service(self.stt_provider, api_key=stt_api_key, model=stt_model)
-        
+
+        # Inject language into Sarvam services when a non-default language is active
+        if self.lead_language and self.lead_language != "en-IN":
+            if hasattr(self.stt_service, "language"):
+                self.stt_service.language = self.lead_language
+                logger.info("[Pipeline] Sarvam STT language set to %s", self.lead_language)
+            if hasattr(self.tts_service, "target_language_code"):
+                self.tts_service.target_language_code = self.lead_language
+                logger.info("[Pipeline] Sarvam TTS language set to %s", self.lead_language)
+
         # Store keys globally on instance for reference if needed
         self.integration_keys = all_settings
 
         # 4. Inject pre-fetched lead/prospect context if provided at start
         if lead_context:
             self._apply_context_to_prompt(lead_context)
-        
+
+        # 5. Inject objection playbook from the company library
+        if company_id:
+            try:
+                from services.objection_service import get_objection_playbook
+                playbook = get_objection_playbook(session, company_id)
+                if playbook:
+                    current_prompt = self.llm_service.system_prompt
+                    self.llm_service.update_system_prompt(current_prompt + playbook)
+                    logger.info("[Pipeline] Objection playbook injected (%d entries)", playbook.count("→"))
+            except Exception as _pe:
+                logger.debug("[Pipeline] Objection playbook skipped: %s", _pe)
+
         self.last_context_type = "general"
     def _pause_playback_for_interrupt(self):
         if not self.pause_playback:
@@ -487,6 +511,43 @@ class VoicePipeline:
                     latency = time.time() - stt_start_time
 
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
+
+                    # Publish live sentiment update to any subscribed dashboard clients
+                    try:
+                        sentiment_data = sentiment_broadcaster.analyze_sentiment(current_turn_transcript)
+                        sentiment_data["interaction_id"] = self.interaction_id
+                        asyncio.create_task(
+                            sentiment_broadcaster.publish(str(self.interaction_id), sentiment_data)
+                        )
+                    except Exception as _se:
+                        logger.debug("Sentiment publish skipped: %s", _se)
+
+                    # Real-time competitor mention detection
+                    try:
+                        from services.competitor_service import detect_competitors_in_utterance, get_counter_script_injection
+                        from database import engine as _db_engine
+                        from sqlmodel import Session as _DbSession
+                        with _DbSession(_db_engine) as _csess:
+                            _new_mentions = detect_competitors_in_utterance(
+                                session=_csess,
+                                company_id=self.company_id,
+                                lead_id=self.lead_id,
+                                interaction_id=self.interaction_id,
+                                utterance=current_turn_transcript,
+                            )
+                        for _m in _new_mentions:
+                            with _DbSession(_db_engine) as _csess2:
+                                _injection = get_counter_script_injection(
+                                    _csess2, self.company_id, _m.competitor_name
+                                )
+                            if _injection:
+                                self.llm_service.update_system_prompt(
+                                    self.llm_service.system_prompt + _injection
+                                )
+                                logger.info("[Pipeline] Counter-script injected for: %s", _m.competitor_name)
+                    except Exception as _ce:
+                        logger.debug("Competitor detection skipped: %s", _ce)
+
                     normalized_transcript = current_turn_transcript.strip()
                     if normalized_transcript:
                         if self.pending_user_turn_text:

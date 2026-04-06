@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff } from "lucide-react";
+import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
@@ -92,6 +92,22 @@ export default function SettingsPage() {
     const [isInviting, setIsInviting] = useState(false);
     const hasAdminAccess = user?.role === "company_admin" || user?.role === "company_owner";
 
+    // Per-user AI/preference settings (accessible to all roles)
+    const [myAiPrompt, setMyAiPrompt] = useState("");
+    const [myAiVerbosity, setMyAiVerbosity] = useState("2");
+    const [savingMyAi, setSavingMyAi] = useState(false);
+    const [myAiSaved, setMyAiSaved] = useState(false);
+
+    // Per-user email settings (accessible to all roles)
+    const [myEmail, setMyEmail] = useState<Record<string, string>>({
+        SMTP_HOST: "", SMTP_PORT: "", SMTP_USERNAME: "", SMTP_PASSWORD: "", SMTP_FROM_EMAIL: "",
+        IMAP_SERVER: "", IMAP_PORT: "", IMAP_USERNAME: "", IMAP_PASSWORD: "",
+    });
+    const [savingMyEmail, setSavingMyEmail] = useState(false);
+    const [myEmailSaved, setMyEmailSaved] = useState(false);
+    const [syncingInbox, setSyncingInbox] = useState(false);
+    const [syncResult, setSyncResult] = useState<string | null>(null);
+
     useEffect(() => {
         const fetchSettingsAndKeys = async () => {
             if (!token) {
@@ -100,11 +116,17 @@ export default function SettingsPage() {
             }
 
             try {
-                const [settingsRes, keysRes] = await Promise.all([
+                const [settingsRes, keysRes, myEmailRes, myAiRes] = await Promise.all([
                     fetch(`${CRM_BASE}/company-settings`, {
                         headers: { "Authorization": `Bearer ${token}` }
                     }),
                     fetch(`${CRM_BASE}/company-integrations`, {
+                        headers: { "Authorization": `Bearer ${token}` }
+                    }),
+                    fetch(`${CRM_BASE}/me/email-settings`, {
+                        headers: { "Authorization": `Bearer ${token}` }
+                    }),
+                    fetch(`${CRM_BASE}/me/settings`, {
                         headers: { "Authorization": `Bearer ${token}` }
                     }),
                 ]);
@@ -122,6 +144,17 @@ export default function SettingsPage() {
                     setTtsProvider(readSettingValue(data, COMPANY_SETTING_KEYS.ttsProvider, "cartesia"));
                     setTelephonyEngine(readSettingValue(data, COMPANY_SETTING_KEYS.telephonyEngine, "twilio"));
                     setAiVerbosity(readSettingValue(data, COMPANY_SETTING_KEYS.aiVerbosity, "2"));
+                }
+
+                if (myEmailRes.ok) {
+                    const myEmailData = await myEmailRes.json() as Record<string, string>;
+                    setMyEmail(prev => ({ ...prev, ...myEmailData }));
+                }
+
+                if (myAiRes.ok) {
+                    const myAiData = await myAiRes.json() as Record<string, string>;
+                    if (myAiData.SYSTEM_PROMPT) setMyAiPrompt(myAiData.SYSTEM_PROMPT);
+                    if (myAiData.AI_VERBOSITY) setMyAiVerbosity(myAiData.AI_VERBOSITY);
                 }
 
                 if (keysRes.ok) {
@@ -358,6 +391,64 @@ export default function SettingsPage() {
         setVisibleKeys(prev => ({ ...prev, [key]: !prev[key] }));
     };
 
+    const saveMyAiSettings = async () => {
+        if (!token) return;
+        setSavingMyAi(true);
+        try {
+            await fetch(`${CRM_BASE}/me/settings`, {
+                method: "PUT",
+                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ SYSTEM_PROMPT: myAiPrompt, AI_VERBOSITY: myAiVerbosity }),
+            });
+            setMyAiSaved(true);
+            setTimeout(() => setMyAiSaved(false), 3000);
+        } catch (e) {
+            console.error("Failed to save AI settings", e);
+        } finally {
+            setSavingMyAi(false);
+        }
+    };
+
+    const handleMyEmailChange = (key: string, value: string) => {
+        setMyEmail(prev => ({ ...prev, [key]: value }));
+    };
+
+    const saveMyEmailSettings = async () => {
+        if (!token) return;
+        setSavingMyEmail(true);
+        try {
+            await fetch(`${CRM_BASE}/me/email-settings`, {
+                method: "PUT",
+                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify(myEmail),
+            });
+            setMyEmailSaved(true);
+            setTimeout(() => setMyEmailSaved(false), 3000);
+        } catch (e) {
+            console.error("Failed to save email settings", e);
+        } finally {
+            setSavingMyEmail(false);
+        }
+    };
+
+    const triggerInboxSync = async () => {
+        if (!token) return;
+        setSyncingInbox(true);
+        setSyncResult(null);
+        try {
+            const res = await fetch(`${CRM_BASE}/email/sync`, {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${token}` },
+            });
+            const data = await res.json();
+            setSyncResult(`Synced — ${data.emails_ingested ?? 0} new email(s) ingested`);
+        } catch (e) {
+            setSyncResult("Sync failed");
+        } finally {
+            setSyncingInbox(false);
+        }
+    };
+
     return (
         <div className="space-y-6 pb-8 text-slate-800 dark:text-slate-100">
             {/* Header */}
@@ -449,8 +540,11 @@ export default function SettingsPage() {
             <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-800 pb-2">
                 {[
                     { id: "general", label: "General & Appearance", icon: Settings },
-                    { id: "persona", label: "Voice & AI Engine", icon: Brain },
-                    { id: "keys", label: "Integration Keys", icon: KeyRound },
+                    { id: "myemail", label: "My Email", icon: Mail },
+                    ...(hasAdminAccess ? [
+                        { id: "persona", label: "Voice & AI Engine", icon: Brain },
+                        { id: "keys", label: "Integration Keys", icon: KeyRound },
+                    ] : []),
                 ].map((tab) => {
                     const Icon = tab.icon;
                     return (
@@ -523,6 +617,66 @@ export default function SettingsPage() {
                                 </button>
                             );
                         })}
+                    </div>
+                </div>
+
+                {/* My Rio — visible to all roles */}
+                <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
+                    <div className="flex items-center justify-between mb-6">
+                        <div className="flex items-center space-x-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-purple-600">
+                                <Brain className="h-5 w-5 text-white" />
+                            </div>
+                            <div>
+                                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">My Rio Persona</h3>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">
+                                    {hasAdminAccess ? "Your personal override — takes priority over company-wide prompt" : "Customize Rio's voice for your calls"}
+                                </p>
+                            </div>
+                        </div>
+                        <div className="flex items-center space-x-2">
+                            {myAiSaved && (
+                                <span className="flex items-center space-x-1 text-emerald-600 text-sm font-bold">
+                                    <CheckCircle2 className="h-4 w-4" /><span>Saved</span>
+                                </span>
+                            )}
+                            <button
+                                onClick={saveMyAiSettings}
+                                disabled={savingMyAi}
+                                className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 disabled:opacity-50 transition-all text-sm"
+                            >
+                                {savingMyAi ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                                <span>Save</span>
+                            </button>
+                        </div>
+                    </div>
+
+                    <div className="space-y-4">
+                        <div>
+                            <label className="text-xs font-bold uppercase text-slate-500 mb-1 block">
+                                Response Brevity (1 = very brief · 5 = detailed)
+                            </label>
+                            <div className="flex items-center space-x-4">
+                                <input
+                                    type="range" min="1" max="5" step="1"
+                                    value={myAiVerbosity}
+                                    onChange={(e) => setMyAiVerbosity(e.target.value)}
+                                    className="flex-1 accent-violet-600"
+                                />
+                                <span className="w-6 text-center font-bold text-violet-600">{myAiVerbosity}</span>
+                            </div>
+                        </div>
+                        <div>
+                            <label className="text-xs font-bold uppercase text-slate-500 mb-1 block">Personal Prompt / Persona Script</label>
+                            <textarea
+                                rows={6}
+                                value={myAiPrompt}
+                                onChange={(e) => setMyAiPrompt(e.target.value)}
+                                placeholder="E.g. You are Rio, a friendly sales representative for Yexis Electronics. Always greet the lead by name and focus on their specific needs..."
+                                className="w-full rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none"
+                            />
+                            <p className="mt-1 text-xs text-slate-400">Leave blank to use the company-wide Rio prompt.</p>
+                        </div>
                     </div>
                 </div>
 
@@ -722,6 +876,137 @@ export default function SettingsPage() {
 
 
                 {/* Integrations Keys Tab */}
+                {/* My Email Tab — visible to all roles */}
+                {activeTab === "myemail" && (
+                    <div className="space-y-6">
+                        <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
+                            <div className="flex items-center justify-between mb-6">
+                                <div className="flex items-center space-x-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500">
+                                        <Mail className="h-5 w-5 text-white" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">My Email Settings</h3>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400">
+                                            Personal credentials — override company defaults for emails sent by you
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                    {myEmailSaved && (
+                                        <span className="flex items-center space-x-1 text-emerald-600 text-sm font-bold">
+                                            <CheckCircle2 className="h-4 w-4" />
+                                            <span>Saved</span>
+                                        </span>
+                                    )}
+                                    <button
+                                        onClick={saveMyEmailSettings}
+                                        disabled={savingMyEmail}
+                                        className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 disabled:opacity-50 transition-all"
+                                    >
+                                        {savingMyEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                                        <span>Save</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                                {/* Outbound SMTP */}
+                                <div className="space-y-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                                    <h4 className="font-bold text-slate-700 dark:text-slate-300">Outbound (SMTP)</h4>
+                                    {[
+                                        { key: "SMTP_HOST", label: "SMTP Server", placeholder: "mail.example.com", secret: false },
+                                        { key: "SMTP_PORT", label: "SMTP Port", placeholder: "465 or 587", secret: false },
+                                        { key: "SMTP_USERNAME", label: "Username / Login", placeholder: "you@example.com", secret: true },
+                                        { key: "SMTP_PASSWORD", label: "Password", placeholder: "••••••••", secret: true },
+                                        { key: "SMTP_FROM_EMAIL", label: "From Email", placeholder: "you@example.com", secret: false },
+                                    ].map(({ key, label, placeholder, secret }) => (
+                                        <div key={key} className="space-y-1">
+                                            <label className="text-xs font-semibold text-slate-500 uppercase">{label}</label>
+                                            <div className="relative">
+                                                <input
+                                                    type={secret && !visibleKeys[`me_${key}`] ? "password" : "text"}
+                                                    placeholder={placeholder}
+                                                    value={myEmail[key] || ""}
+                                                    onChange={(e) => handleMyEmailChange(key, e.target.value)}
+                                                    onFocus={() => {
+                                                        if (String(myEmail[key]).startsWith("***")) handleMyEmailChange(key, "");
+                                                    }}
+                                                    className="w-full p-2.5 pr-10 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono text-sm"
+                                                />
+                                                {secret && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleKeyVisibility(`me_${key}`)}
+                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                                    >
+                                                        {visibleKeys[`me_${key}`] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Inbound IMAP */}
+                                <div className="space-y-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                                    <h4 className="font-bold text-slate-700 dark:text-slate-300">Inbound (IMAP)</h4>
+                                    <p className="text-xs text-slate-500">Replies to emails sent by you will be pulled from this inbox every 3 minutes.</p>
+                                    {[
+                                        { key: "IMAP_SERVER", label: "IMAP Server", placeholder: "mail.example.com", secret: false },
+                                        { key: "IMAP_PORT", label: "IMAP Port", placeholder: "993", secret: false },
+                                        { key: "IMAP_USERNAME", label: "Username / Login", placeholder: "you@example.com", secret: true },
+                                        { key: "IMAP_PASSWORD", label: "Password", placeholder: "••••••••", secret: true },
+                                    ].map(({ key, label, placeholder, secret }) => (
+                                        <div key={key} className="space-y-1">
+                                            <label className="text-xs font-semibold text-slate-500 uppercase">{label}</label>
+                                            <div className="relative">
+                                                <input
+                                                    type={secret && !visibleKeys[`me_${key}`] ? "password" : "text"}
+                                                    placeholder={placeholder}
+                                                    value={myEmail[key] || ""}
+                                                    onChange={(e) => handleMyEmailChange(key, e.target.value)}
+                                                    onFocus={() => {
+                                                        if (String(myEmail[key]).startsWith("***")) handleMyEmailChange(key, "");
+                                                    }}
+                                                    className="w-full p-2.5 pr-10 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono text-sm"
+                                                />
+                                                {secret && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => toggleKeyVisibility(`me_${key}`)}
+                                                        className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                                                    >
+                                                        {visibleKeys[`me_${key}`] ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+                                    ))}
+
+                                    <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
+                                        <button
+                                            onClick={triggerInboxSync}
+                                            disabled={syncingInbox}
+                                            className="flex items-center space-x-2 px-4 py-2 rounded-xl border border-slate-300 dark:border-slate-700 text-slate-700 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800 disabled:opacity-50 transition-all text-sm"
+                                        >
+                                            {syncingInbox ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                                            <span>Sync Inbox Now</span>
+                                        </button>
+                                        {syncResult && (
+                                            <p className="mt-2 text-xs text-slate-500">{syncResult}</p>
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+
+                            <p className="mt-4 text-xs text-slate-400 dark:text-slate-500">
+                                Leave blank to use company-wide email settings. Your password is stored encrypted.
+                            </p>
+                        </div>
+                    </div>
+                )}
+
                 {activeTab === "keys" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
@@ -739,11 +1024,12 @@ export default function SettingsPage() {
                                 "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SARVAM_VOICE_ID", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID"],
                                 "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL"],
                                 "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL"],
-                                "Email (SMTP)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
-                                "Enrichment": ["APOLLO_API_KEY"]
+                                "Email (SMTP — Outbound)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
+                                "Email (IMAP — Inbound)": ["IMAP_SERVER", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD"],
+                                "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"]
                             }).map(([groupName, keys]) => (
                                 <div key={groupName} className="space-y-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
                                     <h4 className="font-bold text-slate-700 dark:text-slate-300">{groupName}</h4>

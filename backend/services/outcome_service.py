@@ -429,6 +429,13 @@ def apply_call_outcome(
         retry_after_hours=retry_policy["retry_after_hours"],
     )
 
+    # Invalidate predictive dialer cache so next prediction uses fresh data
+    try:
+        from services.predictive_dialer_service import invalidate_model_cache
+        invalidate_model_cache(company_id)
+    except Exception:
+        pass
+
     return {
         "task_id": task.id,
         "lead_id": lead.id,

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Brain, Edit3, Loader2, RefreshCw, Save, Target, TrendingUp, Zap } from "lucide-react";
+import { ArrowLeft, Brain, Edit3, Loader2, RefreshCw, Save, Target, TrendingUp, UserCheck, Zap } from "lucide-react";
 
 import InteractionTimeline from "@/components/leads/interaction_timeline";
 import LeadHeader from "@/components/leads/lead_header";
@@ -11,6 +11,14 @@ import LeadProfileCard from "@/components/leads/lead_profile_card";
 import NextActionCard from "@/components/leads/next_action_card";
 import QualificationCard from "@/components/leads/qualification_card";
 import TranscriptPanel from "@/components/leads/transcript_panel";
+import SentimentGauge from "@/components/SentimentGauge";
+import WhatsAppThread from "@/components/leads/whatsapp_thread";
+import EmailThread from "@/components/leads/email_thread";
+import CompetitorBadges from "@/components/leads/competitor_badges";
+import WaveformPlayer from "@/components/leads/waveform_player";
+import EnrichmentTrace from "@/components/leads/enrichment_trace";
+import SalesCoachPanel from "@/components/leads/sales_coach_panel";
+import BestCallTimes from "@/components/leads/best_call_times";
 import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
@@ -21,6 +29,7 @@ type Lead = {
   normalized_phone?: string | null;
   email?: string | null;
   status: string;
+  preferred_language?: string | null;
   qualification_status?: string | null;
   next_action?: string | null;
   next_action_due_at?: string | null;
@@ -57,6 +66,8 @@ type Interaction = {
   status?: string | null;
   content?: string | null;
   transcript?: string | null;
+  recording_url?: string | null;
+  recording_duration?: number | null;
   started_at?: string | null;
   created_at?: string | null;
 };
@@ -70,7 +81,7 @@ type CallTask = {
   completed_at?: string | null;
 };
 
-// ISM stage display config
+// stage display config
 const ISM_STAGE_CONFIG: Record<string, { label: string; cls: string }> = {
   new:          { label: "New",          cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
   contacted:    { label: "Contacted",    cls: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" },
@@ -105,6 +116,7 @@ export default function LeadDetailPage() {
   const [nextActionDraft, setNextActionDraft] = useState<string>("");
   const [qualificationDraft, setQualificationDraft] = useState<string>("");
   const [updateNoteDraft, setUpdateNoteDraft] = useState<string>("");
+  const [languageDraft, setLanguageDraft] = useState<string>("en");
   const [updating, setUpdating] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
 
@@ -115,6 +127,13 @@ export default function LeadDetailPage() {
   const [callMessage, setCallMessage] = useState<string | null>(null);
   const [callInteractionId, setCallInteractionId] = useState<number | null>(null);
   const [callStatus, setCallStatus] = useState<string | null>(null);
+
+  // Warm transfer state
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [transferTo, setTransferTo] = useState("");
+  const [isrName, setIsrName] = useState("");
+  const [transferring, setTransferring] = useState(false);
+  const [transferResult, setTransferResult] = useState<string | null>(null);
 
   const [aiSummary, setAiSummary] = useState<string>("");
   const [aiLoading, setAiLoading] = useState(false);
@@ -190,6 +209,7 @@ export default function LeadDetailPage() {
     setNextActionDraft(lead.next_action || "");
     setQualificationDraft(lead.qualification_status || "");
     setUpdateNoteDraft(lead.notes || "");
+    setLanguageDraft(lead.preferred_language || "en");
   }, [lead]);
 
   const fetchAiSummary = useCallback(async () => {
@@ -351,6 +371,11 @@ export default function LeadDetailPage() {
     [interactions]
   );
 
+  const latestRecording = useMemo(
+    () => interactions.find((i) => i.type === "call" && i.recording_url) ?? null,
+    [interactions]
+  );
+
   const timelineItems = useMemo(() => {
     const items = [] as Array<{
       id: string;
@@ -433,6 +458,7 @@ export default function LeadDetailPage() {
           qualification_status: qualificationDraft || null,
           next_action: nextActionDraft || null,
           notes: updateNoteDraft || null,
+          preferred_language: languageDraft || "en",
         }),
       });
 
@@ -544,6 +570,34 @@ export default function LeadDetailPage() {
     }
   }
 
+  async function handleWarmTransfer() {
+    if (!token || !callInteractionId || !transferTo.trim()) return;
+    setTransferring(true);
+    setTransferResult(null);
+    try {
+      const params = new URLSearchParams({
+        interaction_id: String(callInteractionId),
+        transfer_to: transferTo.trim(),
+      });
+      if (isrName.trim()) params.set("isr_name", isrName.trim());
+      const res = await fetch(`${API_BASE}/warm-transfer?${params}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) {
+        const e = await res.json();
+        throw new Error(e.detail || "Transfer failed");
+      }
+      setTransferResult(`Transferred to ${transferTo.trim()} — ISR is joining the call.`);
+      setShowTransferModal(false);
+    } catch (err) {
+      setTransferResult(err instanceof Error ? err.message : "Transfer failed");
+    } finally {
+      setTransferring(false);
+    }
+  }
+
   // Derive score reasons as a string array regardless of shape
   const scoreReasons: string[] = useMemo(() => {
     if (!lead?.lead_score_reasons_json) return [];
@@ -612,18 +666,85 @@ export default function LeadDetailPage() {
         </div>
       )}
 
+      {/* Real-time sentiment gauge + warm transfer — visible while call is active */}
+      {callInteractionId && callStatus === "in-progress" && (
+        <>
+          <SentimentGauge
+            interactionId={callInteractionId}
+            onDisconnect={() => {/* gauge goes away when call ends */}}
+          />
+          <button
+            onClick={() => { setShowTransferModal(true); setTransferResult(null); }}
+            className="inline-flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-2.5 text-sm font-semibold text-amber-700 hover:bg-amber-100 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300 transition"
+          >
+            <UserCheck className="h-4 w-4" /> Transfer to Human ISR
+          </button>
+        </>
+      )}
+
+      {transferResult && (
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-700 dark:border-amber-500/20 dark:bg-amber-500/10 dark:text-amber-300 animate-in fade-in slide-in-from-top-2">
+          {transferResult}
+        </div>
+      )}
+
+      {/* Warm Transfer */}
+      {showTransferModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4">
+          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-2">
+              <UserCheck className="h-5 w-5 text-amber-500" />
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white">Transfer to Human ISR</h3>
+            </div>
+            <p className="text-sm text-slate-500 dark:text-slate-400">
+              The AI will be bridged into a conference. The ISR will join immediately.
+            </p>
+            <div className="space-y-3">
+              <input
+                value={transferTo}
+                onChange={(e) => setTransferTo(e.target.value)}
+                placeholder="ISR phone number (e.g. +919876543210)"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-amber-400 dark:border-white/10 dark:bg-slate-800/50"
+              />
+              <input
+                value={isrName}
+                onChange={(e) => setIsrName(e.target.value)}
+                placeholder="ISR name (optional)"
+                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-amber-400 dark:border-white/10 dark:bg-slate-800/50"
+              />
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button
+                onClick={() => setShowTransferModal(false)}
+                className="flex-1 rounded-xl border border-slate-200 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:text-slate-300"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleWarmTransfer}
+                disabled={!transferTo.trim() || transferring}
+                className="flex-1 rounded-xl bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-50 flex items-center justify-center gap-2"
+              >
+                {transferring ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserCheck className="h-4 w-4" />}
+                Transfer Now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {enrichToast && (
         <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200 animate-in fade-in slide-in-from-top-2">
           {enrichToast}
         </div>
       )}
 
-      {/* ISM Stage Card */}
+      {/* Stage Card */}
       {(lead.ism_stage || lead.next_action || lead.next_action_due_at) && (
         <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
           <div className="flex flex-wrap items-center gap-3">
             <Zap className="h-5 w-5 text-violet-500" />
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">ISM Automation Stage</h3>
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Automation Stage</h3>
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-4">
             {lead.ism_stage && (
@@ -690,6 +811,34 @@ export default function LeadDetailPage() {
           />
         </div>
 
+        {/* Language selector — controls which language the AI voice agent speaks */}
+        <div className="mt-3 flex items-center gap-3">
+          <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 whitespace-nowrap">
+            Voice language:
+          </label>
+          <select
+            value={languageDraft}
+            onChange={(e) => setLanguageDraft(e.target.value)}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+          >
+            <option value="en">English</option>
+            <option value="hi">Hindi (हिंदी)</option>
+            <option value="ta">Tamil (தமிழ்)</option>
+            <option value="te">Telugu (తెలుగు)</option>
+            <option value="kn">Kannada (ಕನ್ನಡ)</option>
+            <option value="mr">Marathi (मराठी)</option>
+            <option value="gu">Gujarati (ગુજરાતી)</option>
+            <option value="bn">Bengali (বাংলা)</option>
+            <option value="pa">Punjabi (ਪੰਜਾਬੀ)</option>
+            <option value="ml">Malayalam (മലയാളം)</option>
+          </select>
+          {(lead.preferred_language && lead.preferred_language !== "en") && (
+            <span className="text-xs text-violet-600 dark:text-violet-400 font-semibold">
+              Next call will use Sarvam AI in {languageDraft.toUpperCase()}
+            </span>
+          )}
+        </div>
+
         <div className="mt-4 flex items-center gap-3">
           <button
             type="button"
@@ -716,6 +865,20 @@ export default function LeadDetailPage() {
             notes={lead.notes}
           />
           <NextActionCard nextAction={lead.next_action} dueAt={lead.next_action_due_at} />
+
+          {/* Waterfall enrichment pipeline */}
+          <EnrichmentTrace
+            leadId={leadId}
+            token={token!}
+            onSessionTimeout={sessionTimeout}
+          />
+
+          {/* Predictive call windows */}
+          <BestCallTimes
+            leadId={leadId}
+            token={token!}
+            onSessionTimeout={sessionTimeout}
+          />
 
           {/* Sales Intelligence */}
           {(lead.budget_range || lead.timeline || lead.decision_maker) && (
@@ -1073,6 +1236,46 @@ export default function LeadDetailPage() {
 
           <InteractionTimeline items={timelineItems} />
           <TranscriptPanel transcript={transcript} />
+
+          {/* Call recording + waveform player */}
+          {latestRecording?.recording_url && (
+            <WaveformPlayer
+              recordingUrl={latestRecording.recording_url}
+              transcript={latestRecording.transcript}
+              duration={latestRecording.recording_duration}
+            />
+          )}
+
+          {/* AI Sales Coach — show score for most recent call interaction */}
+          {latestRecording && (
+            <SalesCoachPanel
+              interactionId={latestRecording.id}
+              token={token!}
+              onSessionTimeout={sessionTimeout}
+            />
+          )}
+
+          {/* Competitor signals detected on calls */}
+          <CompetitorBadges
+            leadId={leadId}
+            token={token!}
+            onSessionTimeout={sessionTimeout}
+          />
+
+          {/* WhatsApp conversation thread */}
+          <WhatsAppThread
+            leadId={leadId}
+            token={token!}
+            onSessionTimeout={sessionTimeout}
+          />
+
+          {/* Email thread */}
+          <EmailThread
+            leadId={leadId}
+            token={token!}
+            leadEmail={lead?.email}
+            onSessionTimeout={sessionTimeout}
+          />
         </div>
       </div>
     </div>

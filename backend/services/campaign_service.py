@@ -627,8 +627,7 @@ def run_due_campaign_recipients(
                         actor_user_id=actor_user_id,
                         recipient=updated_recipient,
                     )
-            # For call steps: advancement happens inside outcome_service._update_campaign_recipient_for_outcome()
-            # when the Twilio status callback fires — nothing to do here.
+            # For call steps: advancement happens inside outcome_service._update_campaign_recipient_for_outcome() when the Twilio status callback fires — nothing to do here.
 
         except Exception as e:
             results.append({

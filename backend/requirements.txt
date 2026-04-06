@@ -21,3 +21,5 @@ cartesia>=1.0.0 #3.0.2
 sarvamai>=0.1.27 #0.2.0 is the first version with TTS support
 dateparser
 python-dateutil
+langgraph
+scikit-learn

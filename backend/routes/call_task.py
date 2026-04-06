@@ -86,7 +86,13 @@ async def list_call_tasks_route(
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("call_task.read")),
 ):
-    return list_call_tasks(session, current_user.company_id, status=status)
+    # Sales reps only see tasks assigned to them; admins/owners see all
+    scope_user_id = (
+        current_user.id
+        if getattr(current_user, "role", None) == "sales_representative"
+        else None
+    )
+    return list_call_tasks(session, current_user.company_id, status=status, user_id=scope_user_id)
 
 
 @router.post("/{task_id}/queue")

@@ -19,6 +19,7 @@ from services.post_call_service import extract_and_save_requirements
 from services.llm import get_llm_service
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import setup_logger
+from services import sentiment_broadcaster
 
 logger = setup_logger(__name__)
 
@@ -54,15 +55,13 @@ def ensure_interaction(
     interaction_id: str | None,
     source: str,
 ) -> str:
-    # 1. Valid interaction_id provided — verify it exists and reuse it
+    # Valid interaction_id provided — verify it exists and reuse it
     if interaction_id and interaction_id.isdigit() and int(interaction_id) != 0:
         existing = session.get(Interaction, int(interaction_id))
         if existing:
             return interaction_id
 
-    # 2. No valid id passed — find the most recent active call interaction
-    #    for this lead/user to avoid creating duplicate interactions for
-    #    outbound calls where the interaction_id wasn't forwarded correctly.
+    # No valid id passed — find the most recent active call interaction for this lead/user to avoid creating duplicate interactions for outbound calls where the interaction_id wasn't forwarded correctly.
     query = select(Interaction).where(
         Interaction.type == "call",
         Interaction.status == "active",
@@ -75,7 +74,7 @@ def ensure_interaction(
     if recent:
         return str(recent.id)
 
-    # 3. Nothing found — create a new interaction as last resort
+    # Nothing found — create a new interaction as last resort
     interaction = Interaction(
         company_id=target_user.company_id if target_user else (lead.company_id if lead else 0),
         lead_id=lead.id if lead else None,
@@ -113,8 +112,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
 
         interaction_id = ensure_interaction(session, target_user, lead, raw_interaction_id, source)
 
-        # If lead wasn't resolved from WebSocket params (e.g., lead_id=0), fetch it from the
-        # reused outbound interaction so lead context and latency logging get the correct lead_id.
+        # If lead wasn't resolved from WebSocket params (e.g., lead_id=0), fetch it from the reused outbound interaction so lead context and latency logging get the correct lead_id.
         if not lead:
             try:
                 db_interaction = session.get(Interaction, int(interaction_id))
@@ -128,8 +126,12 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
         company = session.get(Company, target_user.company_id) if target_user else None
         company_name = company.name if company else "Rio CRM"
 
+        from credentials_service import get_user_setting_value
         system_prompt = (
-            get_company_setting_value(session, target_user.company_id, "SYSTEM_PROMPT")
+            (
+                get_user_setting_value(session, target_user.id, "SYSTEM_PROMPT")
+                or get_company_setting_value(session, target_user.company_id, "SYSTEM_PROMPT")
+            )
             if target_user
             else None
         ) or "You are Rio, a concise inside-sales voice assistant."
@@ -149,6 +151,30 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             else None
         ) or "cartesia"
 
+        # Multi-language override: if lead has a preferred non-English language, then switch STT and TTS to Sarvam which supports Indian regional languages. Sarvam language codes: hi-IN, ta-IN, te-IN, kn-IN, mr-IN, gu-IN, bn-IN, pa-IN, ml-IN, en-IN
+        SARVAM_LANGUAGE_CODES = {
+            "hi": "hi-IN", "ta": "ta-IN", "te": "te-IN",
+            "kn": "kn-IN", "mr": "mr-IN", "gu": "gu-IN",
+            "bn": "bn-IN", "pa": "pa-IN", "ml": "ml-IN",
+            "en": "en-IN",
+        }
+        lead_language = (lead.preferred_language or "en").lower().split("-")[0] if lead else "en"
+        lead_language_code = SARVAM_LANGUAGE_CODES.get(lead_language, "en-IN")
+
+        if lead_language in SARVAM_LANGUAGE_CODES and lead_language != "en":
+            logger.info(
+                "[Pipeline] Language override: lead=%s lang=%s → switching STT+TTS to Sarvam",
+                lead.id if lead else "?", lead_language_code,
+            )
+            stt_provider = "sarvam"
+            tts_provider = "sarvam"
+            # Inject language into system prompt so LLM responds in the right language
+            system_prompt = (
+                f"[LANGUAGE INSTRUCTION: Respond exclusively in {lead_language_code.split('-')[0].upper()} "
+                f"(language code: {lead_language_code}). Do not switch to English unless the lead does.]\n\n"
+                + system_prompt
+            )
+
         communicator = telephony.get_communicator_for_source(source, websocket)
         transcript_accumulator: list[str] = []
         pipeline = VoicePipeline(
@@ -164,6 +190,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             user=target_user,
             lead_context=lead_context,
             lead_id=lead.id if lead else None,
+            lead_language=lead_language_code,
         )
 
         call_status = "completed"
@@ -237,7 +264,10 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio as _asyncio
+    from services.imap_poller_service import imap_poll_loop
     init_db()
+    _asyncio.create_task(imap_poll_loop())
     yield
 
 
@@ -281,3 +311,28 @@ async def media_stream(websocket: WebSocket):
 @app.websocket("/exotel-media-stream")
 async def exotel_media_stream(websocket: WebSocket):
     await run_media_stream(websocket, "exotel")
+
+
+@app.websocket("/ws/sentiment/{interaction_id}")
+async def live_sentiment(websocket: WebSocket, interaction_id: str):
+    """
+    Dashboard WebSocket: streams real-time sentiment updates for an active call.
+    Clients connect while a call is in progress and receive JSON messages:
+      {"score": 0-100, "label": "positive|neutral|negative|objection", "snippet": "...", "interaction_id": "..."}
+    The connection is closed server-side when no update arrives for 60 seconds
+    (call ended or no speech).
+    """
+    await websocket.accept()
+    queue = await sentiment_broadcaster.subscribe(interaction_id)
+    try:
+        while True:
+            try:
+                data = await asyncio.wait_for(queue.get(), timeout=60.0)
+                await websocket.send_json(data)
+            except asyncio.TimeoutError:
+                # Send a keep-alive ping; if the client is gone this raises
+                await websocket.send_json({"type": "ping"})
+    except Exception:
+        pass
+    finally:
+        sentiment_broadcaster.unsubscribe(interaction_id, queue)

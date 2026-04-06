@@ -76,10 +76,13 @@ def list_call_tasks(
     session: Session,
     company_id: int,
     status: Optional[str] = None,
+    user_id: Optional[int] = None,
 ) -> list[CallTask]:
     query = select(CallTask).where(CallTask.company_id == company_id)
     if status:
         query = query.where(CallTask.status == status)
+    if user_id:
+        query = query.where(CallTask.assigned_user_id == user_id)
 
     return session.exec(
         query.order_by(CallTask.created_at.desc())

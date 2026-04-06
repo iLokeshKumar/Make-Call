@@ -71,16 +71,18 @@ def _send_verification_email(user: User, token: str, company_name: str) -> None:
     subject = "Verify your Rio CRM account"
     body = (
         f"Hi {user.first_name or user.email},\n\n"
-        "Thanks for creating a Rio CRM account. Please verify your email address by clicking the link below:\n"
-        f"{verification_url}\n\n"
+        "Thanks for creating a Rio CRM account. Please verify your email address by clicking the button below.\n\n"
+        f"If the button doesn't work, paste this link into your browser: {verification_url}\n\n"
         "If you did not create this account, please ignore this message."
     )
     html_body = get_styled_html(
         subject=subject,
-        body=body,
+        body="Thanks for creating a Rio CRM account. Click the button below to verify your email address.",
         lead_name=user.first_name or "valued customer",
         company_name=company_name,
         company_website=f"https://{domain}/",
+        cta_url=verification_url,
+        cta_label="Verify Email Address",
     )
     send_smtp_email(
         to_email=user.email,
@@ -260,20 +262,23 @@ def _send_invite_email(session: Session, company: Company | None, invite: Invite
     base_url = _resolve_frontend_base(company)
     invite_url = f"{base_url}/invite/accept?token={invite.token}"
 
-    subject = f"Join {company_name} on Rio CRM"
+    subject = f"You're invited to join {company_name} on Rio CRM"
     body = (
         f"Hi,\n\n"
         f"You've been invited to join {company_name} on Rio CRM. "
-        f"Click the link below to accept the invite and set up your account.\n\n"
-        f"{invite_url}\n\n"
+        f"Click the button below to accept the invite and set up your account.\n\n"
+        f"If the button doesn't work, paste this link into your browser: {invite_url}\n\n"
         "If you did not request this, please ignore this message."
     )
     html_body = get_styled_html(
         subject=subject,
-        body=body,
+        body=f"You've been invited to join <strong>{company_name}</strong> on Rio CRM.<br><br>"
+             "Click the button below to accept your invitation and set up your account.",
         lead_name="Future teammate",
         company_name=company_name,
         company_website=company_website,
+        cta_url=invite_url,
+        cta_label="Accept Invitation &amp; Join",
     )
 
     smtp_host = get_company_credential(session, invite.company_id, "SMTP_HOST")

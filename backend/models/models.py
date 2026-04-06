@@ -193,6 +193,10 @@ class Lead(AuditMixin, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     ism_stage: Optional[str] = Field(default="new", max_length=50)
+    preferred_language: Optional[str] = Field(default="en", max_length=10)
+    # e.g. "en", "hi", "ta", "te", "kn", "mr", "gu", "bn", "pa", "ml"
+    company_name: Optional[str] = Field(default=None, max_length=200)
+    designation: Optional[str] = Field(default=None, max_length=150)
 
 
 class Campaign(AuditMixin, table=True):
@@ -264,6 +268,8 @@ class Interaction(AuditMixin, table=True):
     source: Optional[str] = Field(default=None, max_length=50)
     content: Optional[str] = None
     transcript: Optional[str] = None
+    recording_url: Optional[str] = None
+    recording_duration: Optional[int] = None  # seconds
     delivery_status: Optional[str] = Field(default=None, max_length=30)
     metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
     session_id: Optional[str] = Field(default=None, index=True, max_length=255)
@@ -645,6 +651,87 @@ class AuditLog(SQLModel, table=True):
     )
 
 
+class ObjectionEntry(AuditMixin, table=True):
+    """Company-scoped objection library.
+
+    Populated automatically after each call via post_call_service.
+    Injected into the voice pipeline system prompt at call start so Rio
+    knows how to handle recurring objections.
+    """
+    __tablename__ = "objection_entries"
+    __table_args__ = (
+        UniqueConstraint("company_id", "objection_key", name="uq_objection_company_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    # Canonical short form of the objection, e.g. "too expensive"
+    objection_key: str = Field(max_length=200)
+    # Human-readable label shown in the UI (same as key unless edited)
+    objection_text: str = Field(max_length=500)
+    # One of: price | competitor | timing | need | general
+    category: str = Field(default="general", max_length=50)
+    # Suggested rebuttal (editable by admins)
+    rebuttal: Optional[str] = None
+    # How many times this has been raised (auto-incremented on extraction)
+    frequency_count: int = Field(default=1)
+    source_interaction_id: Optional[int] = Field(
+        default=None, foreign_key="interactions.id", index=True
+    )
+    is_active: bool = Field(default=True)
+
+
+class CallCoachScore(AuditMixin, table=True):
+    """AI-scored evaluation of the voice agent's performance on a call.
+
+    Populated automatically post-call by call_coach_service.
+    Used to identify weak areas and auto-tune the system prompt.
+    """
+    __tablename__ = "call_coach_scores"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    interaction_id: int = Field(foreign_key="interactions.id", index=True, unique=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+
+    # Dimension scores 0-10
+    score_rapport: Optional[int] = None          # opening / tone
+    score_discovery: Optional[int] = None        # questions asked, needs uncovered
+    score_objection_handling: Optional[int] = None
+    score_value_proposition: Optional[int] = None
+    score_closing: Optional[int] = None          # clear CTA / next step set
+    score_overall: Optional[int] = None          # weighted composite
+
+    # LLM-generated summary and recommended prompt fix
+    strengths: Optional[str] = None
+    weaknesses: Optional[str] = None
+    prompt_suggestion: Optional[str] = None      # the actual improved system-prompt snippet
+    prompt_applied: bool = Field(default=False)  # True once auto-tune writes it
+
+
+class CompetitorMention(AuditMixin, table=True):
+    """Tracks every time a competitor is mentioned on a call.
+
+    Populated in real-time by the voice pipeline and post-call by the LLM extractor.
+    Used to feed counter-scripts into the AI system prompt.
+    """
+    __tablename__ = "competitor_mentions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    # Normalised lowercase competitor name, e.g. "salesforce", "hubspot"
+    competitor_name: str = Field(max_length=200, index=True)
+    # Raw snippet from the transcript that triggered the detection
+    mention_snippet: Optional[str] = Field(default=None, max_length=500)
+    # Optional counter-script the AI should use when this competitor is mentioned
+    counter_script: Optional[str] = None
+    # Source: "realtime" (voice pipeline keyword match) or "post_call" (LLM extraction)
+    source: str = Field(default="post_call", max_length=50)
+    detected_at: Optional[datetime] = Field(default_factory=utc_now)
+
+
 class Token(SQLModel):
     access_token: str
     token_type: str = "bearer"
@@ -692,6 +779,7 @@ class LeadUpdate(SQLModel):
     status: Optional[str] = None
     notes: Optional[str] = None
     owner_user_id: Optional[int] = None
+    preferred_language: Optional[str] = None
 
 class ProductCreate(SQLModel):
     name: str

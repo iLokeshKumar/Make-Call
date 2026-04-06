@@ -2,9 +2,10 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowUpRight, Loader2, Mail, Phone, Plus, Search, Sparkles } from "lucide-react";
+import { ArrowUpRight, Download, Loader2, Mail, Phone, Plus, Search, Sparkles } from "lucide-react";
 
 import { useAuth } from "@/context/AuthContext";
+import ImportLeadsModal from "@/components/leads/ImportLeadsModal";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
@@ -22,6 +23,7 @@ type Lead = {
   city?: string | null;
   state?: string | null;
   lead_score?: number | null;
+  lead_score_reasons_json?: { reasons?: string[]; priority?: string } | string[] | null;
   product_interest?: string | null;
   last_outreach_at?: string | null;
 };
@@ -38,18 +40,30 @@ function humanize(value?: string | null) {
   return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
 }
 
-function ScoreBadge({ score }: { score?: number | null }) {
+function ScoreBadge({ score, reasons }: { score?: number | null; reasons?: string[] }) {
   if (score == null) return null;
   const pct = Math.round(score);
   const color =
     pct >= 70 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
     : pct >= 40 ? "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
     : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
+  const tooltip = reasons && reasons.length > 0
+    ? reasons.map((r) => r.replace(/_/g, " ")).join(" · ")
+    : undefined;
   return (
-    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${color}`}>
+    <span
+      title={tooltip}
+      className={`rounded-full px-2.5 py-1 text-xs font-semibold cursor-default ${color} ${tooltip ? "underline decoration-dotted underline-offset-2" : ""}`}
+    >
       ICP {pct}
     </span>
   );
+}
+
+function parseScoreReasons(raw?: { reasons?: string[]; priority?: string } | string[] | null): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw as string[];
+  return Array.isArray(raw.reasons) ? raw.reasons : [];
 }
 
 export default function LeadsPage() {
@@ -62,6 +76,7 @@ export default function LeadsPage() {
   const [message, setMessage] = useState<string | null>(null);
   const [callInteractionId, setCallInteractionId] = useState<number | null>(null);
   const [callStatus, setCallStatus] = useState<string | null>(null);
+  const [showImport, setShowImport] = useState(false);
 
   const fetchLeads = useCallback(async () => {
     if (!token) {
@@ -215,28 +230,52 @@ export default function LeadsPage() {
 
   return (
     <div className="space-y-6 pb-8">
+      {showImport && token && (
+        <ImportLeadsModal
+          token={token}
+          onClose={() => setShowImport(false)}
+          onImported={() => { fetchLeads(); setShowImport(false); }}
+        />
+      )}
+
       <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <p className="text-sm font-semibold uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300">Pipeline workspace</p>
           <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-white">
-            <span className="gradient-text">Leads</span> mapped to the backend
+            <span className="gradient-text">Leads</span>
           </h1>
           <p className="mt-2 text-slate-600 dark:text-slate-400">
-            This page is now aligned with the real API structure: `/crm/leads` for listing and creation, and `/leads/[id]` for the Lead 360 view.
+            Search, call, and manage your lead pipeline.
           </p>
         </div>
+        <button
+          onClick={() => setShowImport(true)}
+          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-5 py-2.5 font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.02]"
+        >
+          <Download className="h-4 w-4" />
+          Import Leads
+        </button>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <form onSubmit={handleCreateLead} className="rounded-2xl glass border border-white/40 p-6 shadow-sm dark:border-white/10 xl:col-span-1">
-          <div className="mb-4 flex items-center gap-3">
-            <div className="rounded-xl bg-violet-100 p-3 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
-              <Plus className="h-5 w-5" />
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-violet-100 p-3 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+                <Plus className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Quick capture</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">Single lead, fast.</p>
+              </div>
             </div>
-            <div>
-              <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Quick capture</h2>
-              <p className="text-sm text-slate-500 dark:text-slate-400">Add a lead without leaving the pipeline.</p>
-            </div>
+            <button
+              type="button"
+              onClick={() => setShowImport(true)}
+              className="text-xs font-medium text-violet-600 hover:underline dark:text-violet-400"
+            >
+              Bulk import →
+            </button>
           </div>
 
           <div className="space-y-4">
@@ -331,7 +370,7 @@ export default function LeadsPage() {
                             {humanize(lead.qualification_status)}
                           </span>
                         )}
-                        <ScoreBadge score={lead.lead_score} />
+                        <ScoreBadge score={lead.lead_score} reasons={parseScoreReasons(lead.lead_score_reasons_json)} />
                       </div>
 
                       <div className="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-300">

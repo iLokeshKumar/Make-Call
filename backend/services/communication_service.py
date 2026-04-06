@@ -4,7 +4,7 @@ import os
 from fastapi import HTTPException
 from sqlmodel import Session, select
 
-from credentials_service import get_company_credential, get_company_setting_value
+from credentials_service import get_company_credential, get_company_setting_value, get_email_credential
 from email_service import get_styled_html, send_smtp_email
 from models.models import Company, Interaction, Lead, Quote, utc_now
 from services.tracking_service import (
@@ -106,11 +106,11 @@ def send_email_to_lead(
         body=tracked_body,
         html_body=html_body,
         company_name=company_name,
-        smtp_host=get_company_credential(session, company_id, "SMTP_HOST"),
-        smtp_port=get_company_credential(session, company_id, "SMTP_PORT"),
-        smtp_username=get_company_credential(session, company_id, "SMTP_USERNAME"),
-        smtp_password=get_company_credential(session, company_id, "SMTP_PASSWORD"),
-        smtp_from_email=get_company_credential(session, company_id, "SMTP_FROM_EMAIL"),
+        smtp_host=get_email_credential(session, company_id, actor_user_id, "SMTP_HOST"),
+        smtp_port=get_email_credential(session, company_id, actor_user_id, "SMTP_PORT"),
+        smtp_username=get_email_credential(session, company_id, actor_user_id, "SMTP_USERNAME"),
+        smtp_password=get_email_credential(session, company_id, actor_user_id, "SMTP_PASSWORD"),
+        smtp_from_email=get_email_credential(session, company_id, actor_user_id, "SMTP_FROM_EMAIL"),
     )
 
     interaction.delivery_status = "sent" if success else "failed"
@@ -138,6 +138,52 @@ def send_email_to_lead(
     }
 
 
+def _dispatch_whatsapp(
+    session: Session,
+    company_id: int,
+    to_phone: str,
+    body: str,
+) -> dict:
+    """
+    Route a WhatsApp send to the configured telephony provider.
+    Supports Twilio, Exotel, and falls back to Twilio for EnableX.
+    """
+    provider = (get_company_setting_value(session, company_id, "TELEPHONY_PROVIDER") or "twilio").lower()
+
+    if provider == "exotel":
+        # Exotel WhatsApp Business API
+        import requests as _req
+        account_sid = get_company_credential(session, company_id, "EXOTEL_ACCOUNT_SID")
+        api_key     = get_company_credential(session, company_id, "EXOTEL_API_KEY")
+        api_token   = get_company_credential(session, company_id, "EXOTEL_API_TOKEN")
+        from_wa     = get_company_credential(session, company_id, "WHATSAPP_NUMBER") or get_company_credential(session, company_id, "WHATSAPP_NUMBER_FROM")
+        if not all([account_sid, api_key, api_token, from_wa]):
+            return {"success": False, "error": "Exotel WhatsApp credentials not configured"}
+        try:
+            url = f"https://api.exotel.com/v2/accounts/{account_sid}/whatsapp/send"
+            resp = _req.post(
+                url,
+                auth=(api_key, api_token),
+                json={"from": from_wa, "to": to_phone, "body": body},
+                timeout=10,
+            )
+            if resp.status_code in (200, 201):
+                data = resp.json()
+                return {"success": True, "message_sid": data.get("sid") or data.get("id"), "to_phone": to_phone, "from_phone": from_wa}
+            return {"success": False, "error": f"Exotel returned {resp.status_code}: {resp.text[:200]}"}
+        except Exception as exc:
+            return {"success": False, "error": str(exc)}
+
+    # Default: Twilio (also used as fallback for EnableX which has no native WA)
+    return send_whatsapp_message(
+        to_phone=to_phone,
+        body=body,
+        account_sid=get_company_credential(session, company_id, "TWILIO_ACCOUNT_SID"),
+        auth_token=get_company_credential(session, company_id, "TWILIO_AUTH_TOKEN"),
+        from_whatsapp_number=get_company_credential(session, company_id, "WHATSAPP_NUMBER") or get_company_credential(session, company_id, "WHATSAPP_NUMBER_FROM"),
+    )
+
+
 def send_whatsapp_to_lead(
     session: Session,
     company_id: int,
@@ -158,13 +204,7 @@ def send_whatsapp_to_lead(
     if is_lead_opted_out(session, company_id, lead.id, "whatsapp"):
         raise HTTPException(status_code=400, detail="Lead has opted out of WhatsApp")
 
-    send_result = send_whatsapp_message(
-        to_phone=lead.normalized_phone,
-        body=body,
-        account_sid=get_company_credential(session, company_id, "TWILIO_ACCOUNT_SID"),
-        auth_token=get_company_credential(session, company_id, "TWILIO_AUTH_TOKEN"),
-        from_whatsapp_number=get_company_credential(session, company_id, "WHATSAPP_NUMBER"),
-    )
+    send_result = _dispatch_whatsapp(session, company_id, lead.normalized_phone, body)
     success = bool(send_result.get("success"))
 
     interaction = Interaction(

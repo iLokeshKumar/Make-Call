@@ -20,9 +20,8 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-# ---------------------------------------------------------------------------
 # Module-level health state (single source of truth)
-# ---------------------------------------------------------------------------
+
 _health: dict[str, Any] = {
     "last_cycle_at": None,
     "last_cycle_status": "never",
@@ -57,9 +56,7 @@ def resume_worker() -> dict[str, Any]:
     return get_worker_health()
 
 
-# ---------------------------------------------------------------------------
 # Company actor resolution
-# ---------------------------------------------------------------------------
 
 def get_company_actor_ids(
     session: Session,
@@ -77,9 +74,7 @@ def get_company_actor_ids(
     return actors
 
 
-# ---------------------------------------------------------------------------
 # Distributed locking (PostgreSQL advisory locks)
-# ---------------------------------------------------------------------------
 
 def _acquire_company_lock(session: Session, company_id: int) -> bool:
     """Try to acquire a session-level advisory lock for *company_id*.
@@ -100,9 +95,7 @@ def _release_company_lock(session: Session, company_id: int) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
 # Core worker cycle
-# ---------------------------------------------------------------------------
 
 def run_worker_cycle(
     session: Session,
@@ -144,7 +137,7 @@ def run_worker_cycle(
             "duration_seconds": None,
         }
 
-        # --- Distributed lock -----------------------------------------------
+        # Distributed lock
         got_lock = _acquire_company_lock(session, target_company_id)
         if not got_lock:
             logger.warning(
@@ -156,7 +149,7 @@ def run_worker_cycle(
             results.append(metric)
             continue
 
-        # --- Per-company work with error isolation ---------------------------
+        # Per-company work with error isolation
         try:
             # Dialer – isolated: a dialer failure must NOT abort campaign work
             try:
@@ -247,7 +240,7 @@ def run_worker_cycle(
             metric["duration_seconds"],
         )
 
-    # --- Cycle-level metrics -------------------------------------------------
+    # Cycle-level metrics
     cycle_end = datetime.utcnow()
     cycle_duration = (cycle_end - cycle_start).total_seconds()
     failed_companies = [r for r in results if r["status"] == "failed"]
@@ -296,9 +289,7 @@ def run_worker_forever(
         time.sleep(poll_interval_seconds)
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _finalize_metric(metric: dict[str, Any], start: datetime) -> None:
     """Stamp end_at and duration_seconds onto *metric* in-place."""

@@ -128,12 +128,33 @@ def seed_default_role_permissions(session: Session, roles: dict[str, Role]) -> N
 
     admin_permissions = set(all_permissions)
     sales_permissions = {
+        # Leads
         "lead.read_own",
         "lead.create",
         "lead.update_own",
+        # Interactions / call history
         "interaction.read_own",
+        "interaction.read_company",  # needed for call history page (filtered server-side)
+        # Products / appointments
         "product.read",
         "appointment.read",
+        "appointment.manage",
+        # Campaigns — reps participate but don't create/launch
+        "campaign.read",
+        # Call tasks — reps run their own batch calls
+        "call_task.read",
+        "call_task.manage",
+        # Quotes — reps create and send quotes for their leads
+        "quote.read",
+        "quote.manage",
+        "quote.send",
+        # Analytics — reps see their own stats (route filters by user_id)
+        "analytics.read_company",
+        # Requirements
+        "requirements.read",
+        "requirements.manage",
+        # Users (read) — to see teammates, assign leads
+        "user.read",
     }
 
     attach_permissions_to_role(session, roles["company_owner"].id, all_permissions)

@@ -171,6 +171,15 @@ def initiate_outbound_call(
 
     normalized_to = normalize_phone(to)
 
+    # Pre-call enrichment via LangGraph researcher agent (fire-and-forget)
+    if lead_id:
+        try:
+            import asyncio
+            from agents.langgraph_orchestrator import run_researcher
+            asyncio.create_task(run_researcher(lead_id, company_id, actor_user_id))
+        except Exception:
+            pass  # enrichment is best-effort; don't block the call
+
     lead = None
     if lead_id:
         allowed, reason = is_lead_callable(session, company_id, lead_id)
@@ -233,6 +242,10 @@ def initiate_outbound_call(
         f"?lead_id={lead_id or 0}&user_id={actor_user_id}&interaction_id={interaction.id}&call_task_id={call_task_id or 0}"
     )
 
+    recording_callback = (
+        f"{callback_base}/twilio/recording-callback"
+        f"?interaction_id={interaction.id}"
+    )
     client = TwilioClient(account_sid, auth_token)
     call = client.calls.create(
         to=normalized_to,
@@ -241,6 +254,9 @@ def initiate_outbound_call(
         status_callback=status_callback,
         status_callback_event=["initiated", "ringing", "in-progress", "completed", "busy", "no-answer", "failed", "canceled"],
         status_callback_method="POST",
+        record=True,
+        recording_status_callback=recording_callback,
+        recording_status_callback_method="POST",
     )
 
     interaction.metadata_json = {

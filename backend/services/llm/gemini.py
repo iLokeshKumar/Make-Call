@@ -13,7 +13,7 @@ class GeminiLLM(BaseLLM):
     def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
         self.provider = "Google"
-        self.model = model or "gemini-1.5-flash"
+        self.model = model or "gemini-2.0-flash"
         self.api_key = api_key
         
         if not self.api_key:

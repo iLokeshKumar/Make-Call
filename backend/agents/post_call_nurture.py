@@ -281,6 +281,9 @@ class EmailWriter:
     
     @staticmethod
     def send_personalized_followup(
+        session,
+        company_id: int,
+        actor_user_id: int,
         lead_id: int,
         lead_name: str,
         lead_email: str,
@@ -291,33 +294,27 @@ class EmailWriter:
         suggested_action: str
     ) -> bool:
         """
-        Generate and send personalized follow-up email.
+        Generate and send personalized follow-up email via communication_service.
         """
         try:
-            from email_service import send_smtp_email
-            from tools.email import send_personalized_email
-            
-            # Generate email
+            from services.communication_service import send_email_to_lead
+
+            # Generate email content
             subject, html_body = EmailWriter.generate_personalized_email(
                 lead_name, company, pain_points, questions, icp_score, suggested_action
             )
-            
-            # Send via email service
-            send_smtp_email(
-                recipient=lead_email,
+
+            # Send via the real multi-tenant email service (handles SMTP creds, tracking, opt-out)
+            result = send_email_to_lead(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=lead_id,
                 subject=subject,
-                html_body=html_body,
-                from_name="Rio Sales Team"
+                body=html_body,
             )
-            
-            # Log to CRM (company_id/actor_user_id unknown here; defaults used)
-            CRMUpdater.log_interaction(
-                lead_id,
-                "email_sent",
-                f"Personalized {suggested_action} email sent: {subject}"
-            )  # company_id defaults to 0 — caller should pass these if available
-            
-            print(f"✓ [EMAIL_WRITER] Email sent to {lead_email}")
+
+            print(f"✓ [EMAIL_WRITER] Email sent to {lead_email} | status: {result.get('status')}")
             return True
         except Exception as e:
             print(f"❌ [EMAIL_WRITER] Failed to send email: {e}")

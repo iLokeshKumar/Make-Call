@@ -5,6 +5,7 @@ from sqlmodel import Session, select
 
 from models.models import Interaction, LeadRequirementUpsert, User
 from services.requirement_service import upsert_lead_requirements
+from services.objection_service import extract_and_save_objections
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +122,156 @@ async def extract_and_save_requirements(
             actor_user_id=actor_user_id,
             data=payload,
         )
+
+        # Auto-generate and send quote if AI detected "send_quote" intent
+        if structured.get("next_action") == "send_quote":
+            try:
+                from services.voice_quote_service import auto_generate_and_send_quote
+                import asyncio
+                asyncio.create_task(
+                    auto_generate_and_send_quote(
+                        session=session,
+                        company_id=company_id,
+                        actor_user_id=actor_user_id,
+                        lead_id=lead_id,
+                        interaction_id=interaction_id,
+                        required_products_text=structured.get("required_products"),
+                    )
+                )
+                logger.info("[PostCall] Voice quote task queued for lead %s", lead_id)
+            except Exception as vq_exc:
+                logger.warning("[PostCall] Voice quote dispatch failed: %s", vq_exc)
+
+        # Fire-and-forget objection extraction using the same LLM service
+        # (the LLM message history is already reset by the new prompt above,
+        # so we re-instantiate a lightweight version via the same instance)
+        try:
+            from services.llm import get_llm_service
+            objection_llm = get_llm_service(
+                llm_service.provider.lower() if hasattr(llm_service, "provider") else "mistral",
+                "You extract sales objections from transcripts.",
+                api_key=getattr(llm_service, "api_key", None),
+                model=getattr(llm_service, "model", None),
+            )
+            await extract_and_save_objections(
+                session=session,
+                llm_service=objection_llm,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                interaction_id=interaction_id,
+                transcript=transcript,
+            )
+        except Exception as obj_exc:
+            logger.warning("Objection extraction failed: %s", obj_exc)
+
+        # AI Sales Coach — score the AI's performance and optionally auto-tune the system prompt
+        try:
+            from services.llm import get_llm_service
+            from services.call_coach_service import score_call_and_coach
+            coach_llm = get_llm_service(
+                llm_service.provider.lower() if hasattr(llm_service, "provider") else "mistral",
+                "You are an expert B2B sales coach.",
+                api_key=getattr(llm_service, "api_key", None),
+                model=getattr(llm_service, "model", None),
+            )
+            await score_call_and_coach(
+                session=session,
+                llm_service=coach_llm,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                interaction_id=interaction_id,
+                lead_id=lead_id,
+                transcript=transcript,
+            )
+        except Exception as coach_exc:
+            logger.warning("Coach scoring failed: %s", coach_exc)
+
+        # Personalized follow-up email via EmailWriter for nurture actions
+        nurture_actions = {"follow_up_email", "send_brochure", "schedule_demo", "follow_up_call"}
+        if structured.get("next_action") in nurture_actions:
+            try:
+                from agents.post_call_nurture import EmailWriter
+                lead_obj = session.get(__import__("models.models", fromlist=["Lead"]).Lead, lead_id)
+                if lead_obj and lead_obj.email:
+                    raw_pain = structured.get("pain_points") or ""
+                    pain_list = [p.strip() for p in raw_pain.split(",") if p.strip()] if raw_pain else []
+                    raw_use = structured.get("use_case") or ""
+                    questions_list = [raw_use] if raw_use else []
+                    EmailWriter.send_personalized_followup(
+                        session=session,
+                        company_id=company_id,
+                        actor_user_id=actor_user_id,
+                        lead_id=lead_id,
+                        lead_name=lead_obj.name or "there",
+                        lead_email=lead_obj.email,
+                        company=lead_obj.company_name or "",
+                        pain_points=pain_list,
+                        questions=questions_list,
+                        icp_score=float(lead_obj.lead_score or 0.5),
+                        suggested_action=structured.get("next_action"),
+                    )
+                    logger.info("[PostCall] Follow-up email sent to lead %s", lead_id)
+            except Exception as ew_exc:
+                logger.warning("[PostCall] EmailWriter dispatch failed: %s", ew_exc)
+
+        # Post-call competitor mention extraction (LLM, more accurate than real-time keywords)
+        try:
+            from services.llm import get_llm_service
+            from services.competitor_service import extract_and_save_competitor_mentions
+            comp_llm = get_llm_service(
+                llm_service.provider.lower() if hasattr(llm_service, "provider") else "mistral",
+                "You extract competitor mentions from sales call transcripts.",
+                api_key=getattr(llm_service, "api_key", None),
+                model=getattr(llm_service, "model", None),
+            )
+            await extract_and_save_competitor_mentions(
+                session=session,
+                llm_service=comp_llm,
+                company_id=company_id,
+                lead_id=lead_id,
+                interaction_id=interaction_id,
+                transcript=transcript,
+            )
+        except Exception as comp_exc:
+            logger.warning("Competitor extraction failed: %s", comp_exc)
+
+        # LangGraph post-call workflow — summarizer → booking/nurture decision
+        try:
+            from agents.langgraph_orchestrator import run_post_call_workflow
+            import asyncio
+
+            lead_obj = session.get(__import__("models.models", fromlist=["Lead"]).Lead, lead_id)
+            raw_pain = structured.get("pain_points") or ""
+            pain_list = [p.strip() for p in raw_pain.split(",") if p.strip()] if raw_pain else []
+            raw_use = structured.get("use_case") or ""
+            q_list = [raw_use] if raw_use else []
+
+            asyncio.create_task(
+                run_post_call_workflow(
+                    lead_id=lead_id,
+                    company_id=company_id,
+                    actor_user_id=actor_user_id,
+                    lead_name=(lead_obj.name if lead_obj else "") or "",
+                    lead_email=(lead_obj.email if lead_obj else "") or "",
+                    call_transcript=transcript,
+                    call_duration=0,
+                    call_outcome=structured.get("qualification_status") or "neutral",
+                    sentiment="positive" if structured.get("qualification_status") == "qualified" else "neutral",
+                    icp_score=float(lead_obj.lead_score or 0.5) if lead_obj else 0.5,
+                    pain_points=pain_list,
+                    questions_asked=q_list,
+                    bant_answers={
+                        "budget": structured.get("budget_range"),
+                        "authority": structured.get("decision_maker"),
+                        "need": structured.get("use_case"),
+                        "timeline": structured.get("timeline"),
+                    },
+                )
+            )
+            logger.info("[PostCall] LangGraph workflow queued for lead %s", lead_id)
+        except Exception as lg_exc:
+            logger.warning("[PostCall] LangGraph dispatch failed: %s", lg_exc)
+
         return saved
 
     except Exception as e:

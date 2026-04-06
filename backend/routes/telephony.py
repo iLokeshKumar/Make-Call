@@ -18,6 +18,7 @@ from models.models import Company, Interaction, Lead, User, utc_now
 from services.dialer_service import initiate_outbound_call
 from services.outcome_service import apply_call_outcome
 from services.outbound_call_service import start_call_task
+from services.warm_transfer_service import execute_warm_transfer
 from utils.phone import normalize_phone
 from utils.url_utils import normalize_base_url
 
@@ -174,6 +175,60 @@ async def get_call_status(
         "call_status": raw,
         "is_terminal": raw in TERMINAL,
     }
+
+
+@router.post("/twilio/recording-callback")
+async def twilio_recording_callback(
+    request: Request,
+    RecordingUrl: str = Form(...),
+    RecordingDuration: Optional[str] = Form(None),
+    RecordingSid: str = Form(...),
+    session: Session = Depends(get_session),
+):
+    """Receive Twilio recording URL and persist it on the interaction."""
+    interaction_id = request.query_params.get("interaction_id")
+    if not interaction_id or not interaction_id.isdigit():
+        return {"status": "ignored"}
+
+    interaction = session.get(Interaction, int(interaction_id))
+    if not interaction:
+        return {"status": "not_found"}
+
+    # Twilio recording URL — append .mp3 for direct playback
+    audio_url = RecordingUrl if RecordingUrl.endswith(".mp3") else f"{RecordingUrl}.mp3"
+    interaction.recording_url = audio_url
+    if RecordingDuration and RecordingDuration.isdigit():
+        interaction.recording_duration = int(RecordingDuration)
+    interaction.metadata_json = {
+        **(interaction.metadata_json or {}),
+        "recording_sid": RecordingSid,
+    }
+    interaction.updated_at = utc_now()
+    session.add(interaction)
+    session.commit()
+    return {"status": "saved", "interaction_id": interaction_id}
+
+
+@router.post("/warm-transfer")
+async def warm_transfer(
+    interaction_id: int,
+    transfer_to: str,
+    isr_name: Optional[str] = None,
+    current_user: User = Depends(PermissionChecker("call_task.manage")),
+    session: Session = Depends(get_session),
+):
+    """
+    Bridge an active AI call to a human ISR in real-time.
+    Supports Twilio (Conference), Exotel (Transfer API), and EnableX (dial-out).
+    """
+    return execute_warm_transfer(
+        session=session,
+        company_id=current_user.company_id,
+        actor_user_id=current_user.id,
+        interaction_id=interaction_id,
+        transfer_to=transfer_to,
+        isr_name=isr_name,
+    )
 
 
 @router.post("/outbound/callback")
