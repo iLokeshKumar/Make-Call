@@ -4,8 +4,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-# The master key should be generated once and stored in the .env file
-# To generate a new one: Fernet.generate_key().decode()
+# The master key should be generated once and stored in the .env file. To generate a new one: Fernet.generate_key().decode()
 FERNET_KEY = os.getenv("FERNET_KEY")
 _fernet = None
 

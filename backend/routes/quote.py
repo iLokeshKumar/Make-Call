@@ -6,10 +6,11 @@ from database import get_session
 from models.models import Quote, QuoteCreate, User, QuoteSendRequest
 from services.quote_service import (
     create_quote,
-    generate_quote_pdf,
     get_quote_or_404,
     mark_quote_status,
 )
+
+from services.quote_pdf_service import generate_quote_pdf
 from services.communication_service import send_quote_to_lead
 
 router = APIRouter(prefix="/quotes", tags=["Quotes"])

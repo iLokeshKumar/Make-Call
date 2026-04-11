@@ -14,9 +14,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
-# ---------------------------------------------------------------------------
 # Supervisor constants
-# ---------------------------------------------------------------------------
 _BACKOFF_INITIAL_SECONDS = 5
 _BACKOFF_MAX_SECONDS = 60
 
@@ -51,9 +49,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.once:
-        # ------------------------------------------------------------------ #
-        # Single-shot mode – run one cycle and print the result.              #
-        # ------------------------------------------------------------------ #
+        # Single-shot mode – run one cycle and print the result.
         logger.info("[supervisor] running in --once mode")
         with Session(engine) as session:
             result = run_worker_cycle(
@@ -64,14 +60,7 @@ def main() -> None:
         print(result)
         return
 
-    # ---------------------------------------------------------------------- #
-    # Continuous mode: process supervision with exponential back-off          #
-    #                                                                          #
-    # If run_worker_forever raises (e.g. DB connection lost), the supervisor  #
-    # logs the crash, waits with exponential back-off, then restarts it.      #
-    # Back-off resets to initial value after a successful run so transient    #
-    # failures don't permanently slow the worker.
-    # ---------------------------------------------------------------------- #
+    # Continuous mode: process supervision with exponential back-off. If run_worker_forever raises (e.g. DB connection lost), the supervisor logs the crash, waits with exponential back-off, then restarts it. Back-off resets to initial value after a successful run so transient failures don't permanently slow the worker.
     backoff = _BACKOFF_INITIAL_SECONDS
     attempt = 0
 
@@ -91,8 +80,7 @@ def main() -> None:
                 company_id=args.company_id,
                 dial_limit_per_company=args.dial_limit,
             )
-            # run_worker_forever only returns if it exits cleanly (shouldn't
-            # happen normally, but handle it gracefully).
+            # run_worker_forever only returns if it exits cleanly (shouldn't happen normally, but handle it gracefully).
             logger.warning("[supervisor] run_worker_forever returned unexpectedly – restarting")
             backoff = _BACKOFF_INITIAL_SECONDS  # reset: clean exit
 

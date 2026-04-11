@@ -211,7 +211,7 @@ export default function TemplatesPage() {
       </div>
 
       <div className="flex gap-6 items-start flex-col lg:flex-row">
-        {/* ── Left: Template list ─────────────────────────────────────────── */}
+        {/* Left: Template list */}
         <div className="w-full lg:w-1/3 space-y-3">
           <button
             onClick={startNew}
@@ -273,7 +273,7 @@ export default function TemplatesPage() {
           )}
         </div>
 
-        {/* ── Right: Editor ────────────────────────────────────────────────── */}
+        {/* Right: Editor */}
         <div className="w-full lg:w-2/3">
           {!isEditing ? (
             <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-12 flex flex-col items-center justify-center text-center min-h-[320px]">

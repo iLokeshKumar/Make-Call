@@ -16,7 +16,7 @@ import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// Types
 
 type CompanyCycleResult = {
   company_id: number;
@@ -39,7 +39,7 @@ type AutomationStatus = {
   paused?: boolean;
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 function relativeTime(isoString?: string | null): string {
   if (!isoString) return "Never";
@@ -80,7 +80,7 @@ function formatIsmResults(results?: unknown): string {
   return String(results);
 }
 
-// ─── Sub-components ───────────────────────────────────────────────────────────
+// Sub-components
 
 function StatCard({
   label,
@@ -167,8 +167,8 @@ function IsmExpandedRows({ results }: { results: unknown[] }) {
               Lead {String(r["lead_id"] ?? r["id"] ?? i + 1)}
             </span>
             <span>{String(r["status"] ?? "—")}</span>
-            {r["channel"] && <span className="italic">{String(r["channel"])}</span>}
-            {r["error"] && (
+            {Boolean(r["channel"]) && <span className="italic">{String(r["channel"])}</span>}
+            {Boolean(r["error"]) && (
               <span className="text-red-500 truncate max-w-xs">{String(r["error"])}</span>
             )}
           </div>
@@ -178,7 +178,7 @@ function IsmExpandedRows({ results }: { results: unknown[] }) {
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// Main Page
 
 export default function AutomationPage() {
   const { token, sessionTimeout } = useAuth();
@@ -200,7 +200,7 @@ export default function AutomationPage() {
 
   const [expandedRows, setExpandedRows] = useState<Set<number>>(new Set());
 
-  // ── Fetch status ────────────────────────────────────────────────────────────
+  // Fetch status
 
   const fetchStatus = useCallback(async () => {
     if (!token) return;
@@ -224,7 +224,7 @@ export default function AutomationPage() {
     fetchStatus();
   }, [fetchStatus]);
 
-  // ── Auto-refresh ────────────────────────────────────────────────────────────
+  // Auto-refresh
 
   useEffect(() => {
     if (autoRefresh) {
@@ -239,7 +239,7 @@ export default function AutomationPage() {
     };
   }, [autoRefresh, fetchStatus]);
 
-  // ── Run cycle ───────────────────────────────────────────────────────────────
+  // Run cycle
 
   async function handleRunCycle() {
     if (!token) return;
@@ -266,7 +266,7 @@ export default function AutomationPage() {
     }
   }
 
-  // ── Pause / Resume ──────────────────────────────────────────────────────────
+  // Pause / Resume
 
   async function handlePauseResume() {
     if (!token || !status) return;
@@ -288,7 +288,7 @@ export default function AutomationPage() {
     }
   }
 
-  // ── Row expand ──────────────────────────────────────────────────────────────
+  // Row expand
 
   function toggleRow(companyId: number) {
     setExpandedRows((prev) => {
@@ -299,7 +299,7 @@ export default function AutomationPage() {
     });
   }
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  // Render
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 p-6 lg:p-8">
@@ -313,7 +313,7 @@ export default function AutomationPage() {
               Automation Worker
             </h1>
             <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              Monitor and control the automation cycle that runs dialing, campaigns, and ISM.
+              Monitor and control the automation cycle that runs dialing, campaigns, and more.
             </p>
           </div>
           {status && (

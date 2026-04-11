@@ -9,6 +9,18 @@ import ImportLeadsModal from "@/components/leads/ImportLeadsModal";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
+/** Strip system-appended log lines from lead notes before displaying. */
+function cleanNotes(notes: string | null | undefined): string {
+    if (!notes) return "";
+    // Remove lines like: "[2026-04-07T12:37:53Z] Post-call nurture. Outcome: follow_up" and: "[2026-04-07T12:37:53Z] Call outcome: qualified, ICP Score: 0.8"
+    const cleaned = notes
+        .split("\n")
+        .filter(line => !/^\[20\d\d-\d\d-\d\dT/.test(line.trim()))
+        .join("\n")
+        .trim();
+    return cleaned;
+}
+
 type Lead = {
   id: number;
   name: string;
@@ -195,7 +207,7 @@ export default function LeadsPage() {
           clearInterval(interval);
           setTimeout(() => { setCallInteractionId(null); setCallStatus(null); }, 4000);
         }
-      } catch { /* ignore */ }
+      } catch {  }
     }, 2000);
     return () => clearInterval(interval);
   }, [callInteractionId, token]);
@@ -379,7 +391,11 @@ export default function LeadsPage() {
                         <span className="inline-flex items-center gap-1"><Sparkles className="h-4 w-4" /> {humanize(lead.next_action || "none")}</span>
                       </div>
 
-                      {lead.notes && <p className="text-sm text-slate-500 dark:text-slate-400">{lead.notes}</p>}
+                      {cleanNotes(lead.notes) && (
+                        <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-2">
+                          {cleanNotes(lead.notes)}
+                        </p>
+                      )}
                     </div>
 
                     <div className="flex flex-wrap gap-2">

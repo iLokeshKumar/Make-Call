@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import JSON, Column, DateTime, Index, Numeric, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Index, Numeric, String, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -32,6 +32,19 @@ class Company(AuditMixin, table=True):
     status: str = Field(default="active", max_length=30)
     subscription_tier: str = Field(default="starter", max_length=50)
     max_users: int = Field(default=10)
+    # Contact & address details (used on quotes, invoices)
+    contact_email: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=30)
+    address: Optional[str] = Field(default=None, max_length=400)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    country: Optional[str] = Field(default=None, max_length=100)
+    pincode: Optional[str] = Field(default=None, max_length=20)
+    gst_number: Optional[str] = Field(default=None, max_length=50)
+    pan_number: Optional[str] = Field(default=None, max_length=20)
+    nature_of_business: Optional[str] = Field(default=None, max_length=255)
+    vat_number: Optional[str] = Field(default=None, max_length=50)
+    cin_number: Optional[str] = Field(default=None, max_length=50)
 
 
 class User(AuditMixin, table=True):
@@ -197,6 +210,14 @@ class Lead(AuditMixin, table=True):
     # e.g. "en", "hi", "ta", "te", "kn", "mr", "gu", "bn", "pa", "ml"
     company_name: Optional[str] = Field(default=None, max_length=200)
     designation: Optional[str] = Field(default=None, max_length=150)
+    # B2B billing details for quotes
+    billing_address: Optional[str] = Field(default=None, max_length=400)
+    pincode: Optional[str] = Field(default=None, max_length=20)
+    gst_number: Optional[str] = Field(default=None, max_length=50)
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class Campaign(AuditMixin, table=True):
@@ -282,6 +303,10 @@ class Interaction(AuditMixin, table=True):
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class CampaignRecipient(AuditMixin, table=True):
@@ -305,6 +330,13 @@ class CampaignRecipient(AuditMixin, table=True):
         sa_column=Column(DateTime(timezone=True), nullable=True),
     )
     last_interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    # Claim-lock: set to now() when the worker starts processing this recipient.
+    # Workers skip rows where this is within the last 10 minutes (prevents double-send
+    # when a worker crashes mid-step and restarts before the next cycle).
+    processing_started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
 
 
 class CallTask(AuditMixin, table=True):
@@ -369,6 +401,39 @@ class Product(AuditMixin, table=True):
     currency: str = Field(default="INR", max_length=10)
     note: Optional[str] = None
     is_active: bool = Field(default=True)
+    # Catalog / classification
+    brand: Optional[str] = Field(default=None, max_length=100)
+    category: Optional[str] = Field(default=None, max_length=100)
+    subcategory: Optional[str] = Field(default=None, max_length=100)
+    product_line: Optional[str] = Field(default=None, max_length=100)
+    model_number: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    # Pricing tiers
+    mrp: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(12, 2), nullable=True),
+    )
+    cost_price: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(12, 2), nullable=True),
+    )
+    min_price: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(12, 2), nullable=True),
+    )
+    # Tax / compliance
+    hsn_code: Optional[str] = Field(default=None, max_length=20)
+    tax_rate: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(5, 2), nullable=True),
+    )
+    unit: Optional[str] = Field(default=None, max_length=30)  # piece, box, set, kg …
+    # Logistics
+    reorder_level: Optional[int] = Field(default=None)
+    warranty_months: Optional[int] = Field(default=None)
+    # Media & extras
+    image_url: Optional[str] = Field(default=None, max_length=500)
+    attributes: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
 
 
 class LeadRequirement(AuditMixin, table=True):
@@ -555,6 +620,19 @@ class EngagementEvent(SQLModel, table=True):
     )
 
 
+class SentimentEvent(SQLModel, table=True):
+    __tablename__ = "sentiment_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    interaction_id: str = Field(index=True, max_length=120)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class AnalyticsAlert(AuditMixin, table=True):
     __tablename__ = "analytics_alerts"
 
@@ -591,6 +669,10 @@ class LatencyLog(SQLModel, table=True):
     tts_provider: Optional[str] = Field(default=None, max_length=80)
     tts_model: Optional[str] = Field(default=None, max_length=120)
     notes: Optional[str] = None
+    trace_id: Optional[str] = Field(default=None, max_length=64)
+    span_id: Optional[str] = Field(default=None, max_length=32)
+    turn_index: Optional[int] = Field(default=None)
+    span_status: Optional[str] = Field(default=None, max_length=30)
     created_at: datetime = Field(
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),
@@ -607,6 +689,7 @@ class LoginHistory(SQLModel, table=True):
     event_type: str = Field(default="login_success", max_length=50)
     success: bool = Field(default=True)
     ip_address: Optional[str] = Field(default=None, max_length=64)
+    location: Optional[str] = Field(default=None, max_length=200)
     user_agent: Optional[str] = None
     failure_reason: Optional[str] = None
     created_at: datetime = Field(
@@ -789,6 +872,22 @@ class ProductCreate(SQLModel):
     currency: str = "INR"
     note: Optional[str] = None
     is_active: bool = True
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    product_line: Optional[str] = None
+    model_number: Optional[str] = None
+    description: Optional[str] = None
+    mrp: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = None
+    min_price: Optional[Decimal] = None
+    hsn_code: Optional[str] = None
+    tax_rate: Optional[Decimal] = None
+    unit: Optional[str] = None
+    reorder_level: Optional[int] = None
+    warranty_months: Optional[int] = None
+    image_url: Optional[str] = None
+    attributes: Optional[dict] = None
 
 class ProductUpdate(SQLModel):
     name: Optional[str] = None
@@ -798,6 +897,203 @@ class ProductUpdate(SQLModel):
     currency: Optional[str] = None
     note: Optional[str] = None
     is_active: Optional[bool] = None
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    product_line: Optional[str] = None
+    model_number: Optional[str] = None
+    description: Optional[str] = None
+    mrp: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = None
+    min_price: Optional[Decimal] = None
+    hsn_code: Optional[str] = None
+    tax_rate: Optional[Decimal] = None
+    unit: Optional[str] = None
+    reorder_level: Optional[int] = None
+    warranty_months: Optional[int] = None
+    image_url: Optional[str] = None
+    attributes: Optional[dict] = None
+
+class Feedback(AuditMixin, table=True):
+    __tablename__ = "feedback"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    submitted_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+
+    # call_review | csat | general | bug_report | feature_request
+    feedback_type: str = Field(default="general", max_length=50)
+    # internal | customer
+    source: str = Field(default="internal", max_length=20)
+
+    rating: Optional[int] = Field(default=None)           # 1–5
+    comment: Optional[str] = None
+    # interested | not_interested | callback | voicemail | no_answer | do_not_call
+    disposition: Optional[str] = Field(default=None, max_length=50)
+    tags: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    # Public CSAT link support
+    token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(100), unique=True, nullable=True, index=True),
+    )
+    token_expires_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    responded_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    # pending (CSAT not yet answered) | submitted | expired
+    status: str = Field(default="submitted", max_length=20)
+    assignee_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    close_loop_status: str = Field(default="none", max_length=30)  # none | open | in_progress | resolved
+    status_note: Optional[str] = None
+    follow_up_task_id: Optional[int] = Field(default=None, foreign_key="call_tasks.id", index=True)
+
+
+class EmailOutbox(AuditMixin, table=True):
+    __tablename__ = "email_outbox"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_email_outbox_dedupe_key"),
+        Index("ix_email_outbox_status_next", "status", "next_attempt_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    actor_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    feedback_id: Optional[int] = Field(default=None, foreign_key="feedback.id", index=True)
+    dedupe_key: Optional[str] = Field(default=None, max_length=200, index=True)
+
+    to_email: str = Field(max_length=500)
+    subject: str = Field(max_length=500)
+    body: str
+    html_body: Optional[str] = None
+    company_name: Optional[str] = Field(default=None, max_length=200)
+
+    status: str = Field(default="pending", max_length=20)  # pending | sent | failed
+    attempts: int = Field(default=0)
+    max_attempts: int = Field(default=5)
+    next_attempt_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+    sent_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    last_issue: Optional[str] = None
+
+
+class FeedbackPublicAudit(SQLModel, table=True):
+    __tablename__ = "feedback_public_audit"
+    __table_args__ = (
+        Index("ix_feedback_public_audit_created_at", "created_at"),
+        Index("ix_feedback_public_audit_token", "token_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: Optional[int] = Field(default=None, foreign_key="companies.id", index=True)
+    feedback_id: Optional[int] = Field(default=None, foreign_key="feedback.id", index=True)
+    action: str = Field(max_length=30)  # view | submit
+    status: str = Field(max_length=30)  # ok | invalid_token | expired | already_submitted | rate_limited | error
+    token_key: Optional[str] = Field(default=None, max_length=120)
+    ip_address: Optional[str] = Field(default=None, max_length=64)
+    user_agent: Optional[str] = None
+    rating: Optional[int] = None
+    detail: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    created_by: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    updated_by: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+
+
+class BackgroundJob(SQLModel, table=True):
+    """
+    Persistent job queue backed by PostgreSQL.
+
+    Jobs survive FastAPI process restarts. The automation worker claims rows
+    with status='pending', sets status='running', then marks them 'done' or
+    'failed'. Stale 'running' rows (started_at older than 10 min) are reset
+    to 'pending' at the start of each worker cycle so they are retried.
+
+    Supported job_types:
+      - post_call_workflow: run extract_and_save_requirements + dispatch_next_action
+    """
+    __tablename__ = "background_jobs"
+    __table_args__ = (
+        Index(
+            "ix_background_jobs_company_status_run_after",
+            "company_id", "status", "run_after",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    job_type: str = Field(max_length=100)
+    status: str = Field(default="pending", max_length=30)  # pending | running | done | failed
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    attempts: int = Field(default=0)
+    max_attempts: int = Field(default=3)
+    run_after: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    finished_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    error: Optional[str] = Field(default=None)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class FeedbackCreate(SQLModel):
+    lead_id: Optional[int] = None
+    interaction_id: Optional[int] = None
+    feedback_type: str = "general"
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    disposition: Optional[str] = None
+    tags: Optional[dict] = None
+
+
+class FeedbackUpdate(SQLModel):
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    disposition: Optional[str] = None
+    tags: Optional[dict] = None
+    status: Optional[str] = None
+    assignee_user_id: Optional[int] = None
+    close_loop_status: Optional[str] = None
+    status_note: Optional[str] = None
+    follow_up_task_id: Optional[int] = None
+
+
+class FeedbackCloseLoopUpdate(SQLModel):
+    assignee_user_id: Optional[int] = None
+    close_loop_status: Optional[str] = None
+    status_note: Optional[str] = None
+    create_follow_up_task: bool = False
+
+
+class CsatSendRequest(SQLModel):
+    lead_id: int
+    interaction_id: Optional[int] = None
+    expires_hours: int = 72
+
+
+class CsatSubmitRequest(SQLModel):
+    rating: int          # 1–5
+    comment: Optional[str] = None
+
 
 class CompanySettingUpsert(SQLModel):
     key: str

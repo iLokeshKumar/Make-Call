@@ -2,7 +2,6 @@ import sys
 import os
 from sqlmodel import Session, select
 
-# Add parent directory to path to import models and utils
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'backend')))
 
 from database import engine
@@ -18,7 +17,6 @@ def migrate_users():
         for user in users:
             updated = False
             
-            # 1. Migrate Email
             if user.email and not user.email.startswith('gAAAAA'):
                 print(f"Encrypting email for user: {user.username}")
                 plain_email = user.email
@@ -31,7 +29,6 @@ def migrate_users():
                     user.email_hash = generate_blind_index(plain_email)
                     updated = True
 
-            # 2. Migrate Phone Number
             if user.phone_number and not user.phone_number.startswith('gAAAAA'):
                 print(f"Encrypting phone_number for user: {user.username}")
                 plain_phone = user.phone_number

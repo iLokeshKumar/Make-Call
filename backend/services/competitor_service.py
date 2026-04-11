@@ -21,8 +21,7 @@ from models.models import CompetitorMention, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Default competitor list used when no company-specific list is configured.
-# Companies can override this via CompanySetting key "COMPETITOR_NAMES" (comma-separated).
+# Default competitor list used when no company-specific list is configured. Companies can override this via CompanySetting key "COMPETITOR_NAMES" (comma-separated).
 DEFAULT_COMPETITORS = [
     "salesforce", "hubspot", "zoho", "pipedrive", "freshsales",
     "leadsquared", "kylas", "sugar crm", "microsoft dynamics",
@@ -214,10 +213,16 @@ def get_competitor_summary(
     session: Session,
     company_id: int,
 ) -> list[dict]:
-    """Return aggregated mention counts per competitor."""
+    """Return aggregated mention counts per competitor.
+
+    Excludes source='manual' sentinel rows — those store counter-scripts,
+    not actual call mentions, and would inflate the counts.
+    Also returns the counter_script for each competitor if one exists.
+    """
     mentions = session.exec(
         select(CompetitorMention).where(
             CompetitorMention.company_id == company_id,
+            CompetitorMention.source != "manual",
         )
     ).all()
 
@@ -225,8 +230,28 @@ def get_competitor_summary(
     for m in mentions:
         counts[m.competitor_name] = counts.get(m.competitor_name, 0) + 1
 
+    # Fetch counter-scripts separately (manual sentinel rows)
+    scripts = session.exec(
+        select(CompetitorMention).where(
+            CompetitorMention.company_id == company_id,
+            CompetitorMention.source == "manual",
+            CompetitorMention.counter_script.is_not(None),
+        )
+    ).all()
+    script_map = {m.competitor_name: m.counter_script for m in scripts}
+
+    # Include competitors that have a counter-script but zero mentions yet
+    all_names = set(counts.keys()) | set(script_map.keys())
+
     return sorted(
-        [{"competitor": k, "count": v} for k, v in counts.items()],
+        [
+            {
+                "competitor": name,
+                "count": counts.get(name, 0),
+                "counter_script": script_map.get(name),
+            }
+            for name in all_names
+        ],
         key=lambda x: x["count"],
         reverse=True,
     )

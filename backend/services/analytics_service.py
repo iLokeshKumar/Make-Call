@@ -1,10 +1,10 @@
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from sqlalchemy import case
 from sqlmodel import Session, select, func
 
-from models.models import AnalyticsAlert, EngagementEvent, CallTask, Campaign, CampaignRecipient, Interaction, Quote, utc_now
+from models.models import AnalyticsAlert, Appointment, EngagementEvent, CallTask, Campaign, CampaignRecipient, Interaction, Lead, Quote, utc_now
 
 
 def _query_counts(session: Session, company_id: int, model, column):
@@ -30,13 +30,26 @@ def _build_funnel(counts: dict[str, int]) -> list[dict]:
     ]
 
 
-def get_engagement_summary(session: Session, company_id: int, lookback_days: int = 30) -> dict:
-    since = utc_now() - timedelta(days=lookback_days)
+def get_engagement_summary(
+    session: Session,
+    company_id: int,
+    lookback_days: int = 30,
+    since: datetime | None = None,
+    until: datetime | None = None,
+) -> dict:
+    if since is None:
+        since = utc_now() - timedelta(days=lookback_days)
+
+    def _since_filter(col):
+        filters = [col >= since]
+        if until is not None:
+            filters.append(col <= until)
+        return filters
 
     event_rows = session.exec(
         select(EngagementEvent.event_type, func.count(EngagementEvent.id))
         .where(EngagementEvent.company_id == company_id)
-        .where(EngagementEvent.created_at >= since)
+        .where(*_since_filter(EngagementEvent.created_at))
         .group_by(EngagementEvent.event_type)
     ).all()
     event_counts = {row[0]: row[1] for row in event_rows if row[0]}
@@ -44,7 +57,7 @@ def get_engagement_summary(session: Session, company_id: int, lookback_days: int
     channel_rows = session.exec(
         select(EngagementEvent.channel, func.count(EngagementEvent.id))
         .where(EngagementEvent.company_id == company_id)
-        .where(EngagementEvent.created_at >= since)
+        .where(*_since_filter(EngagementEvent.created_at))
         .group_by(EngagementEvent.channel)
     ).all()
     channel_counts = {row[0]: row[1] for row in channel_rows if row[0]}
@@ -56,7 +69,7 @@ def get_engagement_summary(session: Session, company_id: int, lookback_days: int
             func.count(EngagementEvent.id),
         )
         .where(EngagementEvent.company_id == company_id)
-        .where(EngagementEvent.created_at >= since)
+        .where(*_since_filter(EngagementEvent.created_at))
         .group_by(func.date(EngagementEvent.created_at), EngagementEvent.event_type)
         .order_by(func.date(EngagementEvent.created_at))
     ).all()
@@ -83,7 +96,7 @@ def get_engagement_summary(session: Session, company_id: int, lookback_days: int
             func.count(CampaignRecipient.id),
         )
         .where(CampaignRecipient.company_id == company_id)
-        .where(CampaignRecipient.updated_at >= since)
+        .where(*_since_filter(CampaignRecipient.updated_at))
         .group_by(func.date(CampaignRecipient.updated_at), CampaignRecipient.status)
         .order_by(func.date(CampaignRecipient.updated_at))
     ).all()
@@ -321,6 +334,82 @@ def get_campaign_drilldown(session: Session, company_id: int, campaign_id: int) 
         for row in rows
         if row[0] and row[1]
     ]
+
+
+def get_call_conversion_summary(
+    session: Session,
+    company_id: int,
+    days: int = 30,
+) -> dict:
+    """
+    Returns call-to-outcome conversion rates for a company over the last N days.
+
+    Metrics:
+    - total_calls          : all outbound + inbound call interactions
+    - leads_called         : distinct leads reached by at least one call
+    - demos_booked         : appointments created in the period
+    - quotes_sent          : quotes with a sent/viewed/accepted status
+    - closed_won           : leads currently at ism_stage='closed_won'
+    - demo_rate            : demos_booked / total_calls (%)
+    - quote_rate           : quotes_sent / total_calls (%)
+    - close_rate           : closed_won / leads_called (%)
+    """
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    total_calls = session.exec(
+        select(func.count(Interaction.id)).where(
+            Interaction.company_id == company_id,
+            Interaction.type == "call",
+            Interaction.created_at >= since,
+        )
+    ).one()
+
+    leads_called = session.exec(
+        select(func.count(func.distinct(Interaction.lead_id))).where(
+            Interaction.company_id == company_id,
+            Interaction.type == "call",
+            Interaction.lead_id.is_not(None),
+            Interaction.created_at >= since,
+        )
+    ).one()
+
+    demos_booked = session.exec(
+        select(func.count(Appointment.id)).where(
+            Appointment.company_id == company_id,
+            Appointment.created_at >= since,
+        )
+    ).one()
+
+    quotes_sent = session.exec(
+        select(func.count(Quote.id)).where(
+            Quote.company_id == company_id,
+            Quote.status.in_(["sent", "viewed", "accepted", "rejected"]),
+            Quote.created_at >= since,
+        )
+    ).one()
+
+    closed_won = session.exec(
+        select(func.count(Lead.id)).where(
+            Lead.company_id == company_id,
+            Lead.ism_stage == "closed_won",
+            Lead.deleted_at.is_(None),
+        )
+    ).one()
+
+    def _rate(num, denom) -> float:
+        return round((num / denom) * 100, 1) if denom else 0.0
+
+    return {
+        "period_days": days,
+        "total_calls": total_calls or 0,
+        "leads_called": leads_called or 0,
+        "demos_booked": demos_booked or 0,
+        "quotes_sent": quotes_sent or 0,
+        "closed_won": closed_won or 0,
+        "demo_rate_pct": _rate(demos_booked, total_calls),
+        "quote_rate_pct": _rate(quotes_sent, total_calls),
+        "close_rate_pct": _rate(closed_won, leads_called),
+    }
 
 
 def list_alerts(session: Session, company_id: int) -> list[AnalyticsAlert]:

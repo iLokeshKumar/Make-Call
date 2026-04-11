@@ -16,7 +16,7 @@ import { useRef, useState } from "react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
-// ─── types ────────────────────────────────────────────────────────────────────
+// Types
 
 type ImportResult = {
   imported: number;
@@ -38,7 +38,7 @@ const TABS: { id: Tab; label: string; icon: React.ReactNode; badge?: string }[] 
   { id: "indiamart", label: "IndiaMart",    icon: <Upload className="h-4 w-4" /> },
 ];
 
-// ─── helpers ──────────────────────────────────────────────────────────────────
+// helpers
 
 function ResultBanner({ result, onDismiss }: { result: ImportResult; onDismiss: () => void }) {
   const ok = result.imported > 0;
@@ -64,7 +64,7 @@ function ResultBanner({ result, onDismiss }: { result: ImportResult; onDismiss: 
   );
 }
 
-// ─── tag input ────────────────────────────────────────────────────────────────
+// tag input
 
 function TagInput({
   placeholder,
@@ -105,7 +105,7 @@ function TagInput({
   );
 }
 
-// ─── main modal ───────────────────────────────────────────────────────────────
+// main modal
 
 export default function ImportLeadsModal({
   token,
@@ -303,7 +303,7 @@ export default function ImportLeadsModal({
         <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
           {result && <ResultBanner result={result} onDismiss={() => setResult(null)} />}
 
-          {/* ── MANUAL ── */}
+          {/* MANUAL */}
           {tab === "manual" && (
             <form onSubmit={handleManual} className="space-y-3">
               <input required value={manualForm.name} onChange={(e) => setManualForm((f) => ({ ...f, name: e.target.value }))}
@@ -318,7 +318,7 @@ export default function ImportLeadsModal({
             </form>
           )}
 
-          {/* ── FILE UPLOAD ── */}
+          {/* FILE UPLOAD */}
           {tab === "file" && (
             <form onSubmit={handleFile} className="space-y-4">
               <div className="flex items-center justify-between">
@@ -376,7 +376,7 @@ export default function ImportLeadsModal({
             </form>
           )}
 
-          {/* ── APOLLO ── */}
+          {/* APOLLO */}
           {tab === "apollo" && (
             <form onSubmit={handleApollo} className="space-y-4">
               <div className="rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-xs text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300">
@@ -411,7 +411,7 @@ export default function ImportLeadsModal({
             </form>
           )}
 
-          {/* ── LUSHA ── */}
+          {/* LUSHA */}
           {tab === "lusha" && (
             <form onSubmit={handleLusha} className="space-y-4">
               <div className="rounded-xl border border-purple-200 bg-purple-50 px-4 py-3 text-xs text-purple-700 dark:border-purple-500/20 dark:bg-purple-500/10 dark:text-purple-300">
@@ -448,7 +448,7 @@ export default function ImportLeadsModal({
             </form>
           )}
 
-          {/* ── ZOOMINFO ── */}
+          {/* ZOOMINFO */}
           {tab === "zoominfo" && (
             <form onSubmit={handleZoomInfo} className="space-y-4">
               <div className="rounded-xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700 dark:border-sky-500/20 dark:bg-sky-500/10 dark:text-sky-300">
@@ -487,7 +487,7 @@ export default function ImportLeadsModal({
             </form>
           )}
 
-          {/* ── LINKEDIN ── */}
+          {/* LINKEDIN */}
           {tab === "linkedin" && (
             <CsvGuideTab
               source="LinkedIn"
@@ -501,7 +501,7 @@ export default function ImportLeadsModal({
             />
           )}
 
-          {/* ── JUSTDIAL ── */}
+          {/* JUSTDIAL */}
           {tab === "justdial" && (
             <CsvGuideTab
               source="JustDial"
@@ -514,7 +514,7 @@ export default function ImportLeadsModal({
             />
           )}
 
-          {/* ── INDIAMART ── */}
+          {/* INDIAMART */}
           {tab === "indiamart" && (
             <CsvGuideTab
               source="IndiaMart"
@@ -532,7 +532,7 @@ export default function ImportLeadsModal({
   );
 }
 
-// ─── sub-components ───────────────────────────────────────────────────────────
+// sub-components
 
 function SubmitBtn({ busy, label, disabled }: { busy: boolean; label: string; disabled?: boolean }) {
   return (

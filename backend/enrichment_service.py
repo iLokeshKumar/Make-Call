@@ -21,8 +21,8 @@ def enrich_lead_cascade(lead_id: int, apollo_key: str = None):
 
         print(f"Starting enrichment for Lead: {lead.name} (ID: {lead_id})")
 
-        # Step 1: Apollo Enrichment if Kumar Sir gives money for API(Organization Level)
-        # ---------------------------------------------
+        # Apollo Enrichment
+
         if lead.enrichment_status == "Not Enriched":
             try:
                 # Extract domain from email if possible, or name
@@ -56,11 +56,9 @@ def enrich_lead_cascade(lead_id: int, apollo_key: str = None):
             except Exception as e:
                 print(f"Apollo Enrichment Error: {e}")
 
-        # Step 2: Lusha Enrichment (Stub)
-        # ------------------------------
+        # SLusha Enrichment (Stub)
+
         if lead.enrichment_status in ["Not Enriched", "Apollo Enriched"]:
-            # Placeholder for Lusha logic, Kumar Sir will not give money for this
-            # If will not happen, but my accident if API key is provided, we can add logic here to find direct person info
             pass
 
         session.add(lead)
@@ -75,7 +73,7 @@ def enrich_lead_cascade(lead_id: int, apollo_key: str = None):
         }
 
 if __name__ == "__main__":
-    # test this logic
+    
     import sys
     if len(sys.argv) > 1:
         print(enrich_lead_cascade(int(sys.argv[1])))

@@ -6,7 +6,7 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
   ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2, Megaphone,
-  FileText, Layout, Cpu, BookOpen, LayoutGrid
+  FileText, Layout, Cpu, BookOpen, LayoutGrid, MessageSquare
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -24,6 +24,7 @@ const navItems = [
   { name: "Templates", href: "/templates", icon: Layout, adminOnly: true },
   { name: "Automation", href: "/automation", icon: Cpu, adminOnly: true },
   { name: "Kanban", href: "/leads/kanban", icon: LayoutGrid },
+  { name: "Feedback", href: "/feedback", icon: MessageSquare },
   { name: "Objections", href: "/objections", icon: BookOpen },
   { name: "Admin", href: "/admin", icon: ShieldCheck, adminOnly: true },
   { name: "Profile", href: "/profile", icon: UserCog },

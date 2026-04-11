@@ -6,13 +6,14 @@ from typing import Optional
 from fastapi import HTTPException
 from sqlmodel import Session, select
 from twilio.rest import Client as TwilioClient
+from twilio.base.exceptions import TwilioRestException
 
 from credentials_service import get_company_credential
 from models.models import CallTask, Company, Interaction, Lead, OptOut, User, utc_now
 from services.outbound_call_service import create_call_task, get_call_task_or_404, start_call_task
 from utils.phone import normalize_phone
 from utils.url_utils import normalize_base_url
-from services.tracking_service import is_lead_opted_out
+from services.opt_out_service import is_lead_opted_out
 
 def is_lead_callable(session: Session, company_id: int, lead_id: int) -> tuple[bool, str | None]:
     lead = session.exec(
@@ -143,8 +144,7 @@ def get_next_queued_task(session: Session, company_id: int) -> CallTask | None:
 
 
 def _resolve_callback_base(session: Session, company_id: int) -> str:
-    # DOMAIN env always wins — it is the ngrok/public URL Twilio can reach.
-    # company.website / company.domain are branding fields, not webhook endpoints.
+    # DOMAIN env always wins — it is the ngrok/public URL Twilio can reach. company.website / company.domain are branding fields, not webhook endpoints.
     if env_domain := os.getenv("DOMAIN"):
         return normalize_base_url(env_domain, "https://localhost:8000")
     company = session.get(Company, company_id)
@@ -171,8 +171,10 @@ def initiate_outbound_call(
 
     normalized_to = normalize_phone(to)
 
-    # Pre-call enrichment via LangGraph researcher agent (fire-and-forget)
-    if lead_id:
+    # Pre-call enrichment via LangGraph researcher agent (fire-and-forget).
+    # Can be disabled for low-latency call paths.
+    enable_precall_researcher = os.getenv("ENABLE_PRECALL_RESEARCHER", "1").lower() in {"1", "true", "yes", "on"}
+    if lead_id and enable_precall_researcher:
         try:
             import asyncio
             from agents.langgraph_orchestrator import run_researcher
@@ -247,17 +249,35 @@ def initiate_outbound_call(
         f"?interaction_id={interaction.id}"
     )
     client = TwilioClient(account_sid, auth_token)
-    call = client.calls.create(
-        to=normalized_to,
-        from_=from_number,
-        url=call_url,
-        status_callback=status_callback,
-        status_callback_event=["initiated", "ringing", "in-progress", "completed", "busy", "no-answer", "failed", "canceled"],
-        status_callback_method="POST",
-        record=True,
-        recording_status_callback=recording_callback,
-        recording_status_callback_method="POST",
-    )
+    try:
+        call = client.calls.create(
+            to=normalized_to,
+            from_=from_number,
+            url=call_url,
+            status_callback=status_callback,
+            status_callback_event=["initiated", "ringing", "in-progress", "completed", "busy", "no-answer", "failed", "canceled"],
+            status_callback_method="POST",
+            record=True,
+            recording_status_callback=recording_callback,
+            recording_status_callback_method="POST",
+        )
+    except TwilioRestException as exc:
+        # 20003 = auth failed (wrong credentials or trial account balance exhausted)
+        # 20005 = account suspended
+        # 21211/21214/21604/21210 = invalid or unreachable phone number
+        if exc.code in (20003, 20005):
+            raise HTTPException(
+                status_code=402,
+                detail=f"Twilio account error ({exc.code}): {exc.msg}. Check credentials or account balance.",
+            )
+        if exc.code in (21210, 21211, 21214, 21604):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid phone number '{normalized_to}': {exc.msg}",
+            )
+        raise HTTPException(status_code=503, detail=f"Twilio error {exc.code}: {exc.msg}")
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Failed to initiate call: {exc}")
 
     interaction.metadata_json = {
         **(interaction.metadata_json or {}),

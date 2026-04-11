@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Award, Brain, Loader2, RefreshCw, TrendingUp, Zap } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
@@ -65,6 +65,7 @@ export default function SalesCoachPanel({ interactionId, token, onSessionTimeout
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [showSuggestion, setShowSuggestion] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const fetchScore = useCallback(
     async (quiet = false) => {
@@ -77,7 +78,11 @@ export default function SalesCoachPanel({ interactionId, token, onSessionTimeout
         if (res.status === 401) { onSessionTimeout?.(); return; }
         if (!res.ok) return;
         const data = await res.json();
-        if (data) setScore(data); // null means not scored yet
+        if (data) {
+          setScore(data);
+          // Score arrived — stop polling
+          if (pollRef.current) { clearTimeout(pollRef.current); pollRef.current = null; }
+        }
       } finally {
         setLoading(false);
         setRefreshing(false);
@@ -86,7 +91,19 @@ export default function SalesCoachPanel({ interactionId, token, onSessionTimeout
     [interactionId, token, onSessionTimeout]
   );
 
-  useEffect(() => { fetchScore(); }, [fetchScore]);
+  useEffect(() => {
+    fetchScore();
+    // If no score yet, poll every 15s for up to 3 minutes (worker may still be processing)
+    const start = Date.now();
+    const poll = () => {
+      if (score) return;
+      if (Date.now() - start > 3 * 60 * 1000) return;
+      pollRef.current = setTimeout(() => { fetchScore(true); poll(); }, 15_000);
+    };
+    poll();
+    return () => { if (pollRef.current) clearTimeout(pollRef.current); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactionId]);
 
   if (loading) {
     return (
@@ -96,7 +113,23 @@ export default function SalesCoachPanel({ interactionId, token, onSessionTimeout
     );
   }
 
-  if (!score) return null;
+  if (!score) {
+    return (
+      <div className="flex items-center justify-between rounded-xl border border-dashed border-slate-300 dark:border-slate-700 px-4 py-3 text-sm text-slate-500 dark:text-slate-400">
+        <div className="flex items-center gap-2">
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
+          <span>Score being generated — usually ready within a minute...</span>
+        </div>
+        <button
+          onClick={() => fetchScore(true)}
+          disabled={refreshing}
+          className="text-xs text-violet-500 hover:underline disabled:opacity-50"
+        >
+          {refreshing ? "Checking..." : "Check now"}
+        </button>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-2xl glass border border-violet-200/60 dark:border-violet-500/20 overflow-hidden">

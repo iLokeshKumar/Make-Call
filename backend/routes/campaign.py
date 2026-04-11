@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from auth import PermissionChecker
@@ -35,10 +35,12 @@ async def create_campaign_route(
 
 @router.get("")
 async def list_campaigns_route(
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("campaign.read")),
 ):
-    return list_campaigns(session, current_user.company_id)
+    return list_campaigns(session, current_user.company_id, limit=limit, offset=offset)
 
 
 @router.post("/{campaign_id}/steps")
@@ -91,10 +93,12 @@ async def pause_campaign_route(
 @router.get("/{campaign_id}/recipients")
 async def list_campaign_recipients_route(
     campaign_id: int,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("campaign.read")),
 ):
-    return list_campaign_recipients(session, current_user.company_id, campaign_id)
+    return list_campaign_recipients(session, current_user.company_id, campaign_id, limit=limit, offset=offset)
 
 @router.post("/recipients/{recipient_id}/process-call-step")
 async def process_campaign_call_step_route(

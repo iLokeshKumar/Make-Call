@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from typing import Any
 
@@ -336,13 +337,17 @@ async def execute_mcp_tool(
     )
 
     try:
-        if session is not None:
-            effective_user_id = user_id or getattr(user, "id", None)
-            return await _execute_with_session(session, tool_name, arguments, effective_user_id)
+        async with asyncio.timeout(30):
+            if session is not None:
+                effective_user_id = user_id or getattr(user, "id", None)
+                return await _execute_with_session(session, tool_name, arguments, effective_user_id)
 
-        with Session(engine) as owned_session:
-            effective_user_id = user_id or getattr(user, "id", None)
-            return await _execute_with_session(owned_session, tool_name, arguments, effective_user_id)
+            with Session(engine) as owned_session:
+                effective_user_id = user_id or getattr(user, "id", None)
+                return await _execute_with_session(owned_session, tool_name, arguments, effective_user_id)
+    except asyncio.TimeoutError:
+        logger.error("[execute_mcp_tool] Tool '%s' timed out after 30s", tool_name)
+        return {"error": f"Tool '{tool_name}' timed out — please try again.", "tool": tool_name}
     except Exception as exc:
         logger.error("[execute_mcp_tool] Tool execution failed for %s: %s", tool_name, exc, exc_info=True)
         return {

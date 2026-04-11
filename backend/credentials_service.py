@@ -87,7 +87,18 @@ def get_company_credential(
     value = get_company_setting_value(session, company_id, key)
     if value:
         return value
-    return os.getenv(key) if env_fallback else None
+    if not env_fallback:
+        return None
+    # Check primary key first, then known aliases (e.g. SMTP_SERVER ↔ SMTP_HOST)
+    _ALIASES: dict[str, list[str]] = {
+        "SMTP_HOST": ["SMTP_SERVER"],
+        "SMTP_SERVER": ["SMTP_HOST"],
+    }
+    for k in [key] + _ALIASES.get(key, []):
+        v = os.getenv(k)
+        if v:
+            return v
+    return None
 
 
 def get_credential(

@@ -1,12 +1,14 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { Download, Loader2, Plus, Trash2, Bell, Activity, Clock, BarChart2 } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
+import {
+  Activity, BarChart2, Bell, Brain, Clock, Download, Loader2,
+  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2,
+} from "lucide-react";
+import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
-
-// ── Types ──────────────────────────────────────────────────────────────────────
 
 type EngagementSummary = {
   event_counts: Record<string, number>;
@@ -14,516 +16,512 @@ type EngagementSummary = {
   event_timeline: { day: string; event_type: string; count: number }[];
   quote_status_counts: Record<string, number>;
   call_task_status_counts: Record<string, number>;
-  campaign_conversion_trends: {
-    campaign_id: number;
-    name: string;
-    responded: number;
-    sent: number;
-    conversion_rate: number;
-  }[];
+  campaign_conversion_trends: { campaign_id: number; name: string; responded: number; sent: number; conversion_rate: number }[];
   campaign_funnel: { status: string; count: number; percent: number }[];
   meta: Record<string, unknown>;
 };
 
-type EngineRow = {
-  engine: string;
-  rows: number;
-  stt_avg: number;
-  llm_avg: number;
-  tts_avg: number;
-  total_avg: number;
-  total_min: number;
-  total_max: number;
-};
-
+type EngineRow  = { engine: string; rows: number; stt_avg: number; llm_avg: number; tts_avg: number; total_avg: number; total_min: number; total_max: number };
+type CallRow    = { id: number; engine: string; stt_model: string; llm_model: string; tts_model: string; turns: number; stt_avg: number; llm_avg: number; tts_avg: number; total_avg: number; total_min: number; total_max: number };
+type ModelRow   = { model: string; provider: string; rows: number; avg: number; min: number; max: number };
+type TrendPoint = { day: string; engine: string; avg_ms: number; turns: number };
 type LatencyData = {
   engines: EngineRow[];
-  trend: { day: string; engine: string; avg_ms: number; turns: number }[];
+  interactions: CallRow[];
+  stt_models: ModelRow[];
+  llm_models: ModelRow[];
+  tts_models: ModelRow[];
+  trend: TrendPoint[];
   meta: { days: number; total_turns: number; total_calls: number };
 };
 
-type Alert = {
-  id: number;
-  metric: string;
-  threshold: number;
-  direction: string;
-  channel: string;
-  enabled: boolean;
-  last_triggered_at: string | null;
+type Alert = { id: number; metric: string; threshold: number; direction: string; channel: string; enabled: boolean; last_triggered_at: string | null };
+
+const fms = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`;
+const fmtDate = (v: string | null | undefined) => v ? new Date(v).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—";
+
+const ENGINE_PALETTE: Record<string, string> = {
+  "deepgram-cerebras-cartesia":  "#34d399",
+  "deepgram-mistral-cartesia":   "#60a5fa",
+  "deepgram-mistral-deepgram":   "#818cf8",
+  "sarvam-cerebras-sarvam":      "#fbbf24",
+  "cartesia-mistral-cartesia":   "#f87171",
+  "sarvam-mistral-sarvam":       "#fb923c",
+  "deepgram-openrouter-cartesia":"#a78bfa",
+  "cartesia-openrouter-cartesia":"#e879f9",
 };
-
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function fmtMs(v: number | null | undefined) {
-  if (v == null) return "—";
-  return `${Math.round(v)} ms`;
-}
-
-function fmtDate(v: string | null | undefined) {
-  if (!v) return "—";
-  return new Date(v).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" });
-}
-
-function conversionColor(rate: number) {
-  if (rate >= 30) return "text-emerald-600 dark:text-emerald-400";
-  if (rate >= 10) return "text-amber-600 dark:text-amber-400";
-  return "text-red-500 dark:text-red-400";
-}
+const engineColor = (e: string) => ENGINE_PALETTE[e] ?? "#94a3b8";
 
 const CALL_STATUS_COLORS: Record<string, string> = {
-  completed: "bg-emerald-500",
-  failed: "bg-red-500",
-  queued: "bg-blue-500",
-  pending: "bg-slate-400",
+  completed: "bg-emerald-500", failed: "bg-red-500", queued: "bg-blue-500", pending: "bg-slate-400",
 };
 
-const DAYS_OPTIONS = [7, 14, 30, 90];
-const TABS = ["Overview", "Latency", "Alerts"] as const;
-type Tab = (typeof TABS)[number];
+function Pulse() {
+  return (
+    <span className="relative inline-flex h-2 w-2">
+      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
+      <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500" />
+    </span>
+  );
+}
 
-// ── Component ─────────────────────────────────────────────────────────────────
+function KpiCard({ label, value, sub, color, icon: Icon }: { label: string; value: string; sub?: string; color: string; icon: React.ElementType }) {
+  return (
+    <div className="glass rounded-2xl p-5 border border-white/10" style={{ borderLeftColor: color, borderLeftWidth: 3 }}>
+      <div className="flex items-start justify-between">
+        <div>
+          <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-widest">{label}</p>
+          <p className="mt-2 text-2xl font-bold leading-none" style={{ color }}>{value}</p>
+          {sub && <p className="text-[10px] text-slate-500 mt-1 truncate max-w-[140px]">{sub}</p>}
+        </div>
+        <div className="p-2 rounded-xl" style={{ background: `${color}18` }}>
+          <Icon className="h-5 w-5" style={{ color }} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StackBar({ stt, llm, tts, total }: { stt: number; llm: number; tts: number; total: number }) {
+  if (!total) return null;
+  const pct = (v: number) => `${Math.max((v / total) * 100, 2).toFixed(1)}%`;
+  return (
+    <div className="mt-3">
+      <div className="flex h-[5px] rounded-full overflow-hidden gap-[2px]">
+        <div style={{ width: pct(stt), background: "#818cf8" }} />
+        <div style={{ width: pct(llm), background: "#34d399" }} />
+        <div style={{ width: pct(tts), background: "#fb923c" }} />
+      </div>
+      <div className="flex gap-4 mt-1.5">
+        {([["STT", "#818cf8", stt], ["LLM", "#34d399", llm], ["TTS", "#fb923c", tts]] as const).map(([k, c, v]) => (
+          <span key={k} className="text-[10px] font-mono" style={{ color: c }}>
+            {k} {fms(v as number)} <span className="opacity-40">({((v as number) / total * 100).toFixed(0)}%)</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function HorizBar({ value, max, color }: { value: number; max: number; color: string }) {
+  return (
+    <div className="flex items-center gap-2 mt-1">
+      <div className="flex-1 h-[4px] rounded-full bg-white/10 overflow-hidden">
+        <div className="h-full rounded-full transition-all duration-700"
+          style={{ width: `${Math.max((value / (max || 1)) * 100, 2)}%`, background: color }} />
+      </div>
+      <span className="font-mono text-[10px] w-14 text-right" style={{ color }}>{fms(value)}</span>
+    </div>
+  );
+}
+
+function ModelCard({ title, icon: Icon, accent, models }: { title: string; icon: React.ElementType; accent: string; models: ModelRow[] }) {
+  const maxVal = models.at(-1)?.avg || 1;
+  return (
+    <div className="glass rounded-2xl border border-white/10 p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <Icon className="h-4 w-4" style={{ color: accent }} />
+        <p className="text-xs uppercase tracking-widest font-semibold" style={{ color: accent }}>{title}</p>
+      </div>
+      {models.length === 0 && <p className="text-slate-600 text-xs">No data</p>}
+      {models.map((m, i) => {
+        const col = i === 0 ? "#34d399" : i === 1 ? "#fbbf24" : "#f87171";
+        return (
+          <div key={m.model} className="mb-4 pb-4 border-b border-white/5 last:border-0 last:pb-0">
+            <div className="flex justify-between items-start">
+              <div>
+                <p className="text-[10px]" style={{ color: col }}>#{i + 1}</p>
+                <p className="font-semibold text-slate-200 text-sm mt-0.5 truncate max-w-[140px]">{m.model}</p>
+                <p className="text-[10px] text-slate-500">{m.provider} · {m.rows} turns</p>
+              </div>
+              <p className="text-xl font-black" style={{ color: col }}>{fms(m.avg)}</p>
+            </div>
+            <HorizBar value={m.avg} max={maxVal} color={col} />
+            <p className="text-[10px] text-slate-600 mt-1">min {fms(m.min)} · max {fms(m.max)}</p>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function DoDSummary({ trend }: { trend: TrendPoint[] }) {
+  const map: Record<string, Record<string, number>> = {};
+  for (const t of trend) {
+    if (!map[t.engine]) map[t.engine] = {};
+    map[t.engine][t.day] = t.avg_ms;
+  }
+  const days = [...new Set(trend.map(t => t.day))].sort();
+  if (days.length < 2) return null;
+  const items: { engine: string; from: number; to: number; pct: number }[] = [];
+  for (const e of Object.keys(map)) {
+    const latest = days.slice(-2);
+    const from = map[e][latest[0]]; const to = map[e][latest[1]];
+    if (from && to) items.push({ engine: e, from, to, pct: ((to - from) / from) * 100 });
+  }
+  if (!items.length) return null;
+  items.sort((a, b) => a.pct - b.pct);
+  return (
+    <div>
+      <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Latest day-over-day · {days.at(-2)} → {days.at(-1)}</p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        {items.map(item => {
+          const improved = item.pct < 0;
+          const col = improved ? "#34d399" : "#f87171";
+          return (
+            <div key={item.engine} className="glass rounded-xl px-4 py-3 border border-white/10"
+              style={{ borderLeftColor: engineColor(item.engine), borderLeftWidth: 3 }}>
+              <p className="text-[10px] font-mono text-slate-400">{item.engine}</p>
+              <div className="flex items-center justify-between mt-1">
+                <span className="text-sm text-slate-400">{fms(item.from)} → {fms(item.to)}</span>
+                <span className="font-bold text-sm flex items-center gap-1" style={{ color: col }}>
+                  {improved ? "▼" : "▲"} {Math.abs(item.pct).toFixed(1)}%
+                  {improved ? <TrendingDown className="h-3.5 w-3.5" /> : <TrendingUp className="h-3.5 w-3.5" />}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+const MAIN_TABS = ["Overview", "Latency", "Alerts"] as const;
+type MainTab = typeof MAIN_TABS[number];
+type LatencySubTab = "engines" | "calls" | "models" | "trend";
 
 export default function AnalyticsPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { token, user, sessionTimeout } = useAuth();
+  const isSalesRep = user?.role === "sales_representative";
 
-  const [activeTab, setActiveTab] = useState<Tab>("Overview");
-  const [days, setDays] = useState(30);
-  const [latencyDays, setLatencyDays] = useState(7);
+  // Main tab
+  const [activeTab, setActiveTab]   = useState<MainTab>("Overview");
 
-  // Data
-  const [summary, setSummary] = useState<EngagementSummary | null>(null);
-  const [latency, setLatency] = useState<LatencyData | null>(null);
-  const [alerts, setAlerts] = useState<Alert[]>([]);
-
-  // Loading states
+  // Overview
+  const [days, setDays]             = useState(30);
+  const [customFrom, setCustomFrom] = useState("");
+  const [customTo, setCustomTo]     = useState("");
+  const [useCustom, setUseCustom]   = useState(false);
+  const [summary, setSummary]       = useState<EngagementSummary | null>(null);
   const [summaryLoading, setSummaryLoading] = useState(false);
-  const [latencyLoading, setLatencyLoading] = useState(false);
-  const [alertsLoading, setAlertsLoading] = useState(false);
-  const [exportLoading, setExportLoading] = useState(false);
-  const [quoteExportLoading, setQuoteExportLoading] = useState(false);
 
-  // Alert form
-  const [newAlertMetric, setNewAlertMetric] = useState("");
+  // Latency
+  const [latencyDays, setLatencyDays]   = useState(7);
+  const [scope, setScope]               = useState<"all" | "mine">(isSalesRep ? "mine" : "all");
+  const [latency, setLatency]           = useState<LatencyData | null>(null);
+  const [latencyLoading, setLatencyLoading] = useState(false);
+  const [latencyRefreshing, setLatencyRefreshing] = useState(false);
+  const [latencySubTab, setLatencySubTab] = useState<LatencySubTab>("engines");
+  const [expandedCall, setExpandedCall] = useState<number | null>(null);
+  const [lastAt, setLastAt]             = useState(new Date());
+
+  // Alerts
+  const [alerts, setAlerts]         = useState<Alert[]>([]);
+  const [alertsLoading, setAlertsLoading] = useState(false);
+  const [newAlertMetric, setNewAlertMetric]       = useState("");
   const [newAlertThreshold, setNewAlertThreshold] = useState<number>(0);
   const [newAlertDirection, setNewAlertDirection] = useState("gte");
-  const [newAlertChannel, setNewAlertChannel] = useState("email");
+  const [newAlertChannel, setNewAlertChannel]     = useState("email");
   const [alertSaving, setAlertSaving] = useState(false);
 
-  // Toast
-  const [toast, setToast] = useState<string | null>(null);
-  const [toastError, setToastError] = useState(false);
+  // Exports
+  const [exportLoading, setExportLoading]           = useState(false);
+  const [quoteExportLoading, setQuoteExportLoading] = useState(false);
 
+  // Toast
+  const [toast, setToast]         = useState<string | null>(null);
+  const [toastError, setToastError] = useState(false);
   function showToast(msg: string, error = false) {
-    setToast(msg);
-    setToastError(error);
-    setTimeout(() => setToast(null), 3500);
+    setToast(msg); setToastError(error); setTimeout(() => setToast(null), 3500);
   }
 
-  const authHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const authH = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
 
-  // ── Fetch functions ──────────────────────────────────────────────────────────
 
-  const fetchSummary = useCallback(async (d: number) => {
+  const fetchSummary = useCallback(async (d: number, from?: string, to?: string) => {
     if (!token) return;
     setSummaryLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/engagement-summary?days=${d}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      let url: string;
+      if (from && to) {
+        url = `${API_BASE}/analytics/engagement-summary?date_from=${from}&date_to=${to}`;
+      } else {
+        url = `${API_BASE}/analytics/engagement-summary?days=${d}`;
+      }
+      const res = await fetch(url, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error("Failed to load engagement summary");
-      setSummary(await res.json());
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Failed to load summary", true);
-    } finally {
-      setSummaryLoading(false);
-    }
-  }, [token, sessionTimeout]);
+      if (res.ok) setSummary(await res.json());
+    } catch { /* ignore */ } finally { setSummaryLoading(false); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
-  const fetchLatency = useCallback(async (d: number) => {
+  const fetchLatency = useCallback(async (silent = false) => {
     if (!token) return;
-    setLatencyLoading(true);
+    silent ? setLatencyRefreshing(true) : setLatencyLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/latency?days=${d}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(`${API_BASE}/analytics/latency?days=${latencyDays}&scope=${scope}`, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error("Failed to load latency data");
-      setLatency(await res.json());
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Failed to load latency", true);
-    } finally {
-      setLatencyLoading(false);
-    }
-  }, [token, sessionTimeout]);
+      if (res.ok) { setLatency(await res.json()); setLastAt(new Date()); }
+    } catch { /* ignore */ } finally { setLatencyLoading(false); setLatencyRefreshing(false); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, latencyDays, scope]);
 
   const fetchAlerts = useCallback(async () => {
     if (!token) return;
     setAlertsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/alerts`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await fetch(`${API_BASE}/analytics/alerts`, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error("Failed to load alerts");
-      setAlerts(await res.json());
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Failed to load alerts", true);
-    } finally {
-      setAlertsLoading(false);
-    }
-  }, [token, sessionTimeout]);
+      if (res.ok) setAlerts(await res.json());
+    } catch { /* ignore */ } finally { setAlertsLoading(false); }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token]);
 
-  useEffect(() => { fetchSummary(days); }, [fetchSummary, days]);
-  useEffect(() => { fetchLatency(latencyDays); }, [fetchLatency, latencyDays]);
+  useEffect(() => {
+    if (useCustom && customFrom && customTo) {
+      fetchSummary(0, customFrom, customTo);
+    } else if (!useCustom) {
+      fetchSummary(days);
+    }
+  }, [fetchSummary, days, useCustom, customFrom, customTo]);
+  useEffect(() => { fetchLatency(); }, [fetchLatency]);
+  // Auto-refresh latency every 30 s when on that tab
+  useEffect(() => {
+    if (activeTab !== "Latency") return;
+    const id = setInterval(() => fetchLatency(true), 30_000);
+    return () => clearInterval(id);
+  }, [activeTab, fetchLatency]);
   useEffect(() => { fetchAlerts(); }, [fetchAlerts]);
-
-  // ── Export Analytics CSV ─────────────────────────────────────────────────────
-
-  function handleExportAnalyticsCSV() {
-    const hasEvents = summary && Object.values(summary.event_counts).some((v) => v > 0);
-    const hasLatency = latency && latency.engines.length > 0;
-    if (!hasEvents && !hasLatency) { showToast("No analytics data available to export", true); return; }
-    setExportLoading(true);
-    try {
-      const rows: string[][] = [];
-      const date = new Date().toLocaleDateString("en-IN");
-
-      rows.push([`Analytics Export — ${date}`, "", "", ""]);
-      rows.push([]);
-
-      if (summary) {
-        rows.push(["=== EVENT COUNTS ==="]);
-        rows.push(["Event Type", "Count"]);
-        for (const [k, v] of Object.entries(summary.event_counts)) rows.push([k, String(v)]);
-        rows.push([]);
-
-        rows.push(["=== CHANNEL BREAKDOWN ==="]);
-        rows.push(["Channel", "Count"]);
-        for (const [k, v] of Object.entries(summary.channel_counts)) rows.push([k, String(v)]);
-        rows.push([]);
-
-        rows.push(["=== CALL TASK STATUS ==="]);
-        rows.push(["Status", "Count"]);
-        for (const [k, v] of Object.entries(summary.call_task_status_counts)) rows.push([k, String(v)]);
-        rows.push([]);
-
-        rows.push(["=== QUOTE STATUS ==="]);
-        rows.push(["Status", "Count"]);
-        for (const [k, v] of Object.entries(summary.quote_status_counts)) rows.push([k, String(v)]);
-        rows.push([]);
-
-        rows.push(["=== CAMPAIGN CONVERSION ==="]);
-        rows.push(["Campaign", "Sent", "Responded", "Conversion Rate %"]);
-        for (const c of summary.campaign_conversion_trends)
-          rows.push([c.name, String(c.sent), String(c.responded), c.conversion_rate.toFixed(1)]);
-        rows.push([]);
-
-        rows.push(["=== CAMPAIGN FUNNEL ==="]);
-        rows.push(["Stage", "Count", "Percent %"]);
-        for (const f of summary.campaign_funnel)
-          rows.push([f.status, String(f.count), f.percent.toFixed(1)]);
-        rows.push([]);
-
-        rows.push(["=== EVENT TIMELINE ==="]);
-        rows.push(["Day", "Event Type", "Count"]);
-        for (const t of summary.event_timeline) rows.push([t.day, t.event_type, String(t.count)]);
-        rows.push([]);
-      }
-
-      if (latency) {
-        rows.push(["=== LATENCY BY ENGINE ==="]);
-        rows.push(["Engine", "Turns", "Avg STT (ms)", "Avg LLM (ms)", "Avg TTS (ms)", "Avg Total (ms)", "Min (ms)", "Max (ms)"]);
-        for (const e of latency.engines)
-          rows.push([e.engine, String(e.rows), String(Math.round(e.stt_avg)), String(Math.round(e.llm_avg)), String(Math.round(e.tts_avg)), String(Math.round(e.total_avg)), String(Math.round(e.total_min)), String(Math.round(e.total_max))]);
-        rows.push([]);
-
-        rows.push(["=== LATENCY TREND ==="]);
-        rows.push(["Day", "Engine", "Avg (ms)", "Turns"]);
-        for (const t of latency.trend) rows.push([t.day, t.engine, String(Math.round(t.avg_ms)), String(t.turns)]);
-      }
-
-      const csv = rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
-      const blob = new Blob([csv], { type: "text/csv" });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `analytics_export_${new Date().toISOString().split("T")[0]}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast("Analytics CSV downloaded");
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Export failed", true);
-    } finally {
-      setExportLoading(false);
-    }
-  }
-
-  // ── Export Quote CSV ─────────────────────────────────────────────────────────
-
-  async function handleExportQuoteCSV() {
-    if (!token) return;
-    const totalQuotes = summary
-      ? Object.values(summary.quote_status_counts).reduce((s, v) => s + v, 0)
-      : 0;
-    if (totalQuotes === 0) { showToast("No quote data available to export", true); return; }
-    setQuoteExportLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/analytics/quote/export`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error("Export failed");
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = `quotes_export_${new Date().toISOString().split("T")[0]}.csv`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-      showToast("Quotes CSV downloaded");
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Export failed", true);
-    } finally {
-      setQuoteExportLoading(false);
-    }
-  }
-
-  // ── Alert actions ────────────────────────────────────────────────────────────
 
   async function handleCreateAlert() {
     if (!newAlertMetric.trim()) { showToast("Metric is required", true); return; }
     setAlertSaving(true);
     try {
       const res = await fetch(`${API_BASE}/analytics/alerts`, {
-        method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({
-          metric: newAlertMetric.trim(),
-          threshold: newAlertThreshold,
-          direction: newAlertDirection,
-          channel: newAlertChannel,
-        }),
+        method: "POST", headers: authH,
+        body: JSON.stringify({ metric: newAlertMetric.trim(), threshold: newAlertThreshold, direction: newAlertDirection, channel: newAlertChannel }),
       });
       if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.detail || "Failed to create alert");
-      }
-      showToast("Alert created");
-      setNewAlertMetric("");
-      setNewAlertThreshold(0);
-      fetchAlerts();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Failed to create alert", true);
-    } finally {
-      setAlertSaving(false);
-    }
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Failed");
+      showToast("Alert created"); setNewAlertMetric(""); setNewAlertThreshold(0); fetchAlerts();
+    } catch (e) { showToast(e instanceof Error ? e.message : "Failed", true); }
+    finally { setAlertSaving(false); }
   }
 
-  async function handleToggleAlert(alert: Alert) {
-    const action = alert.enabled ? "disable" : "enable";
-    try {
-      const res = await fetch(`${API_BASE}/analytics/alerts/${alert.id}/${action}`, {
-        method: "PATCH",
-        headers: authHeaders,
-      });
-      if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error(`Failed to ${action} alert`);
-      showToast(`Alert ${action}d`);
-      fetchAlerts();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Action failed", true);
-    }
+  async function handleToggleAlert(a: Alert) {
+    const action = a.enabled ? "disable" : "enable";
+    const res = await fetch(`${API_BASE}/analytics/alerts/${a.id}/${action}`, { method: "PATCH", headers: authH });
+    if (res.ok) { showToast(`Alert ${action}d`); fetchAlerts(); }
   }
 
   async function handleDeleteAlert(id: number) {
-    try {
-      const res = await fetch(`${API_BASE}/analytics/alerts/${id}`, {
-        method: "DELETE",
-        headers: authHeaders,
-      });
-      if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error("Failed to delete alert");
-      showToast("Alert deleted");
-      fetchAlerts();
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Delete failed", true);
-    }
+    const res = await fetch(`${API_BASE}/analytics/alerts/${id}`, { method: "DELETE", headers: authH });
+    if (res.ok) { showToast("Alert deleted"); fetchAlerts(); }
   }
 
-  // ── Derived stats ────────────────────────────────────────────────────────────
+  function handleExportCSV() {
+    setExportLoading(true);
+    try {
+      const rows: string[][] = [];
+      if (summary) {
+        rows.push(["Event Type", "Count"]);
+        for (const [k, v] of Object.entries(summary.event_counts)) rows.push([k, String(v)]);
+        rows.push([]);
+        rows.push(["Channel", "Count"]);
+        for (const [k, v] of Object.entries(summary.channel_counts)) rows.push([k, String(v)]);
+        rows.push([]);
+      }
+      if (latency) {
+        rows.push(["Engine", "Turns", "Avg STT", "Avg LLM", "Avg TTS", "Avg Total", "Min", "Max"]);
+        for (const e of latency.engines)
+          rows.push([e.engine, String(e.rows), fms(e.stt_avg), fms(e.llm_avg), fms(e.tts_avg), fms(e.total_avg), fms(e.total_min), fms(e.total_max)]);
+      }
+      const csv = rows.map(r => r.map(c => `"${c.replace(/"/g, '""')}"`).join(",")).join("\n");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+      a.download = `analytics_${new Date().toISOString().split("T")[0]}.csv`;
+      a.click();
+      showToast("CSV downloaded");
+    } finally { setExportLoading(false); }
+  }
 
-  const totalEvents = summary
-    ? Object.values(summary.event_counts).reduce((s, v) => s + v, 0)
-    : 0;
+  async function handleExportQuoteCSV() {
+    setQuoteExportLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/analytics/quote/export`, { headers: authH });
+      if (!res.ok) throw new Error("Export failed");
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(await res.blob());
+      a.download = `quotes_${new Date().toISOString().split("T")[0]}.csv`;
+      a.click();
+      showToast("Quotes CSV downloaded");
+    } catch (e) { showToast(e instanceof Error ? e.message : "Failed", true); }
+    finally { setQuoteExportLoading(false); }
+  }
 
-  const emailOpens = summary
-    ? (summary.event_counts["email_open"] ?? summary.event_counts["open"] ?? 0)
-    : 0;
-
-  const linkClicks = summary
-    ? (summary.event_counts["email_click"] ?? summary.event_counts["click"] ?? 0)
-    : 0;
-
-  const replies = summary
-    ? (summary.event_counts["reply"] ?? 0) + (summary.event_counts["whatsapp_reply"] ?? 0)
-    : 0;
-
-  const callStatusTotal = summary
-    ? Object.values(summary.call_task_status_counts).reduce((s, v) => s + v, 0)
-    : 0;
-
-  const sortedEngines = latency
-    ? [...latency.engines].sort((a, b) => a.total_avg - b.total_avg)
-    : [];
-
-  const latencyTrendMax = latency && latency.trend.length > 0
-    ? Math.max(...latency.trend.map((t) => t.avg_ms), 1)
-    : 1;
-
-  const totalRows = sortedEngines.reduce((s, e) => s + e.rows, 0);
-  const weightedAvg = (field: keyof EngineRow) =>
-    totalRows > 0
-      ? sortedEngines.reduce((s, e) => s + (e[field] as number) * e.rows, 0) / totalRows
-      : null;
-
-  // ── Render ───────────────────────────────────────────────────────────────────
+  const totalEvents    = summary ? Object.values(summary.event_counts).reduce((s, v) => s + v, 0) : 0;
+  const emailOpens     = summary ? (summary.event_counts["email_open"] ?? summary.event_counts["open"] ?? 0) : 0;
+  const linkClicks     = summary ? (summary.event_counts["email_click"] ?? summary.event_counts["click"] ?? 0) : 0;
+  const replies        = summary ? (summary.event_counts["reply"] ?? 0) + (summary.event_counts["whatsapp_reply"] ?? 0) : 0;
+  const best           = latency?.engines[0];
+  const worst          = latency?.engines.at(-1);
 
   return (
-    <div className="space-y-6 pb-8">
+    <div className="space-y-6 pb-12">
+
       {/* Header */}
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex items-start justify-between flex-wrap gap-4">
         <div>
-          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300">
-            Insights
-          </p>
-          <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-white">
-            <span className="gradient-text">Analytics</span>
-          </h1>
-          <p className="mt-2 text-slate-600 dark:text-slate-400">
-            Track engagement, latency, and alert thresholds across your platform.
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-violet-400">Insights</p>
+          <h1 className="text-4xl font-bold tracking-tight"><span className="gradient-text">Analytics</span></h1>
+          <p className="mt-1.5 text-slate-500 text-sm font-medium flex items-center gap-2">
+            <Pulse /> Live · {lastAt.toLocaleTimeString()}
           </p>
         </div>
-        <button
-          onClick={handleExportAnalyticsCSV}
-          disabled={exportLoading || (!summary && !latency)}
-          className="inline-flex shrink-0 items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-violet-300 hover:text-violet-700 disabled:opacity-50 dark:border-white/10 dark:text-slate-200 dark:hover:border-violet-500/40 dark:hover:text-violet-300"
-        >
-          {exportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
-          Export Analytics CSV
-        </button>
+        <div className="flex items-center gap-2">
+          <button onClick={handleExportCSV} disabled={exportLoading || (!summary && !latency)}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white/5 text-sm text-slate-400 hover:text-white transition-colors disabled:opacity-40">
+            {exportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            Export CSV
+          </button>
+          <button onClick={handleExportQuoteCSV} disabled={quoteExportLoading}
+            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white/5 text-sm text-slate-400 hover:text-white transition-colors disabled:opacity-40">
+            {quoteExportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+            Quotes CSV
+          </button>
+        </div>
       </div>
 
       {/* Toast */}
       {toast && (
-        <div
-          className={`rounded-xl border px-4 py-3 text-sm ${
-            toastError
-              ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
-              : "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200"
-          }`}
-        >
+        <div className={clsx("rounded-xl border px-4 py-3 text-sm",
+          toastError ? "border-red-500/30 bg-red-500/10 text-red-300" : "border-violet-500/30 bg-violet-500/10 text-violet-200")}>
           {toast}
         </div>
       )}
 
-      {/* Tab bar */}
-      <div className="flex gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800/50 w-fit">
-        {TABS.map((tab) => (
-          <button
-            key={tab}
-            onClick={() => setActiveTab(tab)}
-            className={`flex items-center gap-2 rounded-lg px-4 py-2 text-sm font-medium transition-all ${
-              activeTab === tab
-                ? "bg-white text-slate-900 shadow-sm dark:bg-slate-700 dark:text-white"
-                : "text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200"
-            }`}
-          >
-            {tab === "Overview" && <BarChart2 className="h-3.5 w-3.5" />}
-            {tab === "Latency" && <Clock className="h-3.5 w-3.5" />}
-            {tab === "Alerts" && <Bell className="h-3.5 w-3.5" />}
-            {tab}
+      {/* Main Tabs */}
+      <div className="flex gap-1 border-b border-white/10">
+        {MAIN_TABS.map(t => (
+          <button key={t} onClick={() => setActiveTab(t)}
+            className={clsx("px-5 py-3 text-sm font-semibold capitalize rounded-t-xl transition-all border-b-2",
+              activeTab === t ? "text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-white")}>
+            {t === "Overview" ? <><BarChart2 className="inline h-3.5 w-3.5 mr-1.5" />Overview</> :
+             t === "Latency"  ? <><Clock     className="inline h-3.5 w-3.5 mr-1.5" />Latency</>  :
+                                <><Bell      className="inline h-3.5 w-3.5 mr-1.5" />Alerts</>}
           </button>
         ))}
       </div>
 
-      {/* ── OVERVIEW TAB ─────────────────────────────────────────────────────── */}
+      {/* OVERVIEW TAB */}
       {activeTab === "Overview" && (
         <div className="space-y-6">
-          {/* Days selector */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Period:</span>
-            <div className="flex gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800/50">
-              {DAYS_OPTIONS.map((d) => (
-                <button
-                  key={d}
-                  onClick={() => setDays(d)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-                    days === d
-                      ? "bg-white text-violet-700 shadow-sm dark:bg-slate-700 dark:text-violet-300"
-                      : "text-slate-500 hover:text-slate-700 dark:text-slate-400"
-                  }`}
-                >
+          {/* Day selector */}
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-slate-500 font-medium">Period:</span>
+            <div className="flex rounded-xl overflow-hidden border border-white/10">
+              {[7, 14, 30, 90].map(d => (
+                <button key={d} onClick={() => { setUseCustom(false); setDays(d); }}
+                  className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
+                    !useCustom && days === d ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
                   {d}d
                 </button>
               ))}
+              <button onClick={() => setUseCustom(v => !v)}
+                className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
+                  useCustom ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                Custom
+              </button>
             </div>
+            {useCustom && (
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={customFrom}
+                  max={customTo || undefined}
+                  onChange={e => setCustomFrom(e.target.value)}
+                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                />
+                <span className="text-xs text-slate-500">→</span>
+                <input
+                  type="date"
+                  value={customTo}
+                  min={customFrom || undefined}
+                  max={new Date().toISOString().split("T")[0]}
+                  onChange={e => setCustomTo(e.target.value)}
+                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                />
+                {customFrom && customTo && (
+                  <span className="text-[10px] text-violet-400 font-medium">
+                    {Math.round((new Date(customTo).getTime() - new Date(customFrom).getTime()) / 86400000) + 1}d range
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           {summaryLoading ? (
-            <div className="flex items-center justify-center py-16 text-slate-500">
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading analytics…
+            <div className="flex items-center justify-center py-24 gap-3 text-slate-500">
+              <RefreshCw className="h-5 w-5 animate-spin" /> Loading…
             </div>
+          ) : !summary ? (
+            <p className="text-center py-24 text-slate-600">No engagement data yet.</p>
           ) : (
             <>
-              {/* Row 1: Engagement stats */}
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                {[
-                  { label: "Total Events", value: totalEvents, icon: Activity, color: "text-violet-600 dark:text-violet-400", bg: "bg-violet-100 dark:bg-violet-500/10" },
-                  { label: "Email Opens", value: emailOpens, icon: BarChart2, color: "text-blue-600 dark:text-blue-400", bg: "bg-blue-100 dark:bg-blue-500/10" },
-                  { label: "Link Clicks", value: linkClicks, icon: Activity, color: "text-amber-600 dark:text-amber-400", bg: "bg-amber-100 dark:bg-amber-500/10" },
-                  { label: "Replies", value: replies, icon: Activity, color: "text-emerald-600 dark:text-emerald-400", bg: "bg-emerald-100 dark:bg-emerald-500/10" },
-                ].map(({ label, value, icon: Icon, color, bg }) => (
-                  <div key={label} className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 flex items-center gap-4">
-                    <div className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl ${bg}`}>
-                      <Icon className={`h-5 w-5 ${color}`} />
-                    </div>
-                    <div>
-                      <p className="text-2xl font-bold text-slate-900 dark:text-white">{value.toLocaleString()}</p>
-                      <p className="text-xs text-slate-500 dark:text-slate-400">{label}</p>
-                    </div>
-                  </div>
-                ))}
+              {/* KPI strip */}
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <KpiCard label="Total Events"  value={totalEvents.toLocaleString()}  icon={Activity}     color="#818cf8" />
+                <KpiCard label="Email Opens"   value={emailOpens.toLocaleString()}   icon={Activity}     color="#34d399" />
+                <KpiCard label="Link Clicks"   value={linkClicks.toLocaleString()}   icon={Activity}     color="#60a5fa" />
+                <KpiCard label="Replies"       value={replies.toLocaleString()}      icon={Activity}     color="#fb923c" />
               </div>
 
-              {/* Row 2: Campaign performance table */}
-              {summary && summary.campaign_conversion_trends.length > 0 && (
-                <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 space-y-4">
-                  <h2 className="text-base font-semibold text-slate-900 dark:text-white">Campaign Performance</h2>
+              {/* Channel breakdown */}
+              <div className="glass rounded-2xl border border-white/10 p-5">
+                <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Channel Breakdown</p>
+                <div className="space-y-3">
+                  {Object.entries(summary.channel_counts).map(([ch, cnt]) => {
+                    const max = Math.max(...Object.values(summary.channel_counts), 1);
+                    return (
+                      <div key={ch} className="flex items-center gap-3">
+                        <span className="w-20 text-xs text-slate-400 capitalize">{ch}</span>
+                        <div className="flex-1 h-[5px] rounded-full bg-white/10 overflow-hidden">
+                          <div className="h-full rounded-full bg-violet-500 transition-all duration-700"
+                            style={{ width: `${(cnt / max) * 100}%` }} />
+                        </div>
+                        <span className="w-8 text-right text-xs font-bold text-slate-300">{cnt}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Campaign conversion */}
+              {summary.campaign_conversion_trends.length > 0 && (
+                <div className="glass rounded-2xl border border-white/10 p-5">
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Campaign Conversion</p>
                   <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
+                    <table className="w-full text-xs">
                       <thead>
-                        <tr className="border-b border-slate-200 dark:border-white/10">
-                          {["Campaign", "Sent", "Responded", "Conversion Rate"].map((col) => (
-                            <th key={col} className="pb-2 pr-4 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                              {col}
-                            </th>
+                        <tr className="border-b border-white/10">
+                          {["Campaign", "Sent", "Responded", "Rate"].map(h => (
+                            <th key={h} className="px-3 py-2 text-left text-slate-500 font-medium">{h}</th>
                           ))}
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-white/5">
-                        {summary.campaign_conversion_trends.map((c) => (
-                          <tr key={c.campaign_id} className="hover:bg-slate-50/60 dark:hover:bg-white/[0.02]">
-                            <td className="py-3 pr-4 font-medium text-slate-800 dark:text-slate-100">{c.name}</td>
-                            <td className="py-3 pr-4 text-slate-600 dark:text-slate-300">{c.sent.toLocaleString()}</td>
-                            <td className="py-3 pr-4 text-slate-600 dark:text-slate-300">{c.responded.toLocaleString()}</td>
-                            <td className={`py-3 pr-4 font-semibold ${conversionColor(c.conversion_rate)}`}>
-                              {c.conversion_rate.toFixed(1)}%
+                      <tbody>
+                        {summary.campaign_conversion_trends.map(c => (
+                          <tr key={c.campaign_id} className="border-b border-white/5 hover:bg-white/5">
+                            <td className="px-3 py-2 text-slate-300 font-medium">{c.name}</td>
+                            <td className="px-3 py-2 text-slate-400">{c.sent}</td>
+                            <td className="px-3 py-2 text-slate-400">{c.responded}</td>
+                            <td className="px-3 py-2">
+                              <span className={clsx("font-bold",
+                                c.conversion_rate >= 30 ? "text-emerald-400" :
+                                c.conversion_rate >= 10 ? "text-amber-400" : "text-red-400")}>
+                                {c.conversion_rate.toFixed(1)}%
+                              </span>
                             </td>
                           </tr>
                         ))}
@@ -533,331 +531,349 @@ export default function AnalyticsPage() {
                 </div>
               )}
 
-              {/* Row 3: Call task status breakdown */}
-              {summary && Object.keys(summary.call_task_status_counts).length > 0 && (
-                <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 space-y-4">
-                  <h2 className="text-base font-semibold text-slate-900 dark:text-white">Call Task Status</h2>
+              {/* Call task + Quote status side by side */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+                <div className="glass rounded-2xl border border-white/10 p-5">
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Call Task Status</p>
                   <div className="space-y-3">
-                    {Object.entries(summary.call_task_status_counts).map(([status, count]) => {
-                      const pct = callStatusTotal > 0 ? (count / callStatusTotal) * 100 : 0;
-                      const barColor = CALL_STATUS_COLORS[status] ?? "bg-slate-400";
-                      return (
-                        <div key={status} className="space-y-1">
-                          <div className="flex items-center justify-between text-xs">
-                            <span className="font-medium capitalize text-slate-700 dark:text-slate-200">{status}</span>
-                            <span className="text-slate-500 dark:text-slate-400">
-                              {count.toLocaleString()} ({pct.toFixed(1)}%)
-                            </span>
-                          </div>
-                          <div className="h-2.5 w-full rounded-full bg-slate-100 dark:bg-slate-800">
-                            <div
-                              className={`h-2.5 rounded-full ${barColor} transition-all`}
-                              style={{ width: `${pct}%` }}
-                            />
-                          </div>
-                        </div>
-                      );
-                    })}
+                    {Object.entries(summary.call_task_status_counts).map(([st, cnt]) => (
+                      <div key={st} className="flex items-center gap-3">
+                        <span className={clsx("h-2 w-2 rounded-full flex-shrink-0", CALL_STATUS_COLORS[st] ?? "bg-slate-400")} />
+                        <span className="flex-1 text-xs text-slate-400 capitalize">{st}</span>
+                        <span className="text-xs font-bold text-slate-300">{cnt}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              )}
-
-              {/* Row 4: Quote status cards + export */}
-              {summary && (
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h2 className="text-base font-semibold text-slate-900 dark:text-white">Quote Status</h2>
-                    <button
-                      onClick={handleExportQuoteCSV}
-                      disabled={quoteExportLoading}
-                      className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
-                    >
-                      {quoteExportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-                      Export Quote CSV
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                    {Object.entries(summary.quote_status_counts).map(([status, count]) => {
-                      const colors: Record<string, { text: string; bg: string }> = {
-                        draft: { text: "text-slate-600 dark:text-slate-300", bg: "bg-slate-100 dark:bg-slate-800" },
-                        sent: { text: "text-blue-700 dark:text-blue-300", bg: "bg-blue-100 dark:bg-blue-500/10" },
-                        accepted: { text: "text-emerald-700 dark:text-emerald-300", bg: "bg-emerald-100 dark:bg-emerald-500/10" },
-                        rejected: { text: "text-red-700 dark:text-red-300", bg: "bg-red-100 dark:bg-red-500/10" },
-                      };
-                      const c = colors[status] ?? colors.draft;
-                      return (
-                        <div key={status} className={`rounded-2xl border border-white/40 dark:border-white/10 p-5 ${c.bg}`}>
-                          <p className={`text-2xl font-bold ${c.text}`}>{count}</p>
-                          <p className={`text-xs font-medium capitalize mt-0.5 ${c.text} opacity-80`}>{status}</p>
-                        </div>
-                      );
-                    })}
+                <div className="glass rounded-2xl border border-white/10 p-5">
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Quote Status</p>
+                  <div className="space-y-3">
+                    {Object.entries(summary.quote_status_counts).map(([st, cnt]) => (
+                      <div key={st} className="flex items-center gap-3">
+                        <span className="h-2 w-2 rounded-full bg-blue-500 flex-shrink-0" />
+                        <span className="flex-1 text-xs text-slate-400 capitalize">{st}</span>
+                        <span className="text-xs font-bold text-slate-300">{cnt}</span>
+                      </div>
+                    ))}
                   </div>
                 </div>
-              )}
+              </div>
             </>
           )}
         </div>
       )}
 
-      {/* ── LATENCY TAB ──────────────────────────────────────────────────────── */}
+      {/* LATENCY TAB */}
       {activeTab === "Latency" && (
-        <div className="space-y-6">
-          {/* Days selector */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">Period:</span>
-            <div className="flex gap-1 rounded-xl bg-slate-100 p-1 dark:bg-slate-800/50">
-              {DAYS_OPTIONS.map((d) => (
-                <button
-                  key={d}
-                  onClick={() => setLatencyDays(d)}
-                  className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-all ${
-                    latencyDays === d
-                      ? "bg-white text-violet-700 shadow-sm dark:bg-slate-700 dark:text-violet-300"
-                      : "text-slate-500 hover:text-slate-700 dark:text-slate-400"
-                  }`}
-                >
-                  {d}d
+        <div className="space-y-5">
+          {/* Controls */}
+          <div className="flex items-center flex-wrap gap-3">
+            {/* Day range */}
+            <div className="flex rounded-xl overflow-hidden border border-white/10">
+              {([1, 7, 30] as const).map(d => (
+                <button key={d} onClick={() => setLatencyDays(d)}
+                  className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
+                    latencyDays === d ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                  {d === 1 ? "Today" : `${d}d`}
                 </button>
               ))}
             </div>
+            {/* Scope */}
+            <div className="flex rounded-xl overflow-hidden border border-white/10">
+              {(["all", "mine"] as const).map(s => (
+                <button key={s} onClick={() => setScope(s)}
+                  className={clsx("px-4 py-2 text-xs font-semibold capitalize transition-colors",
+                    scope === s ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                  {s === "all" ? "All Users" : "My Calls"}
+                </button>
+              ))}
+            </div>
+            <button onClick={() => fetchLatency(true)} disabled={latencyRefreshing}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-sm text-slate-400 hover:text-white transition-colors ml-auto">
+              <RefreshCw className={clsx("h-4 w-4", latencyRefreshing && "animate-spin")} />
+              Refresh
+            </button>
+          </div>
+
+          {/* KPI strip */}
+          {latency && (
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <KpiCard label="Total Turns"    value={latency.meta.total_turns.toLocaleString()} icon={Activity}     color="#818cf8" />
+              <KpiCard label="Total Calls"    value={latency.meta.total_calls.toString()}        icon={Phone}        color="#60a5fa" />
+              <KpiCard label="Fastest Engine" value={fms(best?.total_avg ?? 0)}                 sub={best?.engine}  icon={TrendingDown} color="#34d399" />
+              <KpiCard label="Slowest Engine" value={fms(worst?.total_avg ?? 0)}                sub={worst?.engine} icon={TrendingUp}   color="#f87171" />
+            </div>
+          )}
+
+          {/* Sub-tabs */}
+          <div className="flex gap-1 border-b border-white/10">
+            {(["engines", "calls", "models", "trend"] as const).map(t => (
+              <button key={t} onClick={() => setLatencySubTab(t)}
+                className={clsx("px-5 py-2.5 text-xs font-semibold rounded-t-lg transition-all border-b-2",
+                  latencySubTab === t ? "text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-white")}>
+                {t === "engines" ? "⚡ Engines" : t === "calls" ? "📞 Calls" : t === "models" ? "🔬 Models" : "📈 Trend"}
+              </button>
+            ))}
           </div>
 
           {latencyLoading ? (
-            <div className="flex items-center justify-center py-16 text-slate-500">
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading latency data…
+            <div className="flex items-center justify-center py-24 gap-3 text-slate-500">
+              <RefreshCw className="h-5 w-5 animate-spin" /> Loading analytics…
             </div>
-          ) : latency ? (
+          ) : !latency || latency.engines.length === 0 ? (
+            <div className="text-center py-24 text-slate-500">No latency data yet. Make a call to generate data.</div>
+          ) : (
             <>
-              {/* Stat boxes */}
-              <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-                {[
-                  { label: "Avg STT", value: weightedAvg("stt_avg") },
-                  { label: "Avg LLM", value: weightedAvg("llm_avg") },
-                  { label: "Avg TTS", value: weightedAvg("tts_avg") },
-                  { label: "Avg Total", value: weightedAvg("total_avg") },
-                ].map(({ label, value }) => (
-                  <div key={label} className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6">
-                    <p className="text-2xl font-bold text-slate-900 dark:text-white">{fmtMs(value)}</p>
-                    <p className="mt-0.5 text-xs text-slate-500 dark:text-slate-400">{label}</p>
-                  </div>
-                ))}
-              </div>
+              {/* Engines */}
+              {latencySubTab === "engines" && (
+                <div className="space-y-3">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-widest">
+                    {latency.engines.length} engines · ranked by avg turn latency
+                  </p>
+                  {latency.engines.map((e, i) => {
+                    const col    = engineColor(e.engine);
+                    const maxVal = latency.engines.at(-1)!.total_avg || 1;
+                    return (
+                      <div key={e.engine} className="glass rounded-2xl p-5 border border-white/10 hover:border-white/20 transition-all"
+                        style={{ borderLeftColor: col, borderLeftWidth: 3 }}>
+                        <div className="flex items-start justify-between flex-wrap gap-3">
+                          <div>
+                            <p className="text-[10px] text-slate-500 font-mono">#{i + 1} · {e.rows.toLocaleString()} turns</p>
+                            <p className="text-base font-bold mt-0.5" style={{ color: col }}>{e.engine}</p>
+                            <p className="text-[10px] text-slate-500 mt-0.5">best {fms(e.total_min)} · worst {fms(e.total_max)}</p>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-3xl font-black leading-none" style={{ color: col }}>{fms(e.total_avg)}</p>
+                            <p className="text-[10px] text-slate-500 mt-1">avg / turn</p>
+                          </div>
+                        </div>
+                        <div className="mt-3 h-5 rounded-lg bg-white/5 overflow-hidden">
+                          <div className="h-full rounded-lg transition-all duration-700"
+                            style={{ width: `${Math.max((e.total_avg / maxVal) * 100, 3)}%`, background: `linear-gradient(90deg,${col}cc,${col}44)`, minWidth: "3%" }} />
+                        </div>
+                        <StackBar stt={e.stt_avg} llm={e.llm_avg} tts={e.tts_avg} total={e.total_avg} />
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
 
-              {/* Engine table */}
-              {sortedEngines.length > 0 && (
-                <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 space-y-4">
-                  <h2 className="text-base font-semibold text-slate-900 dark:text-white">Engine Performance</h2>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead>
-                        <tr className="border-b border-slate-200 dark:border-white/10">
-                          {["Engine", "Requests", "Avg Latency"].map((col) => (
-                            <th key={col} className="pb-2 pr-6 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
-                              {col}
-                            </th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-100 dark:divide-white/5">
-                        {sortedEngines.map((e) => (
-                          <tr key={e.engine} className="hover:bg-slate-50/60 dark:hover:bg-white/[0.02]">
-                            <td className="py-3 pr-6 font-medium text-slate-800 dark:text-slate-100">{e.engine}</td>
-                            <td className="py-3 pr-6 text-slate-600 dark:text-slate-300">{e.rows.toLocaleString()}</td>
-                            <td className="py-3 pr-6 font-semibold text-violet-600 dark:text-violet-400">{fmtMs(e.total_avg)}</td>
+              {/* Calls */}
+              {latencySubTab === "calls" && (
+                <div className="space-y-2">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-widest">
+                    {latency.interactions.length} calls · click any row to expand
+                  </p>
+                  <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-white/5 border-b border-white/10">
+                            {["#","ID","Engine","STT","LLM","TTS","Turns","Avg/Turn","Best","Worst","STT%"].map(h => (
+                              <th key={h} className="px-4 py-3 text-left text-slate-500 font-medium whitespace-nowrap">{h}</th>
+                            ))}
                           </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                        </thead>
+                        <tbody>
+                          {latency.interactions.map((c, i) => {
+                            const col     = i < 3 ? "#34d399" : i >= latency.interactions.length - 3 ? "#f87171" : "#94a3b8";
+                            const sttPct  = c.total_avg ? Math.round((c.stt_avg / c.total_avg) * 100) : 0;
+                            const isExp   = expandedCall === c.id;
+                            return (
+                              <React.Fragment key={c.id}>
+                                <tr onClick={() => setExpandedCall(isExp ? null : c.id)}
+                                  className="border-b border-white/5 cursor-pointer hover:bg-white/5 transition-colors">
+                                  <td className="px-4 py-3 font-bold" style={{ color: col }}>#{i + 1}</td>
+                                  <td className="px-4 py-3 text-slate-300">{c.id}</td>
+                                  <td className="px-4 py-3 font-mono text-[10px]" style={{ color: engineColor(c.engine) }}>{c.engine}</td>
+                                  <td className="px-4 py-3 text-violet-400 text-[10px]">{c.stt_model}</td>
+                                  <td className="px-4 py-3 text-emerald-400 text-[10px] max-w-[100px] truncate">{c.llm_model.split("/").pop()}</td>
+                                  <td className="px-4 py-3 text-orange-400 text-[10px]">{c.tts_model}</td>
+                                  <td className="px-4 py-3 text-slate-400">{c.turns}</td>
+                                  <td className="px-4 py-3 font-bold" style={{ color: col }}>{fms(c.total_avg)}</td>
+                                  <td className="px-4 py-3 text-emerald-400">{fms(c.total_min)}</td>
+                                  <td className="px-4 py-3 text-red-400">{fms(c.total_max)}</td>
+                                  <td className="px-4 py-3">
+                                    <div className="flex items-center gap-1">
+                                      <div className="w-10 h-[4px] rounded bg-white/10 overflow-hidden">
+                                        <div style={{ width: `${sttPct}%`, background: "#818cf8" }} className="h-full" />
+                                      </div>
+                                      <span className="text-violet-400 text-[10px]">{sttPct}%</span>
+                                    </div>
+                                  </td>
+                                </tr>
+                                {isExp && (
+                                  <tr className="bg-white/[0.02] border-b border-white/5">
+                                    <td colSpan={11} className="px-6 py-4">
+                                      <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Detail — Call #{c.id} · {c.engine}</p>
+                                      <div className="flex flex-wrap gap-6 mb-3">
+                                        {[["Avg STT", fms(c.stt_avg), "#818cf8"], ["Avg LLM", fms(c.llm_avg), "#34d399"], ["Avg TTS", fms(c.tts_avg), "#fb923c"],
+                                          ["STT %", `${Math.round((c.stt_avg / c.total_avg) * 100)}%`, "#818cf8"],
+                                          ["LLM %", `${Math.round((c.llm_avg / c.total_avg) * 100)}%`, "#34d399"]
+                                        ].map(([l, v, cl]) => (
+                                          <div key={l as string}>
+                                            <p className="text-[9px] text-slate-500 uppercase tracking-widest">{l}</p>
+                                            <p className="text-lg font-bold mt-0.5" style={{ color: cl as string }}>{v}</p>
+                                          </div>
+                                        ))}
+                                      </div>
+                                      <StackBar stt={c.stt_avg} llm={c.llm_avg} tts={c.tts_avg} total={c.total_avg} />
+                                    </td>
+                                  </tr>
+                                )}
+                              </React.Fragment>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
                   </div>
                 </div>
               )}
 
-              {/* Latency trend sparkline */}
-              {latency.trend.length > 0 && (
-                <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 space-y-4">
-                  <h2 className="text-base font-semibold text-slate-900 dark:text-white">Latency Trend</h2>
-                  <div className="relative">
-                    {/* Y-axis hint */}
-                    <div className="flex items-end gap-2 overflow-x-auto pb-2">
-                      {latency.trend.map((point, idx) => {
-                        const heightPct = (point.avg_ms / latencyTrendMax) * 100;
-                        const barH = Math.max(4, Math.round((heightPct / 100) * 80));
-                        return (
-                          <div key={idx} className="flex flex-col items-center gap-1 min-w-[40px]">
-                            <span className="text-[10px] font-medium text-violet-600 dark:text-violet-400">
-                              {Math.round(point.avg_ms)}
-                            </span>
-                            <div
-                              className="w-full rounded-t-md bg-gradient-to-t from-violet-600 to-blue-400 opacity-80"
-                              style={{ height: `${barH}px` }}
-                            />
-                            <span className="text-[9px] text-slate-400 dark:text-slate-500 text-center leading-tight whitespace-nowrap">
-                              {new Date(point.day).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}
-                            </span>
-                          </div>
-                        );
-                      })}
-                    </div>
-                    {/* Baseline */}
-                    <div className="mt-1 border-t border-slate-200 dark:border-white/10" />
-                    <p className="mt-2 text-right text-xs text-slate-400">
-                      Max: {fmtMs(latencyTrendMax)}
-                    </p>
+              {/* Models */}
+              {latencySubTab === "models" && (
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+                  <ModelCard title="STT Models" icon={Mic}     accent="#818cf8" models={latency.stt_models} />
+                  <ModelCard title="LLM Models" icon={Brain}   accent="#34d399" models={latency.llm_models} />
+                  <ModelCard title="TTS Models" icon={Volume2} accent="#fb923c" models={latency.tts_models} />
+                  <div className="md:col-span-3 flex items-center gap-6 px-1">
+                    {[["#818cf8", "STT"], ["#34d399", "LLM"], ["#fb923c", "TTS"]].map(([c, l]) => (
+                      <span key={l} className="flex items-center gap-1.5 text-xs text-slate-500">
+                        <span className="h-2 w-2 rounded-full" style={{ background: c }} />{l} stage
+                      </span>
+                    ))}
+                    <span className="text-xs text-slate-600 ml-auto">Ranked fastest → slowest</span>
                   </div>
+                </div>
+              )}
+
+              {/* Trend */}
+              {latencySubTab === "trend" && (
+                <div className="space-y-4">
+                  <p className="text-[10px] text-slate-500 uppercase tracking-widest">Daily avg turn latency per engine</p>
+                  {latency.trend.length === 0 ? (
+                    <p className="text-center py-16 text-slate-600">No trend data for this period.</p>
+                  ) : (
+                    <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+                      <table className="w-full text-xs">
+                        <thead>
+                          <tr className="bg-white/5 border-b border-white/10">
+                            {["Date", "Engine", "Avg", "Turns", "Bar"].map(h => (
+                              <th key={h} className="px-4 py-3 text-left text-slate-500 font-medium">{h}</th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {latency.trend.map((t, i) => {
+                            const maxMs = Math.max(...latency.trend.map(x => x.avg_ms), 1);
+                            return (
+                              <tr key={i} className="border-b border-white/5 hover:bg-white/5">
+                                <td className="px-4 py-2 font-mono text-slate-400">{t.day}</td>
+                                <td className="px-4 py-2 font-mono text-[10px]" style={{ color: engineColor(t.engine) }}>{t.engine}</td>
+                                <td className="px-4 py-2 font-bold text-slate-200">{fms(t.avg_ms)}</td>
+                                <td className="px-4 py-2 text-slate-500">{t.turns}</td>
+                                <td className="px-4 py-2 w-32">
+                                  <div className="h-[4px] rounded bg-white/10 overflow-hidden">
+                                    <div className="h-full rounded" style={{ width: `${(t.avg_ms / maxMs) * 100}%`, background: engineColor(t.engine) }} />
+                                  </div>
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                  {latency.trend.length > 1 && <DoDSummary trend={latency.trend} />}
                 </div>
               )}
             </>
-          ) : (
-            <div className="rounded-2xl glass border border-dashed border-slate-300 px-6 py-16 text-center text-slate-500 dark:border-white/10">
-              No latency data available for this period.
-            </div>
           )}
         </div>
       )}
 
-      {/* ── ALERTS TAB ───────────────────────────────────────────────────────── */}
+      {/* ALERTS TAB */}
       {activeTab === "Alerts" && (
         <div className="space-y-6">
-          {/* New alert form */}
-          <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 space-y-4">
-            <h2 className="text-base font-semibold text-slate-900 dark:text-white flex items-center gap-2">
-              <Plus className="h-4 w-4" /> New Alert
-            </h2>
-            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">Metric</label>
-                <input
-                  value={newAlertMetric}
-                  onChange={(e) => setNewAlertMetric(e.target.value)}
-                  placeholder="e.g. email_open"
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                />
+          {/* Create alert */}
+          <div className="glass rounded-2xl border border-white/10 p-5">
+            <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">New Alert</p>
+            <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
+              <div className="md:col-span-2">
+                <label className="text-[10px] text-slate-500 uppercase mb-1 block">Metric</label>
+                <input value={newAlertMetric} onChange={e => setNewAlertMetric(e.target.value)}
+                  placeholder="e.g. email_open_rate"
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500" />
               </div>
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">Threshold</label>
-                <input
-                  type="number"
-                  value={newAlertThreshold}
-                  onChange={(e) => setNewAlertThreshold(Number(e.target.value))}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                />
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase mb-1 block">Threshold</label>
+                <input type="number" value={newAlertThreshold} onChange={e => setNewAlertThreshold(Number(e.target.value))}
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-violet-500" />
               </div>
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">Direction</label>
-                <select
-                  value={newAlertDirection}
-                  onChange={(e) => setNewAlertDirection(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                >
+              <div>
+                <label className="text-[10px] text-slate-500 uppercase mb-1 block">Direction</label>
+                <select value={newAlertDirection} onChange={e => setNewAlertDirection(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none">
                   <option value="gte">≥ (gte)</option>
                   <option value="lte">≤ (lte)</option>
                 </select>
               </div>
-              <div className="space-y-1">
-                <label className="block text-xs font-medium text-slate-500 dark:text-slate-400">Channel</label>
-                <select
-                  value={newAlertChannel}
-                  onChange={(e) => setNewAlertChannel(e.target.value)}
-                  className="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                >
-                  <option value="email">Email</option>
-                  <option value="webhook">Webhook</option>
-                  <option value="slack">Slack</option>
-                </select>
-              </div>
+              <button onClick={handleCreateAlert} disabled={alertSaving}
+                className="flex items-center justify-center gap-2 rounded-xl bg-violet-600 px-4 py-2 text-sm font-semibold text-white hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                {alertSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                Create
+              </button>
             </div>
-            <button
-              onClick={handleCreateAlert}
-              disabled={alertSaving || !newAlertMetric.trim()}
-              className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
-            >
-              {alertSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
-              Create Alert
-            </button>
           </div>
 
-          {/* Alerts table */}
+          {/* Alert list */}
           {alertsLoading ? (
-            <div className="flex items-center justify-center py-16 text-slate-500">
-              <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading alerts…
+            <div className="flex items-center justify-center py-16 gap-3 text-slate-500">
+              <RefreshCw className="h-5 w-5 animate-spin" /> Loading alerts…
             </div>
           ) : alerts.length === 0 ? (
-            <div className="rounded-2xl glass border border-dashed border-slate-300 px-6 py-16 text-center text-slate-500 dark:border-white/10">
-              No alerts configured yet. Create one above.
-            </div>
+            <p className="text-center py-16 text-slate-600">No alerts configured yet.</p>
           ) : (
-            <div className="rounded-2xl glass border border-white/40 dark:border-white/10 overflow-hidden">
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="border-b border-slate-200 bg-slate-50/80 dark:border-white/10 dark:bg-slate-800/40">
-                      {["Metric", "Threshold", "Direction", "Channel", "Status", "Last Triggered", "Actions"].map(
-                        (col) => (
-                          <th
-                            key={col}
-                            className="px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400"
-                          >
-                            {col}
-                          </th>
-                        )
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-white/5">
-                    {alerts.map((alert) => (
-                      <tr key={alert.id} className="hover:bg-slate-50/60 dark:hover:bg-white/[0.02] transition-colors">
-                        <td className="px-4 py-3 font-mono text-xs font-medium text-slate-800 dark:text-slate-100">
-                          {alert.metric}
-                        </td>
-                        <td className="px-4 py-3 text-slate-700 dark:text-slate-200">{alert.threshold}</td>
-                        <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
-                          {alert.direction === "gte" ? "≥" : "≤"}
-                        </td>
-                        <td className="px-4 py-3 capitalize text-slate-600 dark:text-slate-300">{alert.channel}</td>
-                        <td className="px-4 py-3">
-                          <span
-                            className={`inline-block rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                              alert.enabled
-                                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
-                                : "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400"
-                            }`}
-                          >
-                            {alert.enabled ? "Enabled" : "Disabled"}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
-                          {fmtDate(alert.last_triggered_at)}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <button
-                              onClick={() => handleToggleAlert(alert)}
-                              className={`rounded-lg px-3 py-1.5 text-xs font-semibold transition-colors ${
-                                alert.enabled
-                                  ? "bg-amber-100 text-amber-700 hover:bg-amber-200 dark:bg-amber-500/10 dark:text-amber-300"
-                                  : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300"
-                              }`}
-                            >
-                              {alert.enabled ? "Disable" : "Enable"}
-                            </button>
-                            <button
-                              onClick={() => handleDeleteAlert(alert.id)}
-                              className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-500 dark:hover:bg-red-500/10"
-                            >
-                              <Trash2 className="h-4 w-4" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
+            <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+              <table className="w-full text-xs">
+                <thead>
+                  <tr className="bg-white/5 border-b border-white/10">
+                    {["Metric", "Threshold", "Direction", "Channel", "Last Triggered", "Status", ""].map(h => (
+                      <th key={h} className="px-4 py-3 text-left text-slate-500 font-medium whitespace-nowrap">{h}</th>
                     ))}
-                  </tbody>
-                </table>
-              </div>
+                  </tr>
+                </thead>
+                <tbody>
+                  {alerts.map(a => (
+                    <tr key={a.id} className="border-b border-white/5 hover:bg-white/5">
+                      <td className="px-4 py-3 text-slate-300 font-mono">{a.metric}</td>
+                      <td className="px-4 py-3 text-slate-400">{a.threshold}</td>
+                      <td className="px-4 py-3 text-slate-400">{a.direction}</td>
+                      <td className="px-4 py-3 text-slate-400">{a.channel}</td>
+                      <td className="px-4 py-3 text-slate-500">{fmtDate(a.last_triggered_at)}</td>
+                      <td className="px-4 py-3">
+                        <button onClick={() => handleToggleAlert(a)}
+                          className={clsx("px-2.5 py-1 rounded-full text-[10px] font-bold transition-colors",
+                            a.enabled ? "bg-emerald-500/20 text-emerald-400 hover:bg-emerald-500/30" : "bg-slate-500/20 text-slate-400 hover:bg-slate-500/30")}>
+                          {a.enabled ? "Enabled" : "Disabled"}
+                        </button>
+                      </td>
+                      <td className="px-4 py-3">
+                        <button onClick={() => handleDeleteAlert(a.id)}
+                          className="p-1.5 rounded-lg text-slate-500 hover:text-red-400 hover:bg-red-400/10 transition-colors">
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
       )}
+
     </div>
   );
 }

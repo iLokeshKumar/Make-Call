@@ -332,3 +332,30 @@ async def update_user_status(
     session.commit()
 
     return {"message": "User status updated"}
+
+
+# ── Automation Worker health ──────────────────────────────────────────────────
+
+@router.get("/worker/health")
+async def worker_health(
+    current_user: User = Depends(PermissionChecker("user.read")),
+):
+    """Return the latest automation-worker cycle metrics (no DB hit needed)."""
+    from services.automation_worker_service import get_worker_health, pause_worker, resume_worker
+    return get_worker_health()
+
+
+@router.post("/worker/pause")
+async def worker_pause(
+    current_user: User = Depends(PermissionChecker("user.manage")),
+):
+    from services.automation_worker_service import pause_worker
+    return pause_worker()
+
+
+@router.post("/worker/resume")
+async def worker_resume(
+    current_user: User = Depends(PermissionChecker("user.manage")),
+):
+    from services.automation_worker_service import resume_worker
+    return resume_worker()

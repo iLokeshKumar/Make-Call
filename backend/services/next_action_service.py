@@ -9,7 +9,7 @@ from services.communication_service import get_company_setting_value, send_quote
 from services.message_render_service import render_template_by_id
 from services.outbound_call_service import create_call_task
 from services.requirement_service import get_latest_requirements
-from services.tracking_service import is_lead_opted_out
+from services.opt_out_service import is_lead_opted_out
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +197,8 @@ def handle_inbound_quote_request(
             "call_task_id": None,
         }
 
-    from services.quote_service import create_quote, generate_quote_pdf
+    from services.quote_service import create_quote
+    from services.quote_pdf_service import generate_quote_pdf
 
     quote = create_quote(
         session=session,

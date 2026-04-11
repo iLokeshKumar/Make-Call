@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -12,6 +14,56 @@ from credentials_service import get_company_setting_value
 from models.models import Appointment, Interaction, LatencyLog, Lead, Product, User, utc_now
 from services.communication_service import send_email_to_lead, send_whatsapp_to_lead
 from utils.phone import normalize_phone
+
+logger = logging.getLogger(__name__)
+
+
+def _products_overlap(products_a: str, products_b: str) -> bool:
+    """Return True if two product strings share a meaningful keyword (>3 chars)."""
+    def tokens(s: str) -> set[str]:
+        return {w.lower() for w in re.split(r"[\s,;/]+", s or "") if len(w) > 3}
+    return bool(tokens(products_a) & tokens(products_b))
+
+
+def _find_existing_appointment(
+    session: Session,
+    company_id: int,
+    lead_id: int,
+    products: str | None = None,
+) -> Appointment | None:
+    """
+    Return an existing SCHEDULED future appointment for this lead.
+    If `products` is given, only match if the products overlap.
+    Also catches demos booked in the last 2 hours (handles barge-in repeats).
+    """
+    now = utc_now()
+    window_start = now - timedelta(hours=2)
+
+    appts = session.exec(
+        select(Appointment).where(
+            Appointment.company_id == company_id,
+            Appointment.lead_id == lead_id,
+            Appointment.status == "scheduled",
+            Appointment.appointment_time >= window_start,
+        ).order_by(Appointment.appointment_time.asc())
+    ).all()
+
+    if not appts:
+        return None
+
+    if not products:
+        # book_meeting (no product context) — return the nearest upcoming
+        return appts[0]
+
+    for appt in appts:
+        notes = appt.notes or ""
+        # Extract the products string stored in notes (format: products=X;)
+        m = re.search(r"products=([^;]+)", notes, re.IGNORECASE)
+        existing_products = m.group(1).strip() if m else ""
+        if not existing_products or _products_overlap(products, existing_products):
+            return appt
+
+    return None
 
 try:
     from rag_service import sync_products_to_chroma
@@ -263,20 +315,51 @@ async def book_meeting(
         session.commit()
         session.refresh(lead)
 
+    # Dedup: return existing scheduled appointment if one already exists for this lead
+    existing = _find_existing_appointment(session, company_id, lead.id, products=None)
+    if existing:
+        logger.info(
+            "[book_meeting] Dedup — lead %d already has appointment %d at %s",
+            lead.id, existing.id, existing.appointment_time,
+        )
+        return {
+            "confirmed": True,
+            "appointment_id": existing.id,
+            "lead_id": lead.id,
+            "lead_name": lead.name,
+            "lead_email": lead.email,
+            "appointment_time": existing.appointment_time.isoformat(),
+            "email_sent": False,
+            "message": f"{meeting_type.title()} already scheduled for {lead.name} — returning existing booking.",
+            "duplicate": True,
+        }
+
     appointment_time = await resolve_meeting_time(proposed_time)
+    # Use structured notes format so the journey parser renders correctly
     appointment = Appointment(
         company_id=company_id,
         lead_id=lead.id,
         owner_user_id=lead.owner_user_id or actor_user_id,
         appointment_time=appointment_time,
         status="scheduled",
-        notes=f"Booked by voice agent as {meeting_type}",
+        notes=f"demo type={meeting_type}; location=online",
         created_by=actor_user_id,
         updated_by=actor_user_id,
     )
     session.add(appointment)
     session.commit()
     session.refresh(appointment)
+
+    # Advance ISM stage to "engaged" — they agreed to a meeting
+    try:
+        from services.outcome_service import advance_ism_stage
+        if advance_ism_stage(lead, "engaged"):
+            lead.updated_at = utc_now()
+            lead.updated_by = actor_user_id
+            session.add(lead)
+            session.commit()
+    except Exception:
+        pass
 
     email_sent = False
     if lead.email:
@@ -332,6 +415,27 @@ async def book_demo(
     actual_lead_id = int(lead_info["lead_id"]) if lead_info.get("lead_id") else lead_id
     lead = get_lead_or_404(session, company_id, actual_lead_id)
 
+    # Dedup: if a scheduled appointment with overlapping products already exists, return it
+    existing = _find_existing_appointment(session, company_id, lead.id, products=products)
+    if existing:
+        logger.info(
+            "[book_demo] Dedup — lead %d already has appointment %d for similar products at %s",
+            lead.id, existing.id, existing.appointment_time,
+        )
+        m = re.search(r"products=([^;]+)", existing.notes or "", re.IGNORECASE)
+        existing_products = m.group(1).strip() if m else products
+        return {
+            "success": True,
+            "lead_id": lead.id,
+            "appointment_id": existing.id,
+            "demo_type": demo_type,
+            "products": existing_products,
+            "appointment_time": existing.appointment_time.isoformat(),
+            "email_sent": False,
+            "message": f"Demo already scheduled for {lead.name} — returning existing booking.",
+            "duplicate": True,
+        }
+
     appointment_time = await resolve_meeting_time(demo_date)
     location_parts = [part for part in [city, state, pincode] if part]
     location_text = ", ".join(location_parts) if location_parts else "online"
@@ -348,6 +452,17 @@ async def book_demo(
     session.add(appointment)
     session.commit()
     session.refresh(appointment)
+
+    # Advance ISM stage to "engaged" — they agreed to a demo
+    try:
+        from services.outcome_service import advance_ism_stage
+        if advance_ism_stage(lead, "engaged"):
+            lead.updated_at = utc_now()
+            lead.updated_by = actor_user_id
+            session.add(lead)
+            session.commit()
+    except Exception:
+        pass
 
     interaction = Interaction(
         company_id=company_id,

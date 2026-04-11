@@ -28,7 +28,8 @@ Return ONLY valid JSON with these keys:
 "website": string or null,
 "city": string or null,
 "state": string or null,
-"country": string or null
+"country": string or null,
+"verbal_rating": integer or null
 }
 
 Rules:
@@ -38,6 +39,7 @@ Rules:
 "unqualified", "qualified", "proposal", "follow_up", "not_interested"
 - next_action should be one of:
 "send_quote", "send_brochure", "schedule_demo", "follow_up_call", "follow_up_email", "close_lost", "none"
+- verbal_rating: if the customer gave a 1-5 rating during the call (e.g. "I'd say a 4"), extract the integer. Otherwise null.
 - Do not include markdown.
 - Do not include explanation text.
 """
@@ -123,22 +125,48 @@ async def extract_and_save_requirements(
             data=payload,
         )
 
+        # Save verbal rating as internal feedback if the customer gave one on the call
+        verbal_rating = structured.get("verbal_rating")
+        try:
+            verbal_rating = int(verbal_rating) if verbal_rating is not None else None
+        except (ValueError, TypeError):
+            verbal_rating = None
+        if verbal_rating and 1 <= verbal_rating <= 5:
+            try:
+                from models.models import Feedback, utc_now
+                fb = Feedback(
+                    company_id=company_id,
+                    lead_id=lead_id,
+                    interaction_id=interaction_id,
+                    submitted_by_user_id=actor_user_id,
+                    feedback_type="csat",
+                    source="customer",
+                    rating=verbal_rating,
+                    comment="Verbal rating given on call",
+                    status="submitted",
+                    responded_at=utc_now(),
+                    created_by=actor_user_id,
+                    updated_by=actor_user_id,
+                )
+                session.add(fb)
+                session.commit()
+                logger.info("[PostCall] Verbal rating=%s saved as feedback for lead %s", verbal_rating, lead_id)
+            except Exception as fb_exc:
+                logger.warning("[PostCall] Failed to save verbal feedback: %s", fb_exc)
+
         # Auto-generate and send quote if AI detected "send_quote" intent
         if structured.get("next_action") == "send_quote":
             try:
                 from services.voice_quote_service import auto_generate_and_send_quote
-                import asyncio
-                asyncio.create_task(
-                    auto_generate_and_send_quote(
-                        session=session,
-                        company_id=company_id,
-                        actor_user_id=actor_user_id,
-                        lead_id=lead_id,
-                        interaction_id=interaction_id,
-                        required_products_text=structured.get("required_products"),
-                    )
+                vq_result = await auto_generate_and_send_quote(
+                    session=session,
+                    company_id=company_id,
+                    actor_user_id=actor_user_id,
+                    lead_id=lead_id,
+                    interaction_id=interaction_id,
+                    required_products_text=structured.get("required_products"),
                 )
-                logger.info("[PostCall] Voice quote task queued for lead %s", lead_id)
+                logger.info("[PostCall] Voice quote sent for lead %s: %s", lead_id, vq_result)
             except Exception as vq_exc:
                 logger.warning("[PostCall] Voice quote dispatch failed: %s", vq_exc)
 
@@ -234,6 +262,28 @@ async def extract_and_save_requirements(
             )
         except Exception as comp_exc:
             logger.warning("Competitor extraction failed: %s", comp_exc)
+
+        # CSAT feedback email — send after any engaged/positive call
+        try:
+            from services.auto_csat_service import maybe_send_auto_csat, POSITIVE_OUTCOMES
+            qual = structured.get("qualification_status") or ""
+            # Map extraction qualification_status → normalized_outcome used by CSAT gate
+            csat_outcome = (
+                "answered_interested" if qual in ("qualified", "proposal")
+                else "answered_callback_requested" if qual == "follow_up"
+                else ""
+            )
+            maybe_send_auto_csat(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=lead_id,
+                interaction_id=interaction_id,
+                trigger="call",
+                normalized_outcome=csat_outcome,
+            )
+        except Exception as csat_exc:
+            logger.warning("[PostCall] CSAT dispatch failed: %s", csat_exc)
 
         # LangGraph post-call workflow — summarizer → booking/nurture decision
         try:

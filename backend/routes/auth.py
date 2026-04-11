@@ -1,3 +1,4 @@
+import asyncio
 import secrets
 import random
 import logging
@@ -47,6 +48,7 @@ from models.models import (
     utc_now,
 )
 from email_service import get_styled_html, send_smtp_email
+from utils.geoip import resolve_location
 from google_auth_oauthlib.flow import Flow
 from utils.url_utils import normalize_base_url
 from services.auth_service import (
@@ -66,8 +68,13 @@ def _generate_verification_token(session: Session, user: User) -> str:
 
 
 def _send_verification_email(user: User, token: str, company_name: str) -> None:
-    domain = os.getenv("DOMAIN", "localhost:3006")
+    domain = os.getenv("DOMAIN") or "localhost:3000"
     verification_url = f"https://{domain}/auth/verify-email?token={token}"
+    # base_url = normalize_base_url(
+    #     os.getenv("FRONTEND_BASE_URL") or os.getenv("DOMAIN"),
+    #     "https://localhost:3000",
+    # )
+    # verification_url = f"{base_url}/auth/verify-email?token={token}"
     subject = "Verify your Rio CRM account"
     body = (
         f"Hi {user.first_name or user.email},\n\n"
@@ -80,7 +87,7 @@ def _send_verification_email(user: User, token: str, company_name: str) -> None:
         body="Thanks for creating a Rio CRM account. Click the button below to verify your email address.",
         lead_name=user.first_name or "valued customer",
         company_name=company_name,
-        company_website=f"https://{domain}/",
+        company_website=f"https://{domain}",
         cta_url=verification_url,
         cta_label="Verify Email Address",
     )
@@ -96,6 +103,18 @@ logger = logging.getLogger(__name__)
 
 UPLOADS_DIR = Path(os.getenv("UPLOADS_DIR", os.path.join(os.getcwd(), "uploads")))
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _dated_upload_path(category: str, filename: str) -> tuple[Path, str]:
+    """
+    Build a dated path: uploads/<category>/YYYY-MM/DD/<filename>
+    Returns (absolute_path, url_path).
+    """
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    subdir = UPLOADS_DIR / category / now.strftime("%Y-%m") / now.strftime("%d")
+    subdir.mkdir(parents=True, exist_ok=True)
+    return subdir / filename, f"/uploads/{category}/{now.strftime('%Y-%m')}/{now.strftime('%d')}/{filename}"
 
 
 def _get_user_role(session: Session, user_id: int) -> str:
@@ -208,6 +227,18 @@ class CompanyProfileResponse(SQLModel):
     status: str
     subscription_tier: str
     max_users: int
+    contact_email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    pincode: Optional[str] = None
+    gst_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    nature_of_business: Optional[str] = None
+    vat_number: Optional[str] = None
+    cin_number: Optional[str] = None
 
 
 class CompanyProfileUpdateRequest(SQLModel):
@@ -220,6 +251,18 @@ class CompanyProfileUpdateRequest(SQLModel):
     status: Optional[str] = None
     subscription_tier: Optional[str] = None
     max_users: Optional[int] = None
+    contact_email: Optional[str] = None
+    phone: Optional[str] = None
+    address: Optional[str] = None
+    city: Optional[str] = None
+    state: Optional[str] = None
+    country: Optional[str] = None
+    pincode: Optional[str] = None
+    gst_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    nature_of_business: Optional[str] = None
+    vat_number: Optional[str] = None
+    cin_number: Optional[str] = None
 
 
 def _serialize_company(company: Company) -> CompanyProfileResponse:
@@ -233,6 +276,19 @@ def _serialize_company(company: Company) -> CompanyProfileResponse:
         status=company.status,
         subscription_tier=company.subscription_tier,
         max_users=company.max_users,
+        contact_email=company.contact_email,
+        phone=company.phone,
+        address=company.address,
+        city=company.city,
+        state=company.state,
+        country=company.country,
+        pincode=company.pincode,
+        gst_number=company.gst_number,
+        pan_number=company.pan_number,
+        nature_of_business=company.nature_of_business,
+        vat_number=company.vat_number,
+        cin_number=company.cin_number,
+
     )
 
 
@@ -328,6 +384,34 @@ def _send_reveal_code_email(user: User, company_name: str, company_website: str,
 
 
 router = APIRouter(tags=["Authentication"])
+
+
+def _get_client_ip(request: Request) -> str | None:
+    """Return real client IP, honouring X-Forwarded-For when behind a proxy."""
+    forwarded_for = request.headers.get("X-Forwarded-For")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    real_ip = request.headers.get("X-Real-IP")
+    if real_ip:
+        return real_ip.strip()
+    return request.client.host if request.client else None
+
+
+async def _update_login_location(login_id: int, ip: str | None) -> None:
+    """Background task: resolve IP → location and patch the LoginHistory row."""
+    from database import engine as _db_engine
+    from sqlmodel import Session as _Sess
+
+    location = await resolve_location(ip)
+    try:
+        with _Sess(_db_engine) as s:
+            row = s.get(LoginHistory, login_id)
+            if row:
+                row.location = location
+                s.add(row)
+                s.commit()
+    except Exception as exc:
+        logging.getLogger(__name__).debug("location update failed id=%s: %s", login_id, exc)
 
 
 @router.post("/companies/register", response_model=Token)
@@ -539,19 +623,21 @@ async def login(
     ).first()
 
     if not user or not verify_password(form_data.password, user.password_hash):
-        session.add(
-            LoginHistory(
-                company_id=user.company_id if user else None,
-                user_id=user.id if user else None,
-                email=user.email if user else identifier_lower,
-                event_type="login_failure",
-                success=False,
-                ip_address=request.client.host if request.client else None,
-                user_agent=request.headers.get("user-agent"),
-                failure_reason="incorrect_credentials",
-            )
+        _ip = _get_client_ip(request)
+        _lh = LoginHistory(
+            company_id=user.company_id if user else None,
+            user_id=user.id if user else None,
+            email=user.email if user else identifier_lower,
+            event_type="login_failure",
+            success=False,
+            ip_address=_ip,
+            user_agent=request.headers.get("user-agent"),
+            failure_reason="incorrect_credentials",
         )
+        session.add(_lh)
         session.commit()
+        session.refresh(_lh)
+        asyncio.create_task(_update_login_location(_lh.id, _ip))
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect email or password",
@@ -559,35 +645,39 @@ async def login(
         )
 
     if not user.is_active:
-        session.add(
-            LoginHistory(
-                company_id=user.company_id,
-                user_id=user.id,
-                email=user.email,
-                event_type="login_failure",
-                success=False,
-                ip_address=request.client.host if request.client else None,
-                user_agent=request.headers.get("user-agent"),
-                failure_reason="inactive_user",
-            )
+        _ip = _get_client_ip(request)
+        _lh = LoginHistory(
+            company_id=user.company_id,
+            user_id=user.id,
+            email=user.email,
+            event_type="login_failure",
+            success=False,
+            ip_address=_ip,
+            user_agent=request.headers.get("user-agent"),
+            failure_reason="inactive_user",
         )
+        session.add(_lh)
         session.commit()
+        session.refresh(_lh)
+        asyncio.create_task(_update_login_location(_lh.id, _ip))
         raise HTTPException(status_code=403, detail="Inactive user")
 
     if not user.email_verified:
-        session.add(
-            LoginHistory(
-                company_id=user.company_id,
-                user_id=user.id,
-                email=user.email,
-                event_type="login_failure",
-                success=False,
-                ip_address=request.client.host if request.client else None,
-                user_agent=request.headers.get("user-agent"),
-                failure_reason="email_not_verified",
-            )
+        _ip = _get_client_ip(request)
+        _lh = LoginHistory(
+            company_id=user.company_id,
+            user_id=user.id,
+            email=user.email,
+            event_type="login_failure",
+            success=False,
+            ip_address=_ip,
+            user_agent=request.headers.get("user-agent"),
+            failure_reason="email_not_verified",
         )
+        session.add(_lh)
         session.commit()
+        session.refresh(_lh)
+        asyncio.create_task(_update_login_location(_lh.id, _ip))
         raise HTTPException(
             status_code=403,
             detail={
@@ -597,54 +687,58 @@ async def login(
             },
         )
 
+    _ip = _get_client_ip(request)
     mfa_token = request.query_params.get("mfa_token")
     if user.mfa_enabled:
         if not mfa_token:
-            session.add(
-                LoginHistory(
-                    company_id=user.company_id,
-                    user_id=user.id,
-                    email=user.email,
-                    event_type="login_failure",
-                    success=False,
-                    ip_address=request.client.host if request.client else None,
-                    user_agent=request.headers.get("user-agent"),
-                    failure_reason="mfa_required",
-                )
+            _lh = LoginHistory(
+                company_id=user.company_id,
+                user_id=user.id,
+                email=user.email,
+                event_type="login_failure",
+                success=False,
+                ip_address=_ip,
+                user_agent=request.headers.get("user-agent"),
+                failure_reason="mfa_required",
             )
+            session.add(_lh)
             session.commit()
+            session.refresh(_lh)
+            asyncio.create_task(_update_login_location(_lh.id, _ip))
             raise HTTPException(status_code=403, detail="MFA_REQUIRED")
 
         if not user.mfa_secret or not verify_mfa_token(user.mfa_secret, mfa_token):
-            session.add(
-                LoginHistory(
-                    company_id=user.company_id,
-                    user_id=user.id,
-                    email=user.email,
-                    event_type="login_failure",
-                    success=False,
-                    ip_address=request.client.host if request.client else None,
-                    user_agent=request.headers.get("user-agent"),
-                    failure_reason="invalid_mfa",
-                )
+            _lh = LoginHistory(
+                company_id=user.company_id,
+                user_id=user.id,
+                email=user.email,
+                event_type="login_failure",
+                success=False,
+                ip_address=_ip,
+                user_agent=request.headers.get("user-agent"),
+                failure_reason="invalid_mfa",
             )
+            session.add(_lh)
             session.commit()
+            session.refresh(_lh)
+            asyncio.create_task(_update_login_location(_lh.id, _ip))
             raise HTTPException(status_code=401, detail="Invalid MFA token")
 
     user.last_login_at = utc_now()
     session.add(user)
-    session.add(
-        LoginHistory(
-            company_id=user.company_id,
-            user_id=user.id,
-            email=user.email,
-            event_type="login_success",
-            success=True,
-            ip_address=request.client.host if request.client else None,
-            user_agent=request.headers.get("user-agent"),
-        )
+    _lh = LoginHistory(
+        company_id=user.company_id,
+        user_id=user.id,
+        email=user.email,
+        event_type="login_success",
+        success=True,
+        ip_address=_ip,
+        user_agent=request.headers.get("user-agent"),
     )
+    session.add(_lh)
     session.commit()
+    session.refresh(_lh)
+    asyncio.create_task(_update_login_location(_lh.id, _ip))
 
     token = create_access_token(
         {
@@ -898,12 +992,11 @@ async def upload_avatar(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    extension = Path(file.filename).suffix or ""
+    extension = Path(file.filename or "").suffix or ""
     target_name = f"{uuid4().hex}{extension}"
-    target_path = UPLOADS_DIR / target_name
-    contents = await file.read()
-    target_path.write_bytes(contents)
-    current_user.profile_picture_url = f"/uploads/{target_name}"
+    target_path, url_path = _dated_upload_path("avatars", target_name)
+    target_path.write_bytes(await file.read())
+    current_user.profile_picture_url = url_path
     session.add(current_user)
     session.commit()
     session.refresh(current_user)
@@ -925,16 +1018,15 @@ async def upload_company_logo(
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("settings.manage_company")),
 ):
-    extension = Path(file.filename).suffix or ""
+    extension = Path(file.filename or "").suffix or ""
     target_name = f"{uuid4().hex}{extension}"
-    target_path = UPLOADS_DIR / target_name
-    contents = await file.read()
-    target_path.write_bytes(contents)
+    target_path, url_path = _dated_upload_path("logos", target_name)
+    target_path.write_bytes(await file.read())
 
     company = session.get(Company, current_user.company_id)
     if not company:
         raise HTTPException(status_code=404, detail="Company not found")
-    company.logo_url = f"/uploads/{target_name}"
+    company.logo_url = url_path
     session.add(company)
     session.commit()
     session.refresh(company)
@@ -1334,6 +1426,30 @@ async def update_company_profile(
             if existing:
                 raise HTTPException(status_code=409, detail="Slug already in use")
             company.slug = slug
+    if data.contact_email is not None:
+        company.contact_email = data.contact_email.strip()
+    if data.phone is not None:
+        company.phone = data.phone.strip()
+    if data.address is not None:
+        company.address = data.address.strip()
+    if data.city is not None:
+        company.city = data.city.strip()
+    if data.state is not None:
+        company.state = data.state.strip()
+    if data.country is not None:
+        company.country = data.country.strip()
+    if data.pincode is not None:
+        company.pincode = data.pincode.strip()
+    if data.nature_of_business is not None:
+        company.nature_of_business = data.nature_of_business.strip()
+    if data.gst_number is not None:
+        company.gst_number = data.gst_number.strip()
+    if data.pan_number is not None:
+        company.pan_number = data.pan_number.strip()
+    if data.vat_number is not None:
+        company.vat_number = data.vat_number.strip()
+    if data.cin_number is not None:
+        company.cin_number = data.cin_number.strip()
 
     try:
         session.add(company)

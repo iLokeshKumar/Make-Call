@@ -14,16 +14,12 @@ from services.dialer_service import create_batch_call_tasks, is_lead_callable, o
 import services.next_action_service as next_action_service
 import services.quote_service as quote_service
 from services.outcome_service import apply_call_outcome
-from services.tracking_service import (
-    build_quote_view_url,
-    ensure_interaction_tracking_token,
-    ingest_email_webhook_event,
-    ingest_whatsapp_webhook_event,
-    record_email_open,
-    record_quote_open_by_token,
-    rewrite_click_tracking_links,
-    unsubscribe_lead,
-)
+from services.email_tracking_service import build_quote_view_url, ensure_interaction_tracking_token, rewrite_click_tracking_links
+from services.engagement_service import record_email_open
+from services.inbound_email_service import ingest_email_webhook_event
+from services.inbound_whatsapp_service import ingest_whatsapp_webhook_event
+from services.opt_out_service import unsubscribe_lead
+from services.quote_service import record_quote_open_by_token
 
 
 class PhaseOneTwoServicesTest(unittest.TestCase):

@@ -200,84 +200,51 @@ class EmailWriter:
         pain_points: List[str],
         questions: List[str],
         icp_score: float,
-        suggested_action: str
+        suggested_action: str,
     ) -> tuple:
         """
-        Generate personalized follow-up email subject and body.
-        
-        Args:
-            lead_name: Name of the lead
-            company: Lead's company
-            pain_points: List of pain points from call
-            questions: List of questions from call
-            icp_score: ICP qualification score
-            suggested_action: "book_demo" | "send_resources" | "discount_offer"
-        
+        Generate personalized follow-up email subject and body text.
+        Does NOT include a greeting or sign-off — those are added by get_styled_html.
+
         Returns:
-            (subject, html_body) tuple
+            (subject, body) tuple
         """
-        
-        # Generate dynamic subject
         if suggested_action == "book_demo":
-            subject = f"{lead_name}, your personalized Rio CRM demo is ready"
+            subject = "Let's set up your personalized demo"
         elif suggested_action == "discount_offer":
-            subject = f"Special 15% offer for {company} - Limited time"
+            subject = f"A special offer{' for ' + company if company else ''}"
         else:
-            subject = f"Resources for {', '.join(pain_points[:1])} challenges"
-        
-        # Generate dynamic body
-        pain_points_html = "".join([f"<li>{pain}</li>" for pain in pain_points])
-        
-        html_body = f"""
-        <h2>Hi {lead_name},</h2>
-        
-        <p>Thank you for speaking with our team today. We really enjoyed learning about {company} 
-        and understanding your goals.</p>
-        
-        <p><strong>We heard you're tackling:</strong></p>
-        <ul>
-            {pain_points_html}
-        </ul>
-        
-        """
-        
-        # Add action-specific content
+            subject = "Following up from today's call"
+
+        pain_html = "".join(f"<li>{p}</li>" for p in pain_points) if pain_points else ""
+
+        parts = ["Thank you for speaking with our team today."]
+
+        if pain_html:
+            parts.append(f"<strong>Based on our conversation, we know you're working on:</strong><ul>{pain_html}</ul>")
+
         if suggested_action == "book_demo":
-            html_body += f"""
-            <p>Based on our conversation, we think Rio CRM could be a great fit for your team. 
-            Would you like to see a personalized demo tailored to your needs?</p>
-            <p><a href="https://rio-crm.example.com/book-demo" 
-                  style="background-color: #007bff; color: white; padding: 10px 20px; 
-                  text-decoration: none; border-radius: 5px;">Schedule Your Demo</a></p>
-            """
+            parts.append(
+                "We think a personalized demo would be a great next step — "
+                "we'll tailor it specifically to your needs."
+            )
         elif suggested_action == "discount_offer":
-            html_body += f"""
-            <p>We'd like to make this easy for you. As a special offer, we're providing 
-            <strong>15% off</strong> your first year when you sign up this month.</p>
-            <p><a href="https://rio-crm.example.com/special-offer" 
-                  style="background-color: #28a745; color: white; padding: 10px 20px; 
-                  text-decoration: none; border-radius: 5px;">Claim Your Offer</a></p>
-            """
+            parts.append(
+                "We'd like to make this easy for you. We're offering "
+                "<strong>15% off</strong> your first year when you sign up this month."
+            )
         else:
-            html_body += f"""
-            <p>Here are some resources that may help:</p>
-            <ul>
-                <li><a href="#">Blog: {pain_points[0] if pain_points else 'Sales'} Best Practices</a></li>
-                <li><a href="#">Case Study: Similar to {company}</a></li>
-                <li><a href="#">Webinar: Industry Trends</a></li>
-            </ul>
-            """
-        
-        html_body += f"""
-        <p>Feel free to reply to this email or call us anytime. We're here to help!</p>
-        <p>Best regards,<br/>Rio Sales Team</p>
-        """
-        
+            parts.append(
+                "We'll follow up with resources tailored to your specific situation. "
+                "Feel free to reply to this email anytime — we're here to help."
+            )
+
+        body = "\n\n".join(parts)
+
         print(f"📝 [EMAIL_WRITER] Generated personalized email for {lead_name}")
-        print(f"   Subject: {subject}")
-        print(f"   Action: {suggested_action}")
-        
-        return subject, html_body
+        print(f"   Subject: {subject}, Action: {suggested_action}")
+
+        return subject, body
     
     @staticmethod
     def send_personalized_followup(
@@ -291,27 +258,46 @@ class EmailWriter:
         pain_points: List[str],
         questions: List[str],
         icp_score: float,
-        suggested_action: str
+        suggested_action: str,
+        interaction_id: Optional[int] = None,
     ) -> bool:
         """
         Generate and send personalized follow-up email via communication_service.
+        Attaches a CSAT feedback link as the email CTA.
         """
         try:
             from services.communication_service import send_email_to_lead
+            from services.csat_service import get_csat_base_url, get_or_create_pending_csat
 
-            # Generate email content
-            subject, html_body = EmailWriter.generate_personalized_email(
+            subject, body = EmailWriter.generate_personalized_email(
                 lead_name, company, pain_points, questions, icp_score, suggested_action
             )
 
-            # Send via the real multi-tenant email service (handles SMTP creds, tracking, opt-out)
+            # Create (or reuse) a pending CSAT record so we can embed a real feedback URL
+            cta_url = ""
+            cta_label = ""
+            try:
+                fb, _ = get_or_create_pending_csat(
+                    session,
+                    company_id=company_id,
+                    lead_id=lead_id,
+                    actor_user_id=actor_user_id,
+                    interaction_id=interaction_id,
+                )
+                cta_url = f"{get_csat_base_url()}/feedback/{fb.token}"
+                cta_label = "Share Your Feedback"
+            except Exception as csat_exc:
+                print(f"⚠️ [EMAIL_WRITER] Could not create CSAT record: {csat_exc}")
+
             result = send_email_to_lead(
                 session=session,
                 company_id=company_id,
                 actor_user_id=actor_user_id,
                 lead_id=lead_id,
                 subject=subject,
-                body=html_body,
+                body=body,
+                cta_url=cta_url,
+                cta_label=cta_label,
             )
 
             print(f"✓ [EMAIL_WRITER] Email sent to {lead_email} | status: {result.get('status')}")
@@ -372,9 +358,9 @@ async def execute_post_call_nurture(
         )
         result["summary_saved"] = CallSummarizer.save_summary_to_crm(lead_id, summary)
         
-        # Step 2: Update lead status in CRM
+        # Step 2: Update lead status in CRM (no notes — outcomes go on Interaction, not lead.notes)
         new_status = "Qualified" if call_data["icp_score"] > 0.75 else "Not Qualified"
-        notes = f"Call outcome: {call_data['call_outcome']}, ICP Score: {call_data['icp_score']}"
+        notes = f"Call outcome: {call_data['call_outcome']}. ICP Score: {call_data['icp_score']}. Sentiment: {call_data['sentiment']}."
         result["status_updated"] = CRMUpdater.update_lead_status(lead_id, new_status, notes)
         
         # Step 3: Send personalized follow-up email

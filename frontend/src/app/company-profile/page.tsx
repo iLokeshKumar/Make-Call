@@ -17,6 +17,20 @@ type CompanyProfile = {
   status: string;
   subscription_tier: string;
   max_users: number;
+
+  contact_email?: string;
+  phone?: string;
+  address?: string;
+  city?: string;
+  state?: string;
+  country?: string;
+  pincode?: string;
+  gst_number?: string;
+  pan_number?: string;
+  nature_of_business?: string;
+  vat_number?: string;
+  cin_number?: string;
+
 };
 
 const STATUS_OPTIONS = ["Active", "Suspended", "Trial"];
@@ -172,15 +186,71 @@ export default function CompanyProfilePage() {
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <label className="space-y-2 text-sm font-semibold">
-              <span>Logo URL</span>
-              <input
-                type="url"
-                value={form.logo_url ?? ""}
-                onChange={(e) => setForm({ ...form, logo_url: e.target.value })}
-                className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
-              />
-            </label>
+            <div className="space-y-2 text-sm font-semibold">
+              <span>Company Logo</span>
+              <div className="flex items-center gap-3 mt-1">
+                {form.logo_url ? (
+                  <img
+                    src={form.logo_url}
+                    alt="Company logo"
+                    className="h-14 w-14 rounded-xl object-contain border border-slate-200 bg-slate-50 p-1"
+                  />
+                ) : (
+                  <div className="h-14 w-14 rounded-xl border-2 border-dashed border-slate-300 bg-slate-50 flex items-center justify-center text-slate-400 text-xs">
+                    No logo
+                  </div>
+                )}
+                <div className="flex-1 space-y-1">
+                  <label className="cursor-pointer inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50 transition-colors">
+                    <input
+                      type="file"
+                      accept="image/*"
+                      className="hidden"
+                      disabled={logoUploading}
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        setLogoUploading(true);
+                        setLogoFeedback(null);
+                        try {
+                          const fd = new FormData();
+                          fd.append("file", file);
+                          const res = await fetch(`${API_BASE}/company-profile/logo`, {
+                            method: "POST",
+                            headers: { Authorization: `Bearer ${token}` },
+                            body: fd,
+                          });
+                          if (!res.ok) throw new Error("Upload failed");
+                          const data = await res.json();
+                          setForm({ ...form, logo_url: data.logo_url });
+                          setLogoFeedback("Logo updated");
+                        } catch {
+                          setLogoFeedback("Upload failed");
+                        } finally {
+                          setLogoUploading(false);
+                          e.target.value = "";
+                        }
+                      }}
+                    />
+                    {logoUploading ? "Uploading…" : "Upload logo"}
+                  </label>
+                  {logoFeedback && (
+                    <p className={`text-xs ${logoFeedback === "Logo updated" ? "text-emerald-500" : "text-red-500"}`}>
+                      {logoFeedback}
+                    </p>
+                  )}
+                  {form.logo_url && (
+                    <button
+                      type="button"
+                      onClick={() => setForm({ ...form, logo_url: "" })}
+                      className="text-xs text-red-400 hover:text-red-600"
+                    >
+                      Remove
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
             <label className="space-y-2 text-sm font-semibold">
               <span>Primary color</span>
               <input
@@ -191,6 +261,97 @@ export default function CompanyProfilePage() {
                 className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
               />
             </label>
+          </div>
+
+          {/* ── Contact & Billing (used on quotes/PDFs) ── */}
+          <div className="pt-2 border-t border-slate-100">
+            <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-3">Contact &amp; Billing — shown on quotes &amp; invoices</p>
+            <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm font-semibold">
+                <span>Contact Email</span>
+                <input type="email" value={form.contact_email ?? ""}
+                  onChange={(e) => setForm({ ...form, contact_email: e.target.value })}
+                  placeholder="billing@yourcompany.com"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>Phone</span>
+                <input type="tel" value={form.phone ?? ""}
+                  onChange={(e) => setForm({ ...form, phone: e.target.value })}
+                  placeholder="+91 98765 43210"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+            </div>
+            <div className="mt-4">
+              <label className="space-y-2 text-sm font-semibold">
+                <span>Street Address</span>
+                <input type="text" value={form.address ?? ""}
+                  onChange={(e) => setForm({ ...form, address: e.target.value })}
+                  placeholder="Building, Street, Area"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+            </div>
+            <div className="grid grid-cols-2 gap-4 mt-4 md:grid-cols-4">
+              <label className="space-y-2 text-sm font-semibold">
+                <span>City</span>
+                <input type="text" value={form.city ?? ""}
+                  onChange={(e) => setForm({ ...form, city: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>State</span>
+                <input type="text" value={form.state ?? ""}
+                  onChange={(e) => setForm({ ...form, state: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>Pincode</span>
+                <input type="text" value={form.pincode ?? ""}
+                  onChange={(e) => setForm({ ...form, pincode: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>Country</span>
+                <input type="text" value={form.country ?? ""}
+                  onChange={(e) => setForm({ ...form, country: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+            </div>
+            <div className="grid grid-cols-1 gap-4 mt-4 md:grid-cols-2">
+              <label className="space-y-2 text-sm font-semibold">
+                <span>GST Number</span>
+                <input type="text" value={form.gst_number ?? ""}
+                  onChange={(e) => setForm({ ...form, gst_number: e.target.value })}
+                  placeholder="22AAAAA0000A1Z5"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>PAN Number</span>
+                <input type="text" value={form.pan_number ?? ""}
+                  onChange={(e) => setForm({ ...form, pan_number: e.target.value })}
+                  placeholder="AAAAA0000A"
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>Nature of Business</span>
+                <input type="text" value={form.nature_of_business ?? ""}
+                  onChange={(e) => setForm({ ...form, nature_of_business: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>VAT Number</span>
+                <input type="text" value={form.vat_number ?? ""}
+                  onChange={(e) => setForm({ ...form, vat_number: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+              <label className="space-y-2 text-sm font-semibold">
+                <span>CIN Number</span>
+                <input type="text" value={form.cin_number ?? ""}
+                  onChange={(e) => setForm({ ...form, cin_number: e.target.value })}
+                  className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+              </label>
+
+            </div>
           </div>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-3">

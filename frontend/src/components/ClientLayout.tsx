@@ -10,7 +10,12 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     const { user, isLoading, isSessionExpired, logout } = useAuth();
     const router = useRouter();
 
-    const isAuthPage = pathname === "/login" || pathname === "/register" || pathname === "/invite/accept";
+    const isAuthPage =
+        pathname === "/login" ||
+        pathname === "/register" ||
+        pathname === "/invite/accept" ||
+        pathname.startsWith("/q/") ||         // public quote view
+        pathname.startsWith("/feedback/");    // public CSAT feedback
 
     useEffect(() => {
         if (!isLoading && !user && !isAuthPage) {

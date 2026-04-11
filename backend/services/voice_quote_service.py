@@ -20,7 +20,8 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from models.models import Lead, Product, QuoteCreate, QuoteItemCreate, utc_now
-from services.quote_service import create_quote, generate_quote_pdf
+from services.quote_service import create_quote
+from services.quote_pdf_service import generate_quote_pdf
 from services.communication_service import send_quote_to_lead
 from credentials_service import get_company_credential
 
@@ -197,7 +198,6 @@ async def auto_generate_and_send_quote(
     # Send via all channels
     subject = f"Quotation {quote.quote_number} – as discussed"
     message = (
-        f"Hi {lead.name},\n\n"
         f"As promised during our call, please find your quotation {quote.quote_number}.\n"
         f"Total: {quote.currency} {quote.total_amount}\n\n"
         f"This quote is valid until {quote.valid_until.strftime('%d %b %Y') if quote.valid_until else 'N/A'}.\n\n"

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Path
+from fastapi import APIRouter, Depends, HTTPException, Path, Query
 from fastapi.responses import Response
 from sqlmodel import Session, select, func, text
 from datetime import datetime, timezone, timedelta
@@ -9,6 +9,7 @@ from auth import get_current_user
 from services.analytics_service import (
     create_alert,
     evaluate_alerts,
+    get_call_conversion_summary,
     get_campaign_drilldown,
     get_campaign_email_report,
     get_engagement_summary,
@@ -271,13 +272,43 @@ async def get_my_latency_logs(
 
 @router.get("/engagement-summary")
 async def engagement_summary(
-    days: int = 7,
+    days: int = 30,
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    if days < 1:
-        raise HTTPException(status_code=400, detail="days must be >= 1")
-    return get_engagement_summary(session, current_user.company_id, lookback_days=days)
+    since: Optional[datetime] = None
+    until: Optional[datetime] = None
+    if date_from:
+        try:
+            since = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from format (use YYYY-MM-DD)")
+    if date_to:
+        try:
+            until = datetime.fromisoformat(date_to).replace(hour=23, minute=59, second=59, tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to format (use YYYY-MM-DD)")
+    if since is None:
+        if days < 1:
+            raise HTTPException(status_code=400, detail="days must be >= 1")
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+    return get_engagement_summary(session, current_user.company_id, since=since, until=until)
+
+
+@router.get("/call-conversion")
+async def call_conversion(
+    days: int = 30,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Call-to-outcome conversion rates for the last N days.
+    Returns: total_calls, leads_called, demos_booked, quotes_sent,
+             closed_won, demo_rate_pct, quote_rate_pct, close_rate_pct.
+    """
+    return get_call_conversion_summary(session, current_user.company_id, days=days)
 
 
 @router.get("/campaign-drilldown")
@@ -389,3 +420,96 @@ async def analytics_alert_delete(
     session.delete(alert)
     session.commit()
     return {"deleted": True, "alert_id": alert_id}
+
+
+@router.get("/latency/trace/{trace_id}")
+async def get_latency_trace(
+    trace_id: str = Path(..., description="Call trace_id — UUID hex from LatencyLog"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return the full per-turn STT→LLM→TTS waterfall for a single call.
+    Turns are ordered by turn_index (ascending).
+    """
+    rows = session.exec(
+        select(LatencyLog)
+        .where(LatencyLog.trace_id == trace_id)
+        .where(LatencyLog.company_id == current_user.company_id)
+        .order_by(LatencyLog.turn_index)
+    ).all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="Trace not found")
+
+    return {
+        "trace_id": trace_id,
+        "turns": [
+            {
+                "turn_index": r.turn_index,
+                "span_id": r.span_id,
+                "span_status": r.span_status or "ok",
+                "engine": r.engine,
+                "stt_ms": float(r.stt_ms),
+                "llm_ms": float(r.llm_ms),
+                "tts_ms": float(r.tts_ms),
+                "total_ms": float(r.total_ms),
+                "stt_provider": r.stt_provider,
+                "llm_provider": r.llm_provider,
+                "tts_provider": r.tts_provider,
+                "stt_model": r.stt_model,
+                "llm_model": r.llm_model,
+                "tts_model": r.tts_model,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+        "summary": {
+            "total_turns": len(rows),
+            "stt_avg_ms": round(sum(float(r.stt_ms) for r in rows) / len(rows), 1),
+            "llm_avg_ms": round(sum(float(r.llm_ms) for r in rows) / len(rows), 1),
+            "tts_avg_ms": round(sum(float(r.tts_ms) for r in rows) / len(rows), 1),
+            "total_avg_ms": round(sum(float(r.total_ms) for r in rows) / len(rows), 1),
+            "errors": sum(1 for r in rows if r.span_status == "error"),
+        },
+    }
+
+
+@router.get("/latency/by-interaction/{interaction_id}")
+async def get_latency_by_interaction(
+    interaction_id: int = Path(...),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return all LatencyLog turns for an interaction, with trace context.
+    Useful for debugging a specific call from the lead detail page.
+    """
+    rows = session.exec(
+        select(LatencyLog)
+        .where(LatencyLog.interaction_id == interaction_id)
+        .where(LatencyLog.company_id == current_user.company_id)
+        .order_by(LatencyLog.turn_index.nulls_last(), LatencyLog.id)
+    ).all()
+
+    if not rows:
+        raise HTTPException(status_code=404, detail="No latency data for this interaction")
+
+    trace_id = next((r.trace_id for r in rows if r.trace_id), None)
+
+    return {
+        "interaction_id": interaction_id,
+        "trace_id": trace_id,
+        "turns": [
+            {
+                "turn_index": r.turn_index,
+                "span_id": r.span_id,
+                "span_status": r.span_status or "ok",
+                "stt_ms": float(r.stt_ms),
+                "llm_ms": float(r.llm_ms),
+                "tts_ms": float(r.tts_ms),
+                "total_ms": float(r.total_ms),
+            }
+            for r in rows
+        ],
+    }

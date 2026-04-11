@@ -13,7 +13,7 @@ from twilio.twiml.voice_response import Connect, VoiceResponse
 from auth import PermissionChecker, get_current_user
 from communicators import ExotelCommunicator, TwilioCommunicator
 from credentials_service import get_company_credential
-from database import engine, get_session
+from database import get_session
 from models.models import Company, Interaction, Lead, User, utc_now
 from services.dialer_service import initiate_outbound_call
 from services.outcome_service import apply_call_outcome
@@ -33,14 +33,18 @@ def get_communicator_for_source(source: str, websocket):
 
 
 @router.post("/outgoing-call")
-async def outgoing_call(request: Request, lead_id: int | None = None, user_id: int | None = None):
+async def outgoing_call(
+    request: Request,
+    lead_id: int | None = None,
+    user_id: int | None = None,
+    session: Session = Depends(get_session),
+):
     interaction_id = request.query_params.get("interaction_id")
     call_task_id = request.query_params.get("call_task_id", "0")
 
-    with Session(engine) as session:
-        target_user = session.get(User, user_id) if user_id else None
-        company = session.get(Company, target_user.company_id) if target_user else None
-        company_name = company.name if company else "Rio CRM"
+    target_user = session.get(User, user_id) if user_id else None
+    company = session.get(Company, target_user.company_id) if target_user else None
+    company_name = company.name if company else "Rio CRM"
 
     response = VoiceResponse()
     response.say(f"Connected to {company_name}. Please start speaking.")

@@ -153,7 +153,7 @@ function EmailCard({
           : "border-blue-200 bg-blue-50 dark:border-blue-500/20 dark:bg-blue-500/5"
       }`}
     >
-      {/* ── header row ── */}
+      {/* header row */}
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -223,7 +223,7 @@ function EmailCard({
         </div>
       )}
 
-      {/* ── expanded body ── */}
+      {/* expanded body */}
       {expanded && (
         <div className="px-4 pb-4 space-y-3">
           {bodyText ? (

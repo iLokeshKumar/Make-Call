@@ -166,7 +166,7 @@ export default function ProfilePage() {
             };
             finalizeGoogleAuth();
         }
-    }, [searchParams, token]); // ← remove refreshUser and router from deps
+    }, [searchParams, token]);
 
     useEffect(() => {
         if (token) {

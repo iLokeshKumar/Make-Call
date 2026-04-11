@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import {
   CheckCircle,
   FileDown,
@@ -61,13 +61,16 @@ function fmtAmount(amount?: number | null, currency?: string) {
 }
 
 const STATUS_COLORS: Record<string, string> = {
-  draft: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-  sent: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
-  accepted: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
-  rejected: "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300",
+  draft:       "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+  pending:     "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
+  sent:        "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
+  accepted:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
+  rejected:    "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300",
+  negotiation: "bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300",
+  expired:     "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-500",
 };
 
-const STATUS_TABS = ["All", "Draft", "Sent", "Accepted", "Rejected"];
+const STATUS_TABS = ["All", "Draft", "Sent", "Accepted", "Rejected", "Negotiation"];
 
 const emptyItem = (): QuoteItem => ({
   product_name_snapshot: "",
@@ -146,7 +149,7 @@ export default function QuotesPage() {
         setLeads(d.items ?? d ?? []);
       }
     } catch {
-      // non-fatal
+      
     }
   }, [token]);
 
@@ -158,7 +161,7 @@ export default function QuotesPage() {
       });
       if (res.ok) setProducts(await res.json());
     } catch {
-      // non-fatal
+      
     }
   }, [token]);
 
@@ -685,9 +688,8 @@ export default function QuotesPage() {
               </thead>
               <tbody className="divide-y divide-slate-100 dark:divide-white/5">
                 {filteredQuotes.map((quote) => (
-                  <>
+                  <React.Fragment key={quote.id}>
                     <tr
-                      key={quote.id}
                       className="hover:bg-slate-50/60 dark:hover:bg-white/[0.02] transition-colors"
                     >
                       <td className="px-4 py-3 font-mono text-xs font-semibold text-violet-700 dark:text-violet-300">
@@ -714,8 +716,21 @@ export default function QuotesPage() {
                       <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
                         {fmtDate(quote.sent_at)}
                       </td>
-                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
-                        {fmtDate(quote.opened_at)}
+                      <td className="px-4 py-3">
+                        {quote.opened_at ? (
+                          <div>
+                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-xs font-semibold text-emerald-400">
+                              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                              Opened
+                            </span>
+                            <p className="mt-0.5 text-[10px] text-slate-500">{fmtDate(quote.opened_at)}</p>
+                          </div>
+                        ) : (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-slate-500/10 px-2 py-0.5 text-xs font-medium text-slate-500">
+                            <span className="h-1.5 w-1.5 rounded-full bg-slate-500" />
+                            Not opened
+                          </span>
+                        )}
                       </td>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-1">
@@ -784,7 +799,7 @@ export default function QuotesPage() {
 
                     {/* Inline send panel */}
                     {sendingQuoteId === quote.id && (
-                      <tr key={`send-${quote.id}`}>
+                      <tr>
                         <td colSpan={8} className="bg-blue-50/60 dark:bg-blue-500/5 px-4 py-4">
                           <div className="space-y-3 max-w-xl">
                             <p className="text-sm font-semibold text-slate-800 dark:text-slate-100">
@@ -848,7 +863,7 @@ export default function QuotesPage() {
                         </td>
                       </tr>
                     )}
-                  </>
+                  </React.Fragment>
                 ))}
               </tbody>
             </table>

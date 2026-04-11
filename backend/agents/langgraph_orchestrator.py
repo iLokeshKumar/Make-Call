@@ -27,9 +27,7 @@ from sqlmodel import Session, select
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
 # Shared state
-# ---------------------------------------------------------------------------
 
 class AgentState(TypedDict):
     """Shared state passed between all LangGraph nodes."""
@@ -53,9 +51,7 @@ class AgentState(TypedDict):
     timestamp: str
 
 
-# ---------------------------------------------------------------------------
 # RESEARCHER AGENT — pre-call enrichment & scoring
-# ---------------------------------------------------------------------------
 
 def researcher_agent(state: AgentState) -> AgentState:
     """
@@ -89,9 +85,7 @@ def researcher_agent(state: AgentState) -> AgentState:
     return state
 
 
-# ---------------------------------------------------------------------------
 # VOICE AGENT — pass-through (real call happens in main.py / voice_pipeline.py)
-# ---------------------------------------------------------------------------
 
 def voice_agent(state: AgentState) -> AgentState:
     """
@@ -110,9 +104,7 @@ def voice_agent(state: AgentState) -> AgentState:
     return state
 
 
-# ---------------------------------------------------------------------------
 # SUMMARIZER AGENT — save call summary to CRM
-# ---------------------------------------------------------------------------
 
 def summarizer_agent(state: AgentState) -> AgentState:
     """Saves a structured call summary as a CRM interaction record."""
@@ -139,9 +131,7 @@ def summarizer_agent(state: AgentState) -> AgentState:
     return state
 
 
-# ---------------------------------------------------------------------------
 # DECISION — conditional edge
-# ---------------------------------------------------------------------------
 
 def determine_next_action(state: AgentState) -> str:
     action = state.get("next_action", "none")
@@ -152,9 +142,7 @@ def determine_next_action(state: AgentState) -> str:
     return END
 
 
-# ---------------------------------------------------------------------------
 # BOOK DEMO AGENT — update lead status + send confirmation email
-# ---------------------------------------------------------------------------
 
 def book_demo_agent(state: AgentState) -> AgentState:
     """Updates lead to Demo Scheduled and sends a confirmation email."""
@@ -187,9 +175,7 @@ def book_demo_agent(state: AgentState) -> AgentState:
     return state
 
 
-# ---------------------------------------------------------------------------
 # NURTURE AGENT — personalized follow-up email for non-demo leads
-# ---------------------------------------------------------------------------
 
 def nurture_agent(state: AgentState) -> AgentState:
     """
@@ -211,9 +197,7 @@ def nurture_agent(state: AgentState) -> AgentState:
     return state
 
 
-# ---------------------------------------------------------------------------
 # GRAPH BUILDER
-# ---------------------------------------------------------------------------
 
 def _build_post_call_graph():
     """
@@ -238,9 +222,7 @@ def _build_post_call_graph():
     return workflow.compile()
 
 
-# ---------------------------------------------------------------------------
 # PUBLIC ENTRY POINTS
-# ---------------------------------------------------------------------------
 
 async def run_researcher(lead_id: int, company_id: int, actor_user_id: int) -> dict:
     """

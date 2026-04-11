@@ -54,6 +54,24 @@ def _parse_header(raw: str | None) -> str:
     return " ".join(parts).strip()
 
 
+def _safe_decode(payload: bytes, charset: str) -> str:
+    """Decode bytes to str, falling back through common charsets on failure."""
+    # Normalize charset — "binary", "unknown-8bit", etc. are not real codecs
+    _FALLBACK_CHARSETS = ("utf-8", "latin-1", "cp1252")
+    normalized = (charset or "utf-8").strip().lower()
+    if normalized in ("binary", "unknown", "unknown-8bit", "x-unknown", ""):
+        normalized = "utf-8"
+    try:
+        return payload.decode(normalized, errors="replace")
+    except (LookupError, UnicodeDecodeError):
+        for cs in _FALLBACK_CHARSETS:
+            try:
+                return payload.decode(cs, errors="replace")
+            except (LookupError, UnicodeDecodeError):
+                continue
+    return payload.decode("latin-1", errors="replace")
+
+
 def _extract_body(msg) -> tuple[str, str]:
     """Return (plain_text, html_text) from an email.message object."""
     plain = ""
@@ -68,7 +86,7 @@ def _extract_body(msg) -> tuple[str, str]:
             payload = part.get_payload(decode=True)
             if payload is None:
                 continue
-            text = payload.decode(charset, errors="replace")
+            text = _safe_decode(payload, charset)
             if ct == "text/plain" and not plain:
                 plain = text
             elif ct == "text/html" and not html:
@@ -77,7 +95,7 @@ def _extract_body(msg) -> tuple[str, str]:
         charset = msg.get_content_charset() or "utf-8"
         payload = msg.get_payload(decode=True)
         if payload:
-            text = payload.decode(charset, errors="replace")
+            text = _safe_decode(payload, charset)
             if msg.get_content_type() == "text/html":
                 html = text
             else:
@@ -140,9 +158,12 @@ def _get_imap_config(session: Session, company_id: int) -> dict | None:
     port = int(_cred(session, company_id, "IMAP_PORT") or 993)
     user = _cred(session, company_id, "IMAP_USERNAME", "SMTP_USERNAME")
     password = _cred(session, company_id, "IMAP_PASSWORD", "SMTP_PASSWORD")
+    security = (_cred(session, company_id, "IMAP_SECURITY") or "").strip().lower()
+    if security not in ("ssl", "starttls", "none"):
+        security = "ssl" if port == 993 else "starttls"
     if not host or not user or not password:
         return None
-    return {"host": host, "port": port, "user": user, "password": password}
+    return {"host": host, "port": port, "user": user, "password": password, "security": security}
 
 
 # Core per-company poll (synchronous — called in executor)
@@ -152,7 +173,7 @@ def poll_company_inbox(company_id: int) -> int:
     Fetch new emails for one company via IMAP and ingest them.
     Returns number of emails processed (not skipped).
     """
-    from services.tracking_service import ingest_email_webhook_event
+    from services.inbound_email_service import ingest_email_webhook_event
 
     with Session(engine) as session:
         cfg = _get_imap_config(session, company_id)
@@ -164,7 +185,12 @@ def poll_company_inbox(company_id: int) -> int:
     new_max_uid = last_uid
 
     try:
-        mail = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        if cfg["security"] == "ssl":
+            mail = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        else:
+            mail = imaplib.IMAP4(cfg["host"], cfg["port"])
+            if cfg["security"] == "starttls":
+                mail.starttls()
         mail.login(cfg["user"], cfg["password"])
         mail.select("INBOX", readonly=True)   # readonly — don't mark as read
 
@@ -273,7 +299,10 @@ def _get_user_imap_config(session: Session, user_id: int) -> dict | None:
     password = get_user_setting_value(session, user_id, "IMAP_PASSWORD")
     if not user or not password:
         return None
-    return {"host": host, "port": port, "user": user, "password": password}
+    security = (get_user_setting_value(session, user_id, "IMAP_SECURITY") or "").strip().lower()
+    if security not in ("ssl", "starttls", "none"):
+        security = "ssl" if port == 993 else "starttls"
+    return {"host": host, "port": port, "user": user, "password": password, "security": security}
 
 
 def get_users_with_imap() -> list[tuple[int, int]]:
@@ -331,7 +360,7 @@ def _save_user_last_uid(session: Session, user_id: int, uid: int) -> None:
 
 def poll_user_inbox(user_id: int, company_id: int) -> int:
     """Fetch new emails from a user's personal IMAP inbox."""
-    from services.tracking_service import ingest_email_webhook_event
+    from services.inbound_email_service import ingest_email_webhook_event
 
     with Session(engine) as session:
         cfg = _get_user_imap_config(session, user_id)
@@ -343,7 +372,12 @@ def poll_user_inbox(user_id: int, company_id: int) -> int:
     new_max_uid = last_uid
 
     try:
-        mail = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        if cfg.get("security") == "ssl":
+            mail = imaplib.IMAP4_SSL(cfg["host"], cfg["port"])
+        else:
+            mail = imaplib.IMAP4(cfg["host"], cfg["port"])
+            if cfg.get("security") == "starttls":
+                mail.starttls()
         mail.login(cfg["user"], cfg["password"])
         mail.select("INBOX", readonly=True)
 
@@ -404,7 +438,8 @@ def poll_user_inbox(user_id: int, company_id: int) -> int:
         mail.logout()
 
     except imaplib.IMAP4.error as exc:
-        logger.error("[IMAP] user=%s IMAP error: %s", user_id, exc)
+        msg = str(exc) or "(no detail — check IMAP is enabled in Gmail settings)"
+        logger.error("[IMAP] user=%s IMAP protocol error: %s", user_id, msg)
     except OSError as exc:
         logger.error("[IMAP] user=%s connection error: %s", user_id, exc)
     except Exception as exc:

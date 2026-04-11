@@ -86,7 +86,7 @@ def sync_products_to_chroma(products: list):
     print(f"Hard-syncing {len(products)} products to ChromaDB (Local)...")
     _, product_collection = get_chroma_collections()
     
-    # 1. Clear existing collection to remove orphaned/deleted IDs
+    # Clear existing collection to remove orphaned/deleted IDs
     existing_ids = product_collection.get()["ids"]
     if existing_ids:
         product_collection.delete(ids=existing_ids)
@@ -113,7 +113,7 @@ def sync_products_to_chroma(products: list):
         )
     print("Product sync complete.")
 
-# Seed initial knowledge if empty (Move to a helper to avoid top-level block)
+# Seed initial knowledge if empty
 def seed_knowledge_if_empty():
     collection, _ = get_chroma_collections()
     if collection.count() == 0:

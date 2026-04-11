@@ -7,17 +7,15 @@ from sqlmodel import Session, select
 from credentials_service import get_company_credential, get_company_setting_value, get_email_credential
 from email_service import get_styled_html, send_smtp_email
 from models.models import Company, Interaction, Lead, Quote, utc_now
-from services.tracking_service import (
+from services.email_tracking_service import (
     build_open_tracking_pixel,
     build_quote_view_url,
     build_unsubscribe_url,
     ensure_interaction_tracking_token,
-    is_lead_opted_out,
-    record_email_sent,
-    record_whatsapp_event,
-    record_quote_event,
     rewrite_click_tracking_links,
 )
+from services.engagement_service import record_email_sent, record_quote_event, record_whatsapp_event
+from services.opt_out_service import is_lead_opted_out
 from whatsapp_service import send_whatsapp_message
 
 logger = logging.getLogger(__name__)
@@ -45,6 +43,8 @@ def send_email_to_lead(
     lead_id: int,
     subject: str,
     body: str,
+    cta_url: str = "",
+    cta_label: str = "",
 ) -> dict:
     lead = session.exec(
         select(Lead).where(
@@ -87,27 +87,31 @@ def send_email_to_lead(
     tracking_base = _resolve_tracking_base(company)
     tracked_body = rewrite_click_tracking_links(body, tracking_base, tracking_token)
     unsubscribe_url = build_unsubscribe_url(tracking_base, tracking_token, "email")
-    tracked_body = (
-        f"{tracked_body}\n\nUnsubscribe from emails: {unsubscribe_url}"
-        if tracked_body
-        else f"Unsubscribe from emails: {unsubscribe_url}"
-    )
+
+    # Plain-text version: include unsubscribe link as text (no HTML available)
+    plain_body = f"{tracked_body}\n\nTo unsubscribe: {unsubscribe_url}"
+
+    # HTML version: unsubscribe goes in the styled footer, not the body
     html_body = get_styled_html(
         subject=subject,
         body=tracked_body,
         lead_name=lead.name,
         company_name=company_name,
         company_website=company_website,
+        cta_url=cta_url,
+        cta_label=cta_label,
+        unsubscribe_url=unsubscribe_url,
     ) + build_open_tracking_pixel(tracking_base, tracking_token)
 
     success = send_smtp_email(
         to_email=lead.email,
         subject=subject,
-        body=tracked_body,
+        body=plain_body,
         html_body=html_body,
         company_name=company_name,
         smtp_host=get_email_credential(session, company_id, actor_user_id, "SMTP_HOST"),
         smtp_port=get_email_credential(session, company_id, actor_user_id, "SMTP_PORT"),
+        smtp_security=get_email_credential(session, company_id, actor_user_id, "SMTP_SECURITY"),
         smtp_username=get_email_credential(session, company_id, actor_user_id, "SMTP_USERNAME"),
         smtp_password=get_email_credential(session, company_id, actor_user_id, "SMTP_PASSWORD"),
         smtp_from_email=get_email_credential(session, company_id, actor_user_id, "SMTP_FROM_EMAIL"),
@@ -286,8 +290,6 @@ def send_quote_to_lead(
     quote_view_url = build_quote_view_url(tracking_base, quote.tracking_token) if quote.tracking_token else None
     email_subject = subject or f"Quotation {quote.quote_number}"
     email_message = message or f"Please find your quotation {quote.quote_number}. Total: {quote.currency} {quote.total_amount}"
-    if quote_view_url:
-        email_message = f"{email_message}\n\nView quote: {quote_view_url}"
     results = []
 
     if "email" in channels:
@@ -299,6 +301,8 @@ def send_quote_to_lead(
                 lead_id=lead.id,
                 subject=email_subject,
                 body=email_message,
+                cta_url=quote_view_url or "",
+                cta_label="View Quote" if quote_view_url else "",
             )
         )
     if "whatsapp" in channels:

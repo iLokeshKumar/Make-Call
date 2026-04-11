@@ -12,6 +12,18 @@ logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r'(https?://[^\s<>"\']+)')
 
+# Matches common sign-off patterns the LLM adds at the end of email bodies
+_SIGNOFF_RE = re.compile(
+    r'\n{0,2}(best regards|regards|warm regards|sincerely|cheers|thanks|thank you)'
+    r'[\s\S]*$',
+    re.IGNORECASE,
+)
+
+_GREETING_RE = re.compile(
+    r'^\s*(hi|hello|dear|hey)\b[^\n]{0,80}\n{1,3}',
+    re.IGNORECASE,
+)
+
 
 def _linkify(text: str) -> str:
     """Wrap bare http(s) URLs in <a> tags. Skips URLs already inside an HTML tag."""
@@ -19,6 +31,56 @@ def _linkify(text: str) -> str:
         lambda m: f'<a href="{m.group(1)}" style="color:#7c3aed;word-break:break-all;">{m.group(1)}</a>',
         text,
     )
+
+
+def _markdown_to_html(text: str) -> str:
+    """Convert a small subset of markdown to HTML suitable for email."""
+    # Bold:
+    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+    # Italic:
+    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
+    text = re.sub(r'_(.+?)_', r'<em>\1</em>', text)
+    # Headings:
+    text = re.sub(r'^### (.+)$', r'<h3 style="margin:16px 0 6px;color:#1e293b;">\1</h3>', text, flags=re.MULTILINE)
+    text = re.sub(r'^## (.+)$',  r'<h2 style="margin:20px 0 8px;color:#1e293b;">\1</h2>', text, flags=re.MULTILINE)
+    text = re.sub(r'^# (.+)$',   r'<h1 style="margin:20px 0 8px;color:#1e293b;">\1</h1>', text, flags=re.MULTILINE)
+
+    def _wrap_list(m: re.Match) -> str:
+        items = re.sub(r'^[\-\*] ', '', m.group(0), flags=re.MULTILINE)
+        lis = "".join(
+            f'<li style="margin-bottom:4px;">{line.strip()}</li>'
+            for line in items.splitlines()
+            if line.strip()
+        )
+        return f'<ul style="padding-left:20px;margin:8px 0;">{lis}</ul>'
+    text = re.sub(r'(^[\-\*] .+(\n[\-\*] .+)*)', _wrap_list, text, flags=re.MULTILINE)
+    # Numbered lists:
+    def _wrap_olist(m: re.Match) -> str:
+        items = re.sub(r'^\d+\. ', '', m.group(0), flags=re.MULTILINE)
+        lis = "".join(
+            f'<li style="margin-bottom:4px;">{line.strip()}</li>'
+            for line in items.splitlines()
+            if line.strip()
+        )
+        return f'<ol style="padding-left:20px;margin:8px 0;">{lis}</ol>'
+    text = re.sub(r'(^\d+\. .+(\n\d+\. .+)*)', _wrap_olist, text, flags=re.MULTILINE)
+    # Newlines → <br> (after list conversion so we don't break list blocks)
+    text = text.replace("\\n", "\n").replace("\n", "<br>")
+    return text
+
+
+def _clean_llm_body(body: str, lead_name: str = "") -> str:
+    """
+    Strip duplicate greeting and sign-off that the LLM often adds,
+    since the email template already provides both.
+    """
+    body = body.strip()
+    
+    body = _GREETING_RE.sub("", body).strip()
+    
+    body = _SIGNOFF_RE.sub("", body).strip()
+    return body
 
 
 def _cta_button(url: str, label: str) -> str:
@@ -46,13 +108,20 @@ def get_styled_html(
     company_website: str = "https://rio-crm.example.com/",
     cta_url: str = "",
     cta_label: str = "",
+    unsubscribe_url: str = "",
 ) -> str:
     company_link = f'<a href="{company_website}" style="color:inherit;text-decoration:none;">{company_name}</a>'
 
-    # Normalise newlines → <br>, then linkify any bare URLs left in the body
-    rendered_body = _linkify(body.replace("\\n", "<br>").replace("\n", "<br>"))
+    # Strip duplicate LLM greeting/sign-off, convert markdown, then linkify bare URLs
+    cleaned = _clean_llm_body(body, lead_name)
+    rendered_body = _linkify(_markdown_to_html(cleaned))
 
     cta_html = _cta_button(cta_url, cta_label) if cta_url and cta_label else ""
+
+    unsub_html = (
+        f'<br><a href="{unsubscribe_url}" style="color:#94a3b8;font-size:11px;">Unsubscribe</a>'
+        if unsubscribe_url else ""
+    )
 
     return f"""<!DOCTYPE html>
 <html>
@@ -80,7 +149,7 @@ def get_styled_html(
       Best regards,<br><strong>Rio Digital Sales Representative</strong><br>{company_link} Team
     </p>
   </div>
-  <div class="footer">&copy; 2026 {company_link}. All rights reserved.</div>
+  <div class="footer">&copy; 2026 {company_link}. All rights reserved.{unsub_html}</div>
 </div>
 </body>
 </html>"""
@@ -97,6 +166,7 @@ def send_smtp_email(
     smtp_username: Optional[str] = None,
     smtp_password: Optional[str] = None,
     smtp_from_email: Optional[str] = None,
+    smtp_security: Optional[str] = None,  # "ssl" | "starttls" | "none"
 ) -> bool:
     to_email = decrypt_value(to_email)
 
@@ -105,6 +175,11 @@ def send_smtp_email(
     smtp_username = smtp_username or os.getenv("SMTP_USERNAME") or os.getenv("SMTP_USER")
     smtp_password = smtp_password or os.getenv("SMTP_PASSWORD")
     smtp_from_email = smtp_from_email or os.getenv("SMTP_FROM_EMAIL") or os.getenv("SENDER_EMAIL")
+    smtp_security = (smtp_security or os.getenv("SMTP_SECURITY") or "").strip().lower()
+
+    # Derive security mode: explicit setting wins; fall back to port-based heuristic
+    if smtp_security not in ("ssl", "starttls", "none"):
+        smtp_security = "ssl" if smtp_port == 465 else "starttls"
 
     if not all([smtp_host, smtp_port, smtp_username, smtp_password, smtp_from_email]):
         logger.warning("SMTP configuration is incomplete; email not sent")
@@ -119,18 +194,22 @@ def send_smtp_email(
         if html_body:
             message.attach(MIMEText(html_body, "html"))
 
-        if smtp_port == 465:
+        if smtp_security == "ssl":
             with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:
                 server.login(smtp_username, smtp_password)
                 server.send_message(message)
-        else:
+        elif smtp_security == "starttls":
             with smtplib.SMTP(smtp_host, smtp_port) as server:
                 server.ehlo()
                 server.starttls()
                 server.login(smtp_username, smtp_password)
                 server.send_message(message)
+        else:
+            with smtplib.SMTP(smtp_host, smtp_port) as server:
+                server.login(smtp_username, smtp_password)
+                server.send_message(message)
 
-        logger.info("Email sent to %s", to_email)
+        logger.info("Email sent to %s via %s:%s (%s)", to_email, smtp_host, smtp_port, smtp_security)
         return True
     except Exception as exc:
         logger.error("Failed to send email: %s", exc)

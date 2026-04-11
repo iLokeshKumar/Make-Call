@@ -92,6 +92,15 @@ export default function SettingsPage() {
     const [isInviting, setIsInviting] = useState(false);
     const hasAdminAccess = user?.role === "company_admin" || user?.role === "company_owner";
 
+    // Competitor tab state
+    const [competitorNames, setCompetitorNames] = useState("");
+    const [savingCompetitors, setSavingCompetitors] = useState(false);
+    const [competitorSaved, setCompetitorSaved] = useState(false);
+    const [competitorSummary, setCompetitorSummary] = useState<Array<{ competitor: string; count: number; counter_script?: string }>>([]);
+    const [counterScripts, setCounterScripts] = useState<Record<string, string>>({});
+    const [savingScript, setSavingScript] = useState<string | null>(null);
+    const [newCompetitorName, setNewCompetitorName] = useState("");
+
     // Per-user AI/preference settings (accessible to all roles)
     const [myAiPrompt, setMyAiPrompt] = useState("");
     const [myAiVerbosity, setMyAiVerbosity] = useState("2");
@@ -100,8 +109,8 @@ export default function SettingsPage() {
 
     // Per-user email settings (accessible to all roles)
     const [myEmail, setMyEmail] = useState<Record<string, string>>({
-        SMTP_HOST: "", SMTP_PORT: "", SMTP_USERNAME: "", SMTP_PASSWORD: "", SMTP_FROM_EMAIL: "",
-        IMAP_SERVER: "", IMAP_PORT: "", IMAP_USERNAME: "", IMAP_PASSWORD: "",
+        SMTP_HOST: "", SMTP_PORT: "", SMTP_SECURITY: "ssl", SMTP_USERNAME: "", SMTP_PASSWORD: "", SMTP_FROM_EMAIL: "",
+        IMAP_SERVER: "", IMAP_PORT: "", IMAP_SECURITY: "ssl", IMAP_USERNAME: "", IMAP_PASSWORD: "",
     });
     const [savingMyEmail, setSavingMyEmail] = useState(false);
     const [myEmailSaved, setMyEmailSaved] = useState(false);
@@ -144,6 +153,23 @@ export default function SettingsPage() {
                     setTtsProvider(readSettingValue(data, COMPANY_SETTING_KEYS.ttsProvider, "cartesia"));
                     setTelephonyEngine(readSettingValue(data, COMPANY_SETTING_KEYS.telephonyEngine, "twilio"));
                     setAiVerbosity(readSettingValue(data, COMPANY_SETTING_KEYS.aiVerbosity, "2"));
+                    if (data.COMPETITOR_NAMES) setCompetitorNames(data.COMPETITOR_NAMES);
+                }
+
+                // Load competitor summary (mentions + counter-scripts)
+                if (hasAdminAccess) {
+                    try {
+                        const summaryRes = await fetch(`${CRM_BASE}/competitors/summary`, {
+                            headers: { "Authorization": `Bearer ${token}` }
+                        });
+                        if (summaryRes.ok) {
+                            const summary = await summaryRes.json() as Array<{ competitor: string; count: number; counter_script?: string }>;
+                            setCompetitorSummary(summary);
+                            const scripts: Record<string, string> = {};
+                            summary.forEach(s => { if (s.counter_script) scripts[s.competitor] = s.counter_script; });
+                            setCounterScripts(scripts);
+                        }
+                    } catch {  }
                 }
 
                 if (myEmailRes.ok) {
@@ -216,6 +242,7 @@ export default function SettingsPage() {
                         SMALLEST_STT_MODEL: "",
                         SMALLEST_TTS_MODEL: "",
                         MISTRAL_TTS_MODEL: "",
+                        MISTRAL_VOICE_ID: "",
                     };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
@@ -431,6 +458,64 @@ export default function SettingsPage() {
         }
     };
 
+    const saveCompetitorNames = async (overrideValue?: string) => {
+        if (!token) return;
+        setSavingCompetitors(true);
+        try {
+            await fetch(`${CRM_BASE}/company-settings`, {
+                method: "PATCH",
+                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ items: [{ key: "COMPETITOR_NAMES", value: overrideValue ?? competitorNames, is_secret: false }] }),
+            });
+            setCompetitorSaved(true);
+            setTimeout(() => setCompetitorSaved(false), 3000);
+        } catch (e) {
+            console.error("Failed to save competitor names", e);
+        } finally {
+            setSavingCompetitors(false);
+        }
+    };
+
+    const saveCounterScript = async (competitor: string) => {
+        if (!token) return;
+        setSavingScript(competitor);
+        try {
+            await fetch(`${CRM_BASE}/competitors/counter-script`, {
+                method: "POST",
+                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
+                body: JSON.stringify({ competitor_name: competitor, counter_script: counterScripts[competitor] || "" }),
+            });
+            // Refresh summary so textarea falls back to the saved DB value
+            const res = await fetch(`${CRM_BASE}/competitors/summary`, { headers: { "Authorization": `Bearer ${token}` } });
+            if (res.ok) setCompetitorSummary(await res.json());
+            // Clear the local edit — no longer "unsaved"
+            setCounterScripts(prev => {
+                const next = { ...prev };
+                delete next[competitor];
+                return next;
+            });
+        } catch (e) {
+            console.error("Failed to save counter-script", e);
+        } finally {
+            setSavingScript(null);
+        }
+    };
+
+    const addCompetitorToList = () => {
+        const name = newCompetitorName.trim().toLowerCase();
+        if (!name) return;
+        const current = competitorNames.split(",").map(s => s.trim()).filter(Boolean);
+        if (!current.includes(name)) {
+            setCompetitorNames([...current, name].join(", "));
+        }
+        setNewCompetitorName("");
+    };
+
+    const removeCompetitorFromList = (name: string) => {
+        const updated = competitorNames.split(",").map(s => s.trim()).filter(s => s && s !== name);
+        setCompetitorNames(updated.join(", "));
+    };
+
     const triggerInboxSync = async () => {
         if (!token) return;
         setSyncingInbox(true);
@@ -544,6 +629,7 @@ export default function SettingsPage() {
                     ...(hasAdminAccess ? [
                         { id: "persona", label: "Voice & AI Engine", icon: Brain },
                         { id: "keys", label: "Integration Keys", icon: KeyRound },
+                        { id: "competitors", label: "Competitors", icon: Zap },
                     ] : []),
                 ].map((tab) => {
                     const Icon = tab.icon;
@@ -797,6 +883,7 @@ export default function SettingsPage() {
                                         <option value="perplexity">Perplexity</option>
                                         <option value="openrouter">OpenRouter (Inference)</option>
                                         <option value="cerebras">Cerebras (Inference)</option>
+                                        <option value="sarvam">Sarvam (Multilingual)</option>
                                         <option value="mimo">Mimo</option>
                                     </select>
                                 </div>
@@ -916,7 +1003,7 @@ export default function SettingsPage() {
                                     <h4 className="font-bold text-slate-700 dark:text-slate-300">Outbound (SMTP)</h4>
                                     {[
                                         { key: "SMTP_HOST", label: "SMTP Server", placeholder: "mail.example.com", secret: false },
-                                        { key: "SMTP_PORT", label: "SMTP Port", placeholder: "465 or 587", secret: false },
+                                        { key: "SMTP_PORT", label: "SMTP Port", placeholder: "465 (SSL) · 587 (STARTTLS)", secret: false },
                                         { key: "SMTP_USERNAME", label: "Username / Login", placeholder: "you@example.com", secret: true },
                                         { key: "SMTP_PASSWORD", label: "Password", placeholder: "••••••••", secret: true },
                                         { key: "SMTP_FROM_EMAIL", label: "From Email", placeholder: "you@example.com", secret: false },
@@ -946,6 +1033,18 @@ export default function SettingsPage() {
                                             </div>
                                         </div>
                                     ))}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-semibold text-slate-500 uppercase">Security</label>
+                                        <select
+                                            value={myEmail["SMTP_SECURITY"] || "ssl"}
+                                            onChange={(e) => handleMyEmailChange("SMTP_SECURITY", e.target.value)}
+                                            className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 text-sm"
+                                        >
+                                            <option value="ssl">SSL / TLS (port 465)</option>
+                                            <option value="starttls">STARTTLS (port 587)</option>
+                                            <option value="none">None / Plain (port 25)</option>
+                                        </select>
+                                    </div>
                                 </div>
 
                                 {/* Inbound IMAP */}
@@ -954,7 +1053,7 @@ export default function SettingsPage() {
                                     <p className="text-xs text-slate-500">Replies to emails sent by you will be pulled from this inbox every 3 minutes.</p>
                                     {[
                                         { key: "IMAP_SERVER", label: "IMAP Server", placeholder: "mail.example.com", secret: false },
-                                        { key: "IMAP_PORT", label: "IMAP Port", placeholder: "993", secret: false },
+                                        { key: "IMAP_PORT", label: "IMAP Port", placeholder: "993 (SSL) · 143 (STARTTLS)", secret: false },
                                         { key: "IMAP_USERNAME", label: "Username / Login", placeholder: "you@example.com", secret: true },
                                         { key: "IMAP_PASSWORD", label: "Password", placeholder: "••••••••", secret: true },
                                     ].map(({ key, label, placeholder, secret }) => (
@@ -983,6 +1082,18 @@ export default function SettingsPage() {
                                             </div>
                                         </div>
                                     ))}
+                                    <div className="space-y-1">
+                                        <label className="text-xs font-semibold text-slate-500 uppercase">Security</label>
+                                        <select
+                                            value={myEmail["IMAP_SECURITY"] || "ssl"}
+                                            onChange={(e) => handleMyEmailChange("IMAP_SECURITY", e.target.value)}
+                                            className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 text-sm"
+                                        >
+                                            <option value="ssl">SSL / TLS (port 993)</option>
+                                            <option value="starttls">STARTTLS (port 143)</option>
+                                            <option value="none">None / Plain</option>
+                                        </select>
+                                    </div>
 
                                     <div className="pt-2 border-t border-slate-200 dark:border-slate-700">
                                         <button
@@ -1025,8 +1136,8 @@ export default function SettingsPage() {
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
                                 "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL"],
-                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID"],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL"],
                                 "Email (SMTP — Outbound)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Email (IMAP — Inbound)": ["IMAP_SERVER", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD"],
                                 "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"]
@@ -1066,6 +1177,156 @@ export default function SettingsPage() {
                         </div>
                     </div>
                 )}
+
+                {/* Competitors Tab */}
+                {activeTab === "competitors" && hasAdminAccess && (() => {
+                    // Unified row list: union of tracked names (COMPETITOR_NAMES setting)
+                    // and DB rows (competitorSummary). This means:
+                    //  - Adding a name shows it immediately as a row before any call detects it
+                    //  - Competitors detected on calls also appear even if not in the tracked list
+                    const parsedNames = competitorNames.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+                    const summaryMap = Object.fromEntries(competitorSummary.map(s => [s.competitor, s]));
+                    const allNames = [...new Set([...parsedNames, ...Object.keys(summaryMap)])];
+                    const rows = allNames.map(name => ({
+                        competitor: name,
+                        count: summaryMap[name]?.count ?? 0,
+                        inTrackedList: parsedNames.includes(name),
+                    }));
+
+                    return (
+                    <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">
+                        {/* Header */}
+                        <div className="flex items-center space-x-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-400 to-red-500">
+                                <Zap className="h-5 w-5 text-white" />
+                            </div>
+                            <div>
+                                <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">Competitor Intelligence</h3>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">
+                                    Rio detects these names live on calls. When detected, the counter-script is injected into the AI context automatically.
+                                </p>
+                            </div>
+                        </div>
+
+                        {/* Add competitor row */}
+                        <div className="flex gap-2">
+                            <input
+                                type="text"
+                                placeholder="Competitor name, e.g. salesforce"
+                                value={newCompetitorName}
+                                onChange={e => setNewCompetitorName(e.target.value)}
+                                onKeyDown={e => { if (e.key === "Enter") addCompetitorToList(); }}
+                                className="flex-1 p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 text-sm"
+                            />
+                            <button
+                                onClick={addCompetitorToList}
+                                className="px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors whitespace-nowrap"
+                            >
+                                + Add
+                            </button>
+                        </div>
+
+                        {/* Unified table: one row per competitor */}
+                        {rows.length === 0 ? (
+                            <div className="text-center py-10 text-slate-400 text-sm">
+                                No competitors tracked yet. Type a name above and click Add.
+                                <br />
+                                <span className="text-xs mt-1 block">If left empty, Rio uses built-in defaults: salesforce, hubspot, zoho, pipedrive…</span>
+                            </div>
+                        ) : (
+                            <div className="space-y-3">
+                                {rows.map(row => (
+                                    <div key={row.competitor} className="rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 overflow-hidden">
+                                        {/* Row header */}
+                                        <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200 dark:border-slate-700">
+                                            <div className="flex items-center gap-3">
+                                                <span className="font-semibold capitalize text-slate-800 dark:text-slate-200">{row.competitor}</span>
+                                                {row.count > 0 && (
+                                                    <span className="px-2 py-0.5 rounded-full bg-orange-100 dark:bg-orange-900/30 text-orange-700 dark:text-orange-300 text-xs font-bold">
+                                                        {row.count} mention{row.count !== 1 ? "s" : ""}
+                                                    </span>
+                                                )}
+                                                {row.inTrackedList ? (
+                                                    <span className="px-2 py-0.5 rounded-full bg-green-100 dark:bg-green-900/30 text-green-700 dark:text-green-300 text-xs">tracked</span>
+                                                ) : (
+                                                    <span className="px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-500 text-xs">detected on call</span>
+                                                )}
+                                            </div>
+                                            <div className="flex items-center gap-2">
+                                                {!row.inTrackedList && (
+                                                    <button
+                                                        onClick={() => {
+                                                            const updated = [...parsedNames, row.competitor].join(", ");
+                                                            setCompetitorNames(updated);
+                                                            saveCompetitorNames(updated);
+                                                        }}
+                                                        className="text-xs px-2 py-1 rounded bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 hover:bg-violet-200 transition-colors"
+                                                    >
+                                                        + Track
+                                                    </button>
+                                                )}
+                                                {row.inTrackedList && (
+                                                    <button
+                                                        onClick={() => removeCompetitorFromList(row.competitor)}
+                                                        className="text-xs px-2 py-1 rounded bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 hover:bg-red-200 transition-colors"
+                                                    >
+                                                        Remove
+                                                    </button>
+                                                )}
+                                            </div>
+                                        </div>
+
+                                        {/* Counter-script input */}
+                                        <div className="px-4 py-3 space-y-2">
+                                            <label className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Counter-Script (injected into AI when detected)</label>
+                                            <textarea
+                                                rows={2}
+                                                placeholder={`What should Rio say when ${row.competitor} comes up? e.g. "We offer similar features at 30% less cost, and we integrate with your current stack…"`}
+                                                value={counterScripts[row.competitor] ?? summaryMap[row.competitor]?.counter_script ?? ""}
+                                                onChange={e => setCounterScripts(prev => ({ ...prev, [row.competitor]: e.target.value }))}
+                                                className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 text-sm resize-none"
+                                            />
+                                            <div className="flex items-center gap-3">
+                                                <button
+                                                    onClick={() => saveCounterScript(row.competitor)}
+                                                    disabled={savingScript === row.competitor}
+                                                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors disabled:opacity-50"
+                                                >
+                                                    {savingScript === row.competitor ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                                                    Save Script
+                                                </button>
+                                                {savingScript === null && counterScripts[row.competitor] !== undefined && (
+                                                    <span className="text-xs text-slate-400">unsaved changes</span>
+                                                )}
+                                            </div>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        {/* Save tracked list footer */}
+                        <div className="flex items-center justify-between pt-2 border-t border-slate-200 dark:border-slate-700">
+                            <p className="text-xs text-slate-400">
+                                {parsedNames.length > 0
+                                    ? `${parsedNames.length} competitor${parsedNames.length !== 1 ? "s" : ""} in your tracked list`
+                                    : "Using built-in defaults"}
+                            </p>
+                            <div className="flex items-center gap-3">
+                                {competitorSaved && <span className="text-xs text-green-600 font-medium flex items-center gap-1"><CheckCircle2 className="h-3.5 w-3.5" /> Saved</span>}
+                                <button
+                                    onClick={() => saveCompetitorNames()}
+                                    disabled={savingCompetitors}
+                                    className="flex items-center gap-2 px-4 py-2 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 text-white text-sm font-semibold hover:opacity-90 transition-opacity disabled:opacity-50"
+                                >
+                                    {savingCompetitors ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                                    Save Tracked List
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    );
+                })()}
 
                 {/* Save Button */}
                 {hasAdminAccess && (

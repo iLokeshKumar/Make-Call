@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Brain, Edit3, Loader2, RefreshCw, Save, Target, TrendingUp, UserCheck, Zap } from "lucide-react";
+import { ArrowLeft, Brain, Calendar, CheckCircle2, ChevronDown, ChevronUp, Edit3, FileText, Loader2, MapPin, RefreshCw, Save, Target, TrendingUp, UserCheck, XCircle, Zap } from "lucide-react";
 
 import InteractionTimeline from "@/components/leads/interaction_timeline";
 import LeadHeader from "@/components/leads/lead_header";
@@ -22,6 +22,15 @@ import BestCallTimes from "@/components/leads/best_call_times";
 import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+
+function cleanNotes(notes: string | null | undefined): string {
+    if (!notes) return "";
+    return notes
+        .split("\n")
+        .filter(line => !/^\[20\d\d-\d\d-\d\dT/.test(line.trim()))
+        .join("\n")
+        .trim();
+}
 
 type Lead = {
   id: number;
@@ -49,6 +58,10 @@ type Lead = {
   budget_range?: string | null;
   timeline?: string | null;
   decision_maker?: string | null;
+  // B2B billing
+  billing_address?: string | null;
+  pincode?: string | null;
+  gst_number?: string | null;
 };
 
 type Requirement = {
@@ -81,6 +94,83 @@ type CallTask = {
   completed_at?: string | null;
 };
 
+type DealEvent =
+  | {
+      kind: "appointment";
+      id: number;
+      date: string | null;
+      status: string;
+      demo_type: string;
+      products: string | null;
+      location: string | null;
+      notes: string | null;
+      meeting_link: string | null;
+    }
+  | {
+      kind: "quote";
+      id: number;
+      quote_number: string;
+      date: string | null;
+      status: string;
+      currency: string;
+      total_amount: string | null;
+      valid_until: string | null;
+      sent_at: string | null;
+      opened_at: string | null;
+      accepted_at: string | null;
+      rejected_at: string | null;
+      notes: string | null;
+      items: { product_name: string; sku: string | null; quantity: number; unit_price: string; discount_percent: string; line_total: string }[];
+    };
+
+// Collapsible section wrapper with built-in toggle and header styling
+
+function CollapsibleSection({
+  title,
+  icon: Icon,
+  defaultOpen = false,
+  children,
+  headerExtra,
+}: {
+  title: string;
+  icon?: React.ElementType;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+  headerExtra?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-2xl glass border border-white/40 dark:border-white/10 overflow-hidden">
+      {/* Use a div row so we can place non-button elements alongside the toggle */}
+      <div className="flex items-center justify-between px-5 py-4">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-2 text-left flex-1 min-w-0"
+        >
+          {Icon && <Icon className="h-4 w-4 text-violet-500 flex-shrink-0" />}
+          <span className="text-base font-semibold text-slate-900 dark:text-white">{title}</span>
+        </button>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {headerExtra}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+          >
+            {open ? (
+              <ChevronUp className="h-4 w-4" />
+            ) : (
+              <ChevronDown className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+      </div>
+      {open && <div className="px-5 pb-5 pt-1">{children}</div>}
+    </div>
+  );
+}
+
 // stage display config
 const ISM_STAGE_CONFIG: Record<string, { label: string; cls: string }> = {
   new:          { label: "New",          cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
@@ -112,13 +202,19 @@ export default function LeadDetailPage() {
   const [requirement, setRequirement] = useState<Requirement | null>(null);
   const [interactions, setInteractions] = useState<Interaction[]>([]);
   const [tasks, setTasks] = useState<CallTask[]>([]);
+  const [feedbackItems, setFeedbackItems] = useState<Array<{ id: number; rating: number | null; comment: string | null; source: string; created_at: string }>>([]);
 
   const [nextActionDraft, setNextActionDraft] = useState<string>("");
   const [qualificationDraft, setQualificationDraft] = useState<string>("");
   const [updateNoteDraft, setUpdateNoteDraft] = useState<string>("");
   const [languageDraft, setLanguageDraft] = useState<string>("en");
+  const [billingAddressDraft, setBillingAddressDraft] = useState<string>("");
+  const [pincodeDraft, setPincodeDraft] = useState<string>("");
+  const [gstNumberDraft, setGstNumberDraft] = useState<string>("");
   const [updating, setUpdating] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+
+  const [dealTimeline, setDealTimeline] = useState<DealEvent[]>([]);
 
   const [noteText, setNoteText] = useState<string>("");
   const [noteSaving, setNoteSaving] = useState(false);
@@ -159,14 +255,16 @@ export default function LeadDetailPage() {
 
       try {
         const headers = { Authorization: `Bearer ${token}` };
-        const [leadRes, requirementRes, interactionRes, taskRes] = await Promise.all([
+        const [leadRes, requirementRes, interactionRes, taskRes, dealRes, feedbackRes] = await Promise.all([
           fetch(`${API_BASE}/crm/leads/${leadId}`, { headers }),
           fetch(`${API_BASE}/requirements/${leadId}`, { headers }),
           fetch(`${API_BASE}/crm/interactions?lead_id=${leadId}`, { headers }),
           fetch(`${API_BASE}/call-tasks`, { headers }),
+          fetch(`${API_BASE}/crm/leads/${leadId}/deal-timeline`, { headers }),
+          fetch(`${API_BASE}/feedback?lead_id=${leadId}&limit=50`, { headers }),
         ]);
 
-        if ([leadRes, requirementRes, interactionRes, taskRes].some((response) => response.status === 401)) {
+        if ([leadRes, requirementRes, interactionRes, taskRes, dealRes, feedbackRes].some((response) => response.status === 401)) {
           sessionTimeout();
           return;
         }
@@ -194,6 +292,16 @@ export default function LeadDetailPage() {
           const allTasks = Array.isArray(taskPayload) ? taskPayload : [];
           setTasks(allTasks.filter((task: CallTask) => task.lead_id === leadId));
         }
+
+        if (dealRes.ok) {
+          const dealPayload = await dealRes.json();
+          setDealTimeline(dealPayload.events ?? []);
+        }
+
+        if (feedbackRes.ok) {
+          const fbPayload = await feedbackRes.json();
+          setFeedbackItems(fbPayload.items ?? []);
+        }
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load Lead 360.");
       } finally {
@@ -210,6 +318,9 @@ export default function LeadDetailPage() {
     setQualificationDraft(lead.qualification_status || "");
     setUpdateNoteDraft(lead.notes || "");
     setLanguageDraft(lead.preferred_language || "en");
+    setBillingAddressDraft(lead.billing_address || "");
+    setPincodeDraft(lead.pincode || "");
+    setGstNumberDraft(lead.gst_number || "");
   }, [lead]);
 
   const fetchAiSummary = useCallback(async () => {
@@ -371,10 +482,11 @@ export default function LeadDetailPage() {
     [interactions]
   );
 
-  const latestRecording = useMemo(
-    () => interactions.find((i) => i.type === "call" && i.recording_url) ?? null,
-    [interactions]
-  );
+  const latestRecording = useMemo(() => {
+    // Most recent call with a transcript (coach scores on transcript, not recording_url)
+    const calls = interactions.filter((i) => i.type === "call" && i.transcript && i.transcript.trim().length >= 50);
+    return calls.length > 0 ? calls[calls.length - 1] : null;
+  }, [interactions]);
 
   const timelineItems = useMemo(() => {
     const items = [] as Array<{
@@ -389,7 +501,7 @@ export default function LeadDetailPage() {
       items.push({
         id: `lead-${lead.id}`,
         title: "Lead added to CRM",
-        subtitle: lead.notes || "Lead record created and ready for outreach.",
+        subtitle: cleanNotes(lead.notes) || "Lead record created and ready for outreach.",
         timestamp: lead.created_at,
         tone: "violet",
       });
@@ -415,8 +527,21 @@ export default function LeadDetailPage() {
       });
     });
 
+    feedbackItems.forEach((fb) => {
+      const stars = fb.rating ? "★".repeat(fb.rating) + "☆".repeat(5 - fb.rating) : null;
+      const ratingLabel = fb.rating ? `${fb.rating}/5  ${stars}` : null;
+      const sourceLabel = fb.source === "customer" ? "Customer verbal rating" : "Feedback";
+      items.push({
+        id: `feedback-${fb.id}`,
+        title: `${sourceLabel}${ratingLabel ? ` — ${ratingLabel}` : ""}`,
+        subtitle: fb.comment || undefined,
+        timestamp: fb.created_at,
+        tone: fb.rating && fb.rating >= 4 ? "emerald" : fb.rating && fb.rating <= 2 ? "amber" : "blue",
+      });
+    });
+
     return items.sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""));
-  }, [interactions, lead, tasks]);
+  }, [interactions, lead, tasks, feedbackItems]);
 
   const callHistory = useMemo(() => {
     const callsFromInteractions = interactions
@@ -459,6 +584,9 @@ export default function LeadDetailPage() {
           next_action: nextActionDraft || null,
           notes: updateNoteDraft || null,
           preferred_language: languageDraft || "en",
+          billing_address: billingAddressDraft || null,
+          pincode: pincodeDraft || null,
+          gst_number: gstNumberDraft || null,
         }),
       });
 
@@ -777,6 +905,154 @@ export default function LeadDetailPage() {
         </div>
       )}
 
+      {/* Journey */}
+      {dealTimeline.length > 0 && (
+        <div className="rounded-2xl border border-white/40 dark:border-white/10 glass overflow-hidden">
+          <div className="flex items-center gap-2 px-5 py-4 border-b border-slate-100 dark:border-white/10">
+            <TrendingUp className="h-4 w-4 text-violet-500 flex-shrink-0" />
+            <span className="text-base font-semibold text-slate-900 dark:text-white">Journey</span>
+            <span className="ml-auto rounded-full bg-violet-100 dark:bg-violet-500/10 px-2.5 py-0.5 text-xs font-bold text-violet-700 dark:text-violet-300">
+              {dealTimeline.length} event{dealTimeline.length !== 1 ? "s" : ""}
+            </span>
+          </div>
+          <div className="px-5 py-4 space-y-4">
+            {dealTimeline.map((ev, i) => (
+              <div key={`${ev.kind}-${ev.id}`} className="flex gap-3">
+                {/* Timeline spine */}
+                <div className="flex flex-col items-center">
+                  <div className={`flex h-8 w-8 items-center justify-center rounded-full flex-shrink-0 ${
+                    ev.kind === "appointment"
+                      ? "bg-blue-100 dark:bg-blue-500/15"
+                      : ev.status === "accepted"
+                      ? "bg-emerald-100 dark:bg-emerald-500/15"
+                      : ev.status === "rejected"
+                      ? "bg-red-100 dark:bg-red-500/15"
+                      : ev.status === "sent" || ev.status === "negotiation"
+                      ? "bg-amber-100 dark:bg-amber-500/15"
+                      : "bg-slate-100 dark:bg-slate-800"
+                  }`}>
+                    {ev.kind === "appointment" ? (
+                      <Calendar className="h-4 w-4 text-blue-500" />
+                    ) : ev.status === "accepted" ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-500" />
+                    ) : ev.status === "rejected" ? (
+                      <XCircle className="h-4 w-4 text-red-400" />
+                    ) : (
+                      <FileText className="h-4 w-4 text-amber-500" />
+                    )}
+                  </div>
+                  {i < dealTimeline.length - 1 && (
+                    <div className="w-px flex-1 bg-slate-200 dark:bg-white/10 mt-1" />
+                  )}
+                </div>
+
+                {/* Card */}
+                <div className="flex-1 pb-2">
+                  {ev.kind === "appointment" ? (
+                    <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-slate-900/40 p-3 space-y-1.5">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-slate-900 dark:text-white">
+                          {ev.demo_type} Demo Scheduled
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                          ev.status === "completed"
+                            ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                            : ev.status === "cancelled"
+                            ? "bg-red-100 text-red-600 dark:bg-red-500/10 dark:text-red-300"
+                            : "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300"
+                        }`}>
+                          {ev.status}
+                        </span>
+                      </div>
+                      {ev.products && (
+                        <div className="flex items-center gap-1.5 text-xs text-slate-600 dark:text-slate-400">
+                          <span className="font-medium text-slate-700 dark:text-slate-300">Products:</span>
+                          <span>{ev.products}</span>
+                        </div>
+                      )}
+                      {ev.location && (
+                        <div className="flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+                          <MapPin className="h-3 w-3 flex-shrink-0" />
+                          {ev.location}
+                        </div>
+                      )}
+                      {ev.meeting_link && (
+                        <a href={ev.meeting_link} target="_blank" rel="noreferrer"
+                          className="inline-block text-xs text-violet-600 hover:underline dark:text-violet-400">
+                          Join meeting →
+                        </a>
+                      )}
+                      {ev.date && (
+                        <div className="text-xs text-slate-400 dark:text-slate-500">
+                          {new Date(ev.date).toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })}
+                        </div>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-slate-900/40 p-3 space-y-2">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="text-sm font-semibold text-slate-900 dark:text-white">
+                          {ev.quote_number}
+                        </span>
+                        <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
+                          ev.status === "accepted"   ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" :
+                          ev.status === "rejected"   ? "bg-red-100 text-red-600 dark:bg-red-500/10 dark:text-red-300" :
+                          ev.status === "sent"       ? "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" :
+                          ev.status === "negotiation"? "bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300" :
+                                                       "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400"
+                        }`}>
+                          {ev.status}
+                        </span>
+                      </div>
+
+                      {/* Line items */}
+                      {ev.items.length > 0 && (
+                        <div className="space-y-1">
+                          {ev.items.map((item, j) => (
+                            <div key={j} className="flex items-center justify-between text-xs text-slate-600 dark:text-slate-400">
+                              <span className="font-medium text-slate-700 dark:text-slate-300 truncate max-w-[60%]">
+                                {item.product_name}
+                                {item.sku ? <span className="text-slate-400 ml-1">({item.sku})</span> : null}
+                              </span>
+                              <span className="text-right tabular-nums whitespace-nowrap">
+                                {item.quantity} ×{" "}
+                                {new Intl.NumberFormat("en-IN", { style: "currency", currency: ev.currency, maximumFractionDigits: 0 }).format(Number(item.unit_price))}
+                                {Number(item.discount_percent) > 0 && (
+                                  <span className="text-emerald-600 dark:text-emerald-400 ml-1">−{item.discount_percent}%</span>
+                                )}
+                                {" = "}
+                                <span className="font-semibold text-slate-800 dark:text-slate-100">
+                                  {new Intl.NumberFormat("en-IN", { style: "currency", currency: ev.currency, maximumFractionDigits: 0 }).format(Number(item.line_total))}
+                                </span>
+                              </span>
+                            </div>
+                          ))}
+                          <div className="flex justify-between text-xs font-bold text-slate-800 dark:text-slate-100 border-t border-slate-100 dark:border-white/10 pt-1 mt-1">
+                            <span>Total</span>
+                            <span>{new Intl.NumberFormat("en-IN", { style: "currency", currency: ev.currency, maximumFractionDigits: 0 }).format(Number(ev.total_amount ?? 0))}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* Key timestamps */}
+                      <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-slate-400 dark:text-slate-500">
+                        {ev.sent_at && <span>Sent: {new Date(ev.sent_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</span>}
+                        {ev.opened_at && <span>Opened: {new Date(ev.opened_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</span>}
+                        {ev.accepted_at && <span className="text-emerald-500">Accepted: {new Date(ev.accepted_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</span>}
+                        {ev.rejected_at && <span className="text-red-400">Rejected: {new Date(ev.rejected_at).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</span>}
+                        {ev.valid_until && !ev.accepted_at && !ev.rejected_at && (
+                          <span>Valid until: {new Date(ev.valid_until).toLocaleDateString("en-IN", { day: "2-digit", month: "short" })}</span>
+                        )}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="rounded-3xl glass border border-white/40 p-6 dark:border-white/10">
         <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Quick Lead update</h2>
         <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Update qualification and next action without leaving Lead 360.</p>
@@ -839,6 +1115,22 @@ export default function LeadDetailPage() {
           )}
         </div>
 
+        {/* B2B billing details */}
+        <div className="mt-4 border-t border-slate-200 dark:border-white/10 pt-4">
+          <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-3">B2B Billing — shown on quotes</p>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
+            <input value={billingAddressDraft} onChange={(e) => setBillingAddressDraft(e.target.value)}
+              placeholder="Billing address"
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40" />
+            <input value={pincodeDraft} onChange={(e) => setPincodeDraft(e.target.value)}
+              placeholder="Pincode / ZIP"
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40" />
+            <input value={gstNumberDraft} onChange={(e) => setGstNumberDraft(e.target.value)}
+              placeholder="GST / Tax number"
+              className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40" />
+          </div>
+        </div>
+
         <div className="mt-4 flex items-center gap-3">
           <button
             type="button"
@@ -862,31 +1154,31 @@ export default function LeadDetailPage() {
             country={lead.country}
             industry={lead.industry}
             website={lead.website}
-            notes={lead.notes}
+            notes={cleanNotes(lead.notes)}
           />
           <NextActionCard nextAction={lead.next_action} dueAt={lead.next_action_due_at} />
 
           {/* Waterfall enrichment pipeline */}
-          <EnrichmentTrace
-            leadId={leadId}
-            token={token!}
-            onSessionTimeout={sessionTimeout}
-          />
+          <CollapsibleSection title="Enrichment Trace" icon={Zap}>
+            <EnrichmentTrace
+              leadId={leadId}
+              token={token!}
+              onSessionTimeout={sessionTimeout}
+            />
+          </CollapsibleSection>
 
           {/* Predictive call windows */}
-          <BestCallTimes
-            leadId={leadId}
-            token={token!}
-            onSessionTimeout={sessionTimeout}
-          />
+          <CollapsibleSection title="Best Call Times" icon={RefreshCw}>
+            <BestCallTimes
+              leadId={leadId}
+              token={token!}
+              onSessionTimeout={sessionTimeout}
+            />
+          </CollapsibleSection>
 
           {/* Sales Intelligence */}
           {(lead.budget_range || lead.timeline || lead.decision_maker) && (
-            <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
-              <div className="flex items-center gap-2 mb-3">
-                <TrendingUp className="h-5 w-5 text-violet-500" />
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Sales Intelligence</h3>
-              </div>
+            <CollapsibleSection title="Sales Intelligence" icon={TrendingUp}>
               <dl className="space-y-2 text-sm">
                 {lead.budget_range && (
                   <div className="flex gap-2">
@@ -907,21 +1199,18 @@ export default function LeadDetailPage() {
                   </div>
                 )}
               </dl>
-            </div>
+            </CollapsibleSection>
           )}
         </div>
 
         <div className="space-y-6 xl:col-span-2">
-          <QualificationCard qualificationStatus={lead.qualification_status} requirement={requirement} />
+          <CollapsibleSection title="Qualification" icon={UserCheck}>
+            <QualificationCard qualificationStatus={lead.qualification_status} requirement={requirement} />
+          </CollapsibleSection>
 
           {/* Enhanced ICP Score Card */}
-          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
-            <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
-              <div className="flex items-center gap-2">
-                <Target className="h-5 w-5 text-violet-500" />
-                <h3 className="text-lg font-semibold text-slate-900 dark:text-white">ICP Score</h3>
-              </div>
-              <div className="flex flex-wrap gap-2">
+          <CollapsibleSection title="ICP Score" icon={Target}>
+            <div className="flex flex-wrap gap-2 mb-4">
                 <button
                   type="button"
                   onClick={handleRescore}
@@ -940,7 +1229,6 @@ export default function LeadDetailPage() {
                   <Brain className={`h-3.5 w-3.5 ${enriching ? "animate-pulse" : ""}`} />
                   {enriching ? "Enriching..." : "Trigger Enrichment"}
                 </button>
-              </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-6">
@@ -1010,12 +1298,11 @@ export default function LeadDetailPage() {
             {lead.lead_score == null && scoreReasons.length === 0 && !lead.product_interest && !lead.last_outreach_at && (
               <p className="text-sm text-slate-500 dark:text-slate-400">No ICP score yet. Click Re-score Lead to generate one.</p>
             )}
-          </div>
+          </CollapsibleSection>
 
           {/* Requirements Editor */}
-          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Requirements</h3>
+          <CollapsibleSection title="Requirements" icon={Edit3}>
+            <div className="flex items-center justify-end mb-4">
               {!reqEditMode ? (
                 <button
                   type="button"
@@ -1160,11 +1447,10 @@ export default function LeadDetailPage() {
                 )}
               </dl>
             )}
-          </div>
+          </CollapsibleSection>
 
-          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Add manual note</h3>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Keep your team in sync by quickly logging insights.</p>
+          <CollapsibleSection title="Add Manual Note" icon={Edit3}>
+            <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">Keep your team in sync by quickly logging insights.</p>
             <textarea
               value={noteText}
               onChange={(event) => setNoteText(event.target.value)}
@@ -1197,14 +1483,13 @@ export default function LeadDetailPage() {
                 </ul>
               </div>
             )}
-          </div>
+          </CollapsibleSection>
 
-          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-white">Call action history</h3>
+          <CollapsibleSection title="Call Action History" icon={Zap}>
             {callHistory.length === 0 ? (
-              <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">No call activities yet for this lead.</p>
+              <p className="text-sm text-slate-500 dark:text-slate-400">No call activities yet for this lead.</p>
             ) : (
-              <ul className="mt-3 space-y-2">
+              <ul className="space-y-2">
                 {callHistory.map((entry) => (
                   <li key={entry.id} className="rounded-xl border border-slate-200 bg-white/70 p-3 dark:border-white/10 dark:bg-slate-900/40">
                     <div className="flex items-center justify-between text-sm font-medium text-slate-800 dark:text-slate-100">
@@ -1216,66 +1501,83 @@ export default function LeadDetailPage() {
                 ))}
               </ul>
             )}
-          </div>
+          </CollapsibleSection>
 
-          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
-            <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-slate-900 dark:text-white">AI Insight summary</h3>
+          <CollapsibleSection
+            title="AI Insight Summary"
+            icon={Brain}
+            headerExtra={
               <button
                 type="button"
-                onClick={fetchAiSummary}
+                onClick={(e) => { e.stopPropagation(); fetchAiSummary(); }}
                 disabled={aiLoading}
-                className="rounded-lg border border-slate-200 px-3 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-100 dark:border-white/10 dark:text-slate-200"
+                className="ml-2 rounded-lg border border-slate-200 px-2.5 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-100 dark:border-white/10 dark:text-slate-300 disabled:opacity-50"
               >
                 {aiLoading ? "Refreshing..." : "Refresh"}
               </button>
-            </div>
-            {aiError && <p className="mt-3 text-sm font-medium text-amber-600 dark:text-amber-300">{aiError}</p>}
-            <p className="mt-3 text-sm text-slate-600 dark:text-slate-300">{aiSummary || "No summary available yet. Click refresh to fetch AI insights."}</p>
-          </div>
+            }
+          >
+            {aiError && <p className="mb-2 text-sm font-medium text-amber-600 dark:text-amber-300">{aiError}</p>}
+            <p className="text-sm text-slate-600 dark:text-slate-300">{aiSummary || "No summary available yet. Click Refresh to fetch AI insights."}</p>
+          </CollapsibleSection>
 
-          <InteractionTimeline items={timelineItems} />
-          <TranscriptPanel transcript={transcript} />
+          <CollapsibleSection title="Interaction Timeline" icon={TrendingUp}>
+            <InteractionTimeline items={timelineItems} />
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Call Transcript" icon={UserCheck}>
+            <TranscriptPanel transcript={transcript} />
+          </CollapsibleSection>
 
           {/* Call recording + waveform player */}
           {latestRecording?.recording_url && (
-            <WaveformPlayer
-              recordingUrl={latestRecording.recording_url}
-              transcript={latestRecording.transcript}
-              duration={latestRecording.recording_duration}
-            />
+            <CollapsibleSection title="Call Recording" icon={RefreshCw}>
+              <WaveformPlayer
+                recordingUrl={latestRecording.recording_url}
+                transcript={latestRecording.transcript}
+                duration={latestRecording.recording_duration}
+              />
+            </CollapsibleSection>
           )}
 
           {/* AI Sales Coach — show score for most recent call interaction */}
           {latestRecording && (
-            <SalesCoachPanel
-              interactionId={latestRecording.id}
-              token={token!}
-              onSessionTimeout={sessionTimeout}
-            />
+            <CollapsibleSection title="AI Sales Coach" icon={Brain}>
+              <SalesCoachPanel
+                interactionId={latestRecording.id}
+                token={token!}
+                onSessionTimeout={sessionTimeout}
+              />
+            </CollapsibleSection>
           )}
 
           {/* Competitor signals detected on calls */}
-          <CompetitorBadges
-            leadId={leadId}
-            token={token!}
-            onSessionTimeout={sessionTimeout}
-          />
+          <CollapsibleSection title="Competitor Signals" icon={Target}>
+            <CompetitorBadges
+              leadId={leadId}
+              token={token!}
+              onSessionTimeout={sessionTimeout}
+            />
+          </CollapsibleSection>
 
           {/* WhatsApp conversation thread */}
-          <WhatsAppThread
-            leadId={leadId}
-            token={token!}
-            onSessionTimeout={sessionTimeout}
-          />
+          <CollapsibleSection title="WhatsApp Thread" icon={UserCheck}>
+            <WhatsAppThread
+              leadId={leadId}
+              token={token!}
+              onSessionTimeout={sessionTimeout}
+            />
+          </CollapsibleSection>
 
           {/* Email thread */}
-          <EmailThread
-            leadId={leadId}
-            token={token!}
-            leadEmail={lead?.email}
-            onSessionTimeout={sessionTimeout}
-          />
+          <CollapsibleSection title="Email Thread" icon={UserCheck}>
+            <EmailThread
+              leadId={leadId}
+              token={token!}
+              leadEmail={lead?.email}
+              onSessionTimeout={sessionTimeout}
+            />
+          </CollapsibleSection>
         </div>
       </div>
     </div>

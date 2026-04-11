@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 from secrets import token_urlsafe
+from typing import Any
 
 import logging
 
@@ -10,8 +10,8 @@ from sqlmodel import Session, select
 
 logger = logging.getLogger(__name__)
 
-from models.models import Lead, Product, Quote, QuoteCreate, QuoteItem, QuoteItemCreate, utc_now
-from services.tracking_service import record_quote_event
+from models.models import EngagementEvent, Lead, Product, Quote, QuoteCreate, QuoteItem, QuoteItemCreate, utc_now
+from services.engagement_service import record_quote_event
 
 
 def generate_quote_number(session: Session, company_id: int) -> str:
@@ -131,7 +131,6 @@ def create_quote(
     session.commit()
     session.refresh(quote)
 
-    # Track quote creation
     record_quote_event(
         session=session,
         company_id=company_id,
@@ -205,108 +204,12 @@ def add_quote_item(
     return item
 
 
-def generate_quote_pdf(
-    session: Session,
-    company_id: int,
-    actor_user_id: int,
-    quote_id: int,
-    output_dir: str = "quotes",
-) -> Quote:
-    from reportlab.lib.pagesizes import A4
-    from reportlab.pdfgen import canvas
-
-    quote = get_quote_or_404(session, company_id, quote_id)
-
-    lead = session.exec(
-        select(Lead).where(
-            Lead.id == quote.lead_id,
-            Lead.company_id == company_id,
-        )
-    ).first()
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-
-    items = session.exec(
-        select(QuoteItem).where(
-            QuoteItem.quote_id == quote.id,
-            QuoteItem.company_id == company_id,
-        )
-    ).all()
-
-    if not items:
-        raise HTTPException(status_code=400, detail="Quote has no items")
-
-    Path(output_dir).mkdir(parents=True, exist_ok=True)
-    file_path = Path(output_dir) / f"{quote.quote_number}.pdf"
-
-    c = canvas.Canvas(str(file_path), pagesize=A4)
-    width, height = A4
-    y = height - 50
-
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(40, y, f"Quotation {quote.quote_number}")
-    y -= 30
-
-    c.setFont("Helvetica", 11)
-    c.drawString(40, y, f"Lead: {lead.name}")
-    y -= 18
-    c.drawString(40, y, f"Email: {lead.email or '-'}")
-    y -= 18
-    c.drawString(40, y, f"Phone: {lead.normalized_phone}")
-    y -= 18
-    c.drawString(40, y, f"Valid Until: {quote.valid_until.strftime('%Y-%m-%d') if quote.valid_until else '-'}")
-    y -= 30
-
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(40, y, "Product")
-    c.drawString(260, y, "Qty")
-    c.drawString(320, y, "Unit Price")
-    c.drawString(430, y, "Line Total")
-    y -= 20
-
-    c.setFont("Helvetica", 10)
-    for item in items:
-        c.drawString(40, y, item.product_name_snapshot[:35])
-        c.drawString(260, y, str(item.quantity))
-        c.drawString(320, y, f"{quote.currency} {item.unit_price}")
-        c.drawString(430, y, f"{quote.currency} {item.line_total}")
-        y -= 18
-
-        if y < 100:
-            c.showPage()
-            y = height - 50
-
-    y -= 20
-    c.setFont("Helvetica-Bold", 11)
-    c.drawString(320, y, "Subtotal:")
-    c.drawString(430, y, f"{quote.currency} {quote.subtotal}")
-    y -= 18
-    c.drawString(320, y, "Discount:")
-    c.drawString(430, y, f"{quote.currency} {quote.discount_amount}")
-    y -= 18
-    c.drawString(320, y, "Tax:")
-    c.drawString(430, y, f"{quote.currency} {quote.tax_amount}")
-    y -= 18
-    c.drawString(320, y, "Total:")
-    c.drawString(430, y, f"{quote.currency} {quote.total_amount}")
-
-    c.save()
-
-    quote.pdf_path = str(file_path)
-    quote.updated_at = utc_now()
-    quote.updated_by = actor_user_id
-    session.add(quote)
-    session.commit()
-    session.refresh(quote)
-    record_quote_event(
-        session=session,
-        company_id=company_id,
-        quote_id=quote.id,
-        event_type="pdf_generated",
-        payload={"pdf_path": quote.pdf_path},
-    )
-
-    return quote
+_QUOTE_STATUS_ISM_STAGE: dict[str, str] = {
+    "sent":        "quote_sent",
+    "negotiation": "negotiation",
+    "accepted":    "closed_won",
+    "rejected":    "closed_lost",
+}
 
 
 def mark_quote_status(
@@ -338,6 +241,35 @@ def mark_quote_status(
             event_type=status,
             payload=payload,
         )
+
+    target_ism = _QUOTE_STATUS_ISM_STAGE.get(status)
+    if target_ism and quote.lead_id:
+        try:
+            from services.outcome_service import advance_ism_stage
+            lead = session.get(Lead, quote.lead_id)
+            if lead and lead.company_id == company_id:
+                if advance_ism_stage(lead, target_ism):
+                    lead.updated_at = utc_now()
+                    lead.updated_by = actor_user_id
+                    session.add(lead)
+                    session.commit()
+        except Exception as ism_exc:
+            logger.warning("[QuoteService] ISM stage update failed: %s", ism_exc)
+
+    if status == "accepted" and quote.lead_id:
+        try:
+            from services.auto_csat_service import maybe_send_auto_csat
+            maybe_send_auto_csat(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=quote.lead_id,
+                interaction_id=None,
+                trigger="quote",
+            )
+        except Exception as csat_exc:
+            logger.warning("[AutoCSAT] Dispatch failed after quote accept: %s", csat_exc)
+
     return quote
 
 
@@ -347,16 +279,26 @@ def get_quote_by_tracking_token(session: Session, token: str) -> Quote | None:
     return session.exec(select(Quote).where(Quote.tracking_token == token)).first()
 
 
+def record_quote_open_by_token(session: Session, token: str) -> dict[str, Any]:
+    quote = get_quote_by_tracking_token(session, token)
+    if not quote:
+        raise HTTPException(status_code=404, detail="Quote tracking token not found")
+    return record_quote_event(
+        session=session,
+        company_id=quote.company_id,
+        quote_id=quote.id,
+        event_type="opened",
+        payload={"tracking_token": token},
+    )
+
+
 def respond_to_quote_token(
     session: Session,
     token: str,
     response: str,
     actor_user_id: int | None = None,
 ) -> Quote:
-    status_map = {
-        "accept": "accepted",
-        "reject": "rejected",
-    }
+    status_map = {"accept": "accepted", "reject": "rejected"}
     normalized = response.strip().lower()
     if normalized not in status_map:
         raise HTTPException(status_code=400, detail="Invalid response")
@@ -382,108 +324,110 @@ def respond_to_quote_token(
     return quote
 
 
-def auto_create_quote_from_interaction(
-    session: Session,
-    company_id: int,
-    lead_id: int,
-    interaction_id: int,
-    request_text: str | None,
-    channel: str,
-) -> dict[str, any]:
-    """
-    Automatically create a quote from an inbound interaction if product context is sufficient.
-    If context is insufficient, create a CallTask for human review.
-    
-    Returns:
-    {
-        "automation_triggered": bool,
-        "quote_id": int | None,
-        "call_task_id": int | None,
-        "action": "auto_quote_sent" | "follow_up_task_created"
-    }
-    """
-    from services.next_action_service import _resolve_quote_product_match
-    from services.outbound_call_service import create_call_task
-    
-    lead = session.exec(
-        select(Lead).where(
-            Lead.id == lead_id,
-            Lead.company_id == company_id,
-        )
-    ).first()
-    
-    if not lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    
-    # Try to resolve product match from interaction context
-    matched_product = _resolve_quote_product_match(session, company_id, lead, request_text)
-    
-    # If we found a product match, auto-create and send quote
-    if matched_product:
-        try:
-            quote_data = QuoteCreate(
-                lead_id=lead_id,
-                account_id=None,
-                currency="INR",
-                valid_until=utc_now() + timedelta(days=15),
-                notes=f"Auto-generated quote from {channel} request: {request_text[:100] if request_text else 'Product inquiry'}",
-                items=[
-                    QuoteItemCreate(
-                        product_id=matched_product.id,
-                        product_name_snapshot=matched_product.name,
-                        sku_snapshot=matched_product.sku,
-                        quantity=1,
-                        unit_price=matched_product.base_price or Decimal("0.00"),
-                        discount_percent=Decimal("0.00"),
-                    )
-                ],
-            )
-            
-            quote = create_quote(
-                session=session,
-                company_id=company_id,
-                actor_user_id=0,  # System-created
-                data=quote_data,
-            )
-            
-            # Record automation event
-            record_quote_event(
-                session=session,
-                company_id=company_id,
-                quote_id=quote.id,
-                event_type="auto_generated",
-                payload={
-                    "interaction_id": interaction_id,
-                    "matched_product": matched_product.name,
-                    "channel": channel,
-                },
-            )
-            
-            return {
-                "automation_triggered": True,
-                "quote_id": quote.id,
-                "call_task_id": None,
-                "action": "auto_quote_sent",
-            }
-        except Exception as e:
-            logger.warning(
-                "Auto-quote creation failed for lead=%d interaction=%d product=%s: %s — falling back to call task",
-                lead_id, interaction_id, matched_product.name, e,
-            )
-    
-    # If no product match or quote creation failed, create a follow-up task
-    task = create_call_task(
-        session=session,
-        company_id=company_id,
-        lead_id=lead_id,
-        actor_user_id=0,  # System-created
-        status="pending",
-        notes=f"Review quote request from {channel}: {request_text[:200] if request_text else 'Product inquiry'}. Insufficient product context for auto-quote.",
-    )
-    
+def get_public_quote_info(session: Session, token: str) -> dict[str, Any]:
+    if not token:
+        raise HTTPException(status_code=400, detail="Missing quote token")
+
+    quote = get_quote_by_tracking_token(session, token)
+    if not quote:
+        raise HTTPException(status_code=404, detail="Quote not found")
+
+    lead = session.get(Lead, quote.lead_id)
+    events = session.exec(
+        select(EngagementEvent)
+        .where(EngagementEvent.quote_id == quote.id)
+        .order_by(EngagementEvent.created_at.asc())
+    ).all()
+
+    timeline = []
+    if quote.created_at:
+        timeline.append({"label": "Quote created", "timestamp": quote.created_at.isoformat()})
+    if quote.sent_at:
+        timeline.append({"label": "Quote sent", "timestamp": quote.sent_at.isoformat()})
+    if quote.opened_at:
+        timeline.append({"label": "Quote opened", "timestamp": quote.opened_at.isoformat()})
+    if quote.accepted_at:
+        timeline.append({"label": "Quote accepted", "timestamp": quote.accepted_at.isoformat()})
+    if quote.rejected_at:
+        timeline.append({"label": "Quote rejected", "timestamp": quote.rejected_at.isoformat()})
+
+    items = session.exec(
+        select(QuoteItem).where(QuoteItem.quote_id == quote.id)
+    ).all()
+
     return {
-        "automation_triggered": True,
-        "quote_id": None,
-        "call_task_id": task.id,
-        "action": "follow_up_task_created",
+        "quote": {
+            "id": quote.id,
+            "quote_number": quote.quote_number,
+            "status": quote.status,
+            "currency": quote.currency,
+            "total_amount": str(quote.total_amount),
+            "valid_until": quote.valid_until.isoformat() if quote.valid_until else None,
+            "tracking_token": quote.tracking_token,
+            "notes": quote.notes,
+            "lead_name": lead.name if lead else None,
+            "lead_email": lead.email if lead else None,
+            "lead_phone": lead.normalized_phone if lead else None,
+        },
+        "items": [
+            {
+                "id": it.id,
+                "product_name": it.product_name_snapshot,
+                "sku": it.sku_snapshot,
+                "quantity": it.quantity,
+                "unit_price": str(it.unit_price),
+                "discount_percent": str(it.discount_percent),
+                "line_total": str(it.line_total),
+                "notes": it.notes,
+            }
+            for it in items
+        ],
+        "events": [
+            {
+                "event_type": event.event_type,
+                "channel": event.channel,
+                "payload": event.payload,
+                "created_at": event.created_at.isoformat(),
+            }
+            for event in events
+        ],
+        "timeline": timeline,
     }
+
+
+def negotiate_quote_by_token(session: Session, token: str, message: str, requested_discount: float | None = None) -> dict:
+    quote = get_quote_by_tracking_token(session, token)
+    if not quote:
+        raise HTTPException(status_code=404, detail="Quote not found")
+    if quote.status in ("accepted", "rejected"):
+        raise HTTPException(status_code=400, detail=f"Quote already {quote.status}")
+
+    now = utc_now()
+    event = EngagementEvent(
+        company_id=quote.company_id,
+        lead_id=quote.lead_id,
+        quote_id=quote.id,
+        event_type="quote.negotiation",
+        channel="quote",
+        payload={
+            "message": message,
+            "requested_discount": requested_discount,
+            "tracking_token": token,
+        },
+        created_at=now,
+    )
+    session.add(event)
+
+    lead = session.get(Lead, quote.lead_id)
+    if lead:
+        lead.next_action = "negotiation"
+        lead.next_action_due_at = now
+        lead.updated_at = now
+        session.add(lead)
+
+    quote.status = "negotiation"
+    quote.updated_at = now
+    session.add(quote)
+    session.commit()
+
+    return {"status": "negotiation", "quote_id": quote.id}

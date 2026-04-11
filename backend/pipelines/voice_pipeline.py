@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+import uuid as _uuid
 from datetime import datetime
 import re
 from collections import deque
@@ -22,22 +23,39 @@ from tool_adapter import execute_mcp_tool, get_mistral_tools
 from utils.encryption import decrypt_value
 from utils.audio import clean_voice_text
 from utils.lead_utils import get_comprehensive_lead_context
+from utils import settings_cache as _sc
 from services import sentiment_broadcaster
 
 logger = logging.getLogger(__name__)
+
+# Sentinel stored alongside settings to distinguish "cached & empty" from "never cached"
+_SETTINGS_CACHE_SENTINEL = "__cache_loaded__"
 
 
 def _load_company_settings(session: Session, company_id: int | None) -> dict[str, str]:
     if not company_id:
         return {}
 
+    # Return from cache if already loaded for this company
+    if _sc.get(_SETTINGS_CACHE_SENTINEL, user_id=company_id) is not None:
+        result = _sc.get_all(user_id=company_id)
+        result.pop(_SETTINGS_CACHE_SENTINEL, None)
+        logger.debug(f"[SettingsCache] HIT — {len(result)} keys for company {company_id}")
+        return result
+
+    # Cache miss — query DB
     settings = session.exec(
         select(CompanySetting).where(CompanySetting.company_id == company_id)
     ).all()
-    return {
+    result = {
         item.key: decrypt_value(item.value) if item.is_secret else item.value
         for item in settings
     }
+
+    # Populate cache (sentinel marks the company as loaded, even if settings are empty)
+    _sc.update({_SETTINGS_CACHE_SENTINEL: "1", **result}, user_id=company_id)
+    logger.info(f"[SettingsCache] MISS — loaded {len(result)} keys for company {company_id} into cache")
+    return result
 
 
 def _resolve_setting(settings: dict[str, str], keys: list[str], hint: str):
@@ -113,6 +131,18 @@ class VoicePipeline:
         self.resume_event.set()
         self.pending_interrupt_reason: str | None = None
         self.last_rio_sentences: deque[str] = deque(maxlen=3)
+        self._last_clear_ts = 0.0
+
+        # Barge-in tuning (env-overridable) to avoid aggressive false interrupts.
+        self.barge_rms_threshold = int(os.getenv("BARGE_RMS_THRESHOLD", "1200"))
+        self.barge_frames_needed = int(os.getenv("BARGE_FRAMES_NEEDED", "8"))
+        self.barge_silence_reset_frames = int(os.getenv("BARGE_SILENCE_RESET_FRAMES", "20"))
+        self.barge_tts_guard_ms = int(os.getenv("BARGE_TTS_GUARD_MS", "1500"))
+        self.barge_post_speech_cooldown_ms = int(os.getenv("BARGE_POST_SPEECH_COOLDOWN_MS", "1200"))
+        self.barge_clear_cooldown_ms = int(os.getenv("BARGE_CLEAR_COOLDOWN_MS", "600"))
+        self.barge_retrigger_cooldown_ms = int(os.getenv("BARGE_RETRIGGER_COOLDOWN_MS", "2500"))
+        self.disable_barge_in = os.getenv("DISABLE_BARGE_IN", "0").lower() in {"1", "true", "yes", "on"}
+        self._last_barge_trigger_ts = 0.0
 
         # 3. Determine specific LLM, TTS, STT keys based on provider
         # Use provider-specific keys (e.g., MISTRAL_API_KEY) or fall back to general keys
@@ -202,6 +232,11 @@ class VoicePipeline:
                 logger.debug("[Pipeline] Objection playbook skipped: %s", _pe)
 
         self.last_context_type = "general"
+
+        # Trace context — one trace_id per call, turn_index increments each turn
+        self.trace_id = _uuid.uuid4().hex
+        self.turn_index = 0
+
     def _pause_playback_for_interrupt(self):
         if not self.pause_playback:
             self.pause_playback = True
@@ -430,14 +465,18 @@ class VoicePipeline:
             Uses RMS energy — no API, no latency. Fires the moment customer speaks.
             """
             import audioop, struct, math
-            SPEECH_RMS = 400          # tune up if echo triggers, down if misses speech
-            SPEECH_FRAMES_NEEDED = 3  # ~3 consecutive 20ms frames = 60ms of speech
-            SILENCE_RESET_FRAMES = 15 # frames of silence before resetting counter
+            SPEECH_RMS = self.barge_rms_threshold
+            SPEECH_FRAMES_NEEDED = self.barge_frames_needed
+            SILENCE_RESET_FRAMES = self.barge_silence_reset_frames
             
             speech_counter = 0
             silence_counter = 0
 
             while True:
+                if self.disable_barge_in:
+                    await asyncio.sleep(0.05)
+                    continue
+
                 chunk = await barge_queue.get()
                 if chunk is None:
                     break
@@ -451,21 +490,50 @@ class VoicePipeline:
                 samples = struct.unpack(f"<{len(pcm)//2}h", pcm)
                 rms = math.sqrt(sum(s*s for s in samples) / len(samples)) if samples else 0
 
+                now = time.time()
+
+                # Guard 1: within TTS-start window (Rio just started speaking)
+                tts_start_guard = (
+                    self.is_rio_speaking
+                    and self.last_tts_start_time > 0
+                    and (now - self.last_tts_start_time) * 1000 < self.barge_tts_guard_ms
+                )
+                # Guard 2: post-speech cooldown — audio tail/echo after Rio finishes
+                post_speech_guard = (
+                    not self.is_rio_speaking
+                    and self.last_rio_speech_end_time > 0
+                    and (now - self.last_rio_speech_end_time) * 1000 < self.barge_post_speech_cooldown_ms
+                )
+                if tts_start_guard or post_speech_guard:
+                    speech_counter = 0
+                    continue
+
                 if rms > SPEECH_RMS:
                     silence_counter = 0
                     speech_counter += 1
                     if speech_counter >= SPEECH_FRAMES_NEEDED:
                         if self.is_rio_speaking or not self.sentence_queue.empty():
-                            logger.info(f"⚡ [Barge-in] Customer speaking (RMS:{rms:.0f}) — interrupt pending")
+                            # Rio is mid-speech — real barge-in
+                            logger.info(f"⚡ [Barge-in] Interrupt while Rio speaking (RMS:{rms:.0f})")
                             if not self.interrupt_pending:
                                 self.interrupt_pending = True
                                 self.pending_interrupt_reason = "customer_speaking"
                                 self._pause_playback_for_interrupt()
                                 self._cancel_pending_llm_dispatch()
-                            await self.communicator.clear_audio_buffer()
+                            if (now - self._last_clear_ts) * 1000 >= self.barge_clear_cooldown_ms:
+                                await self.communicator.clear_audio_buffer()
+                                self._last_clear_ts = now
                             speech_counter = 0
                             continue
-                        logger.info(f"⚡ [Barge-in] Customer speaking (RMS:{rms:.0f}) — interrupting")
+
+                        # Rio is silent — customer taking their turn
+                        # Retrigger cooldown: don't flood LLM with repeated triggers
+                        if (now - self._last_barge_trigger_ts) * 1000 < self.barge_retrigger_cooldown_ms:
+                            speech_counter = 0
+                            continue
+
+                        logger.info(f"⚡ [Customer turn] Speech detected (RMS:{rms:.0f}) — sending to LLM")
+                        self._last_barge_trigger_ts = now
                         await self._handle_barge_in(reason="customer_speaking")
                         speech_counter = 0
                 else:
@@ -517,7 +585,7 @@ class VoicePipeline:
                         sentiment_data = sentiment_broadcaster.analyze_sentiment(current_turn_transcript)
                         sentiment_data["interaction_id"] = self.interaction_id
                         asyncio.create_task(
-                            sentiment_broadcaster.publish(str(self.interaction_id), sentiment_data)
+                            sentiment_broadcaster.publish(str(self.interaction_id), sentiment_data, self.company_id)
                         )
                     except Exception as _se:
                         logger.debug("Sentiment publish skipped: %s", _se)
@@ -727,7 +795,7 @@ class VoicePipeline:
                         from services.tts.sarvam import SarvamTTS
                         try:
                             sv_ws = await session.ws_connect(SarvamTTS.WS_URL, headers=sv_headers)
-                            sv_config = SarvamTTS.ws_config_frame(
+                            sv_config = SarvamTTS.ws_config_frame_static(
                                 model=self.tts_service.model,
                                 speaker=self.tts_service.speaker,
                             )
@@ -810,7 +878,7 @@ class VoicePipeline:
                                 from services.tts.sarvam import SarvamTTS
                                 try:
                                     sv_ws = await session.ws_connect(SarvamTTS.WS_URL, headers=sv_headers)
-                                    sv_config = SarvamTTS.ws_config_frame(
+                                    sv_config = SarvamTTS.ws_config_frame_static(
                                         model=self.tts_service.model,
                                         speaker=self.tts_service.speaker,
                                     )
@@ -899,6 +967,51 @@ class VoicePipeline:
         self.llm_service.clean_interrupted_tool_calls()
         self.current_turn_user_text = ""
         self.is_rio_speaking = False
+
+    def _annotate_trace(self, span_status: str = "ok") -> None:
+        """
+        Attach trace_id/span_id/turn_index/span_status to the LatencyLog row
+        just written by save_latency(). Called immediately after save_latency().
+        Never raises — trace annotation is best-effort.
+        """
+        try:
+            interaction_id_int = int(self.interaction_id)
+        except (ValueError, TypeError):
+            return  # Anonymous/session calls — nothing to annotate
+
+        try:
+            from sqlalchemy import text as _text
+            from database import engine as _db_engine
+            from sqlmodel import Session as _TraceSession
+
+            span_id = _uuid.uuid4().hex[:16]
+            with _TraceSession(_db_engine) as s:
+                s.execute(
+                    _text("""
+                        UPDATE latencylog
+                        SET trace_id    = :trace_id,
+                            span_id     = :span_id,
+                            turn_index  = :turn_index,
+                            span_status = :span_status
+                        WHERE id = (
+                            SELECT id FROM latencylog
+                            WHERE interaction_id = :iid
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                    """),
+                    {
+                        "trace_id": self.trace_id,
+                        "span_id": span_id,
+                        "turn_index": self.turn_index,
+                        "span_status": span_status,
+                        "iid": interaction_id_int,
+                    },
+                )
+                s.commit()
+            self.turn_index += 1
+        except Exception as exc:
+            logger.debug("Trace annotation skipped: %s", exc)
 
     def save_latency(self, engine_name, stt, llm, tts, stt_p=None, stt_m=None, llm_p=None, llm_m=None, tts_p=None, tts_m=None):
         """Saves turn-level latency metrics to DB."""
@@ -1149,29 +1262,42 @@ class VoicePipeline:
         async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
                 sentence = chunk["content"]
-                
-                # Robust technical leakage check
-                if self._is_technical_leakage(sentence):
-                    logger.warning(f"🚫 [VoicePipeline] Discarding JSON-leaked sentence: {sentence[:40]}...")
+
+                # Step 1: strip JSON fragments out of an otherwise valid sentence
+                # (e.g. "Great! {"email": "x@y.com"}" → "Great!")
+                stripped = self._strip_json_fragments(sentence)
+
+                # Step 2: if stripping removed a meaningful chunk, log it
+                if stripped != sentence:
+                    logger.warning(
+                        "🚫 [VoicePipeline] JSON fragments stripped from sentence: %r → %r",
+                        sentence[:60], stripped[:60],
+                    )
+
+                # Step 3: if what remains is still technical leakage, discard entirely
+                if not stripped or self._is_technical_leakage(stripped):
+                    logger.warning("🚫 [VoicePipeline] Discarding JSON-leaked sentence: %r", sentence[:60])
                     continue
-                
-                # Strip markdown and technical leaks before queuing for TTS
-                clean_sentence = self._strip_markdown(sentence)
+
+                # Step 4: strip markdown and internal ID patterns
+                clean_sentence = self._strip_markdown(stripped)
                 clean_sentence = self._filter_technical_speech(clean_sentence)
-                
+
                 if not clean_sentence or len(clean_sentence.strip()) < 2:
                     continue
 
-                logger.info(f"📤 [{self.llm_provider} -> Queue] Sentence: '{clean_sentence}'")
+                logger.info("📤 [%s -> Queue] Sentence: %r", self.llm_provider, clean_sentence)
                 await self.sentence_queue.put(clean_sentence)
             elif chunk["type"] == "error":
                 self.llm_error_count += 1
                 if self.llm_error_count >= 3:
                     fallback_sentence = "I'm sorry, I'm experiencing persistent technical difficulties. Please try calling back in a few minutes."
                     logger.warning(f"🚨 [Smart Fallback] 3 consecutive failures. Queuing final error message.")
+                    self._annotate_trace("error")
                 else:
                     fallback_sentence = "I'm sorry, I'm having a bit of trouble with my connection. Could you repeat that?"
                     logger.info(f"🔄 [Smart Fallback] Failure #{self.llm_error_count}. Queuing retry message.")
+                    self._annotate_trace("error")
                 await self.sentence_queue.put(fallback_sentence)
                 return
             elif chunk["type"] == "finished":
@@ -1212,14 +1338,16 @@ class VoicePipeline:
                 )
                 
                 if full_reply:
-                    self.transcript_accumulator.append(f"Rio: {full_reply}")
+                    # Strip JSON fragments before recording transcript (keep LLM history untouched)
+                    transcript_reply = self._strip_json_fragments(full_reply)
+                    self.transcript_accumulator.append(f"Rio: {transcript_reply}")
                     self.save_transcript()
 
                 # Always save latency, even for tool-only turns
                 self.save_latency(
-                    f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}", 
-                    stt_latency, 
-                    llm_latency, 
+                    f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}",
+                    stt_latency,
+                    llm_latency,
                     self.tts_service.last_latency,
                     stt_p=self.stt_service.provider,
                     stt_m=self.stt_service.model,
@@ -1228,11 +1356,27 @@ class VoicePipeline:
                     tts_p=self.tts_service.provider,
                     tts_m=self.tts_service.model
                 )
-                
+                self._annotate_trace("ok")
+
                 if tool_calls:
                     for tc in tool_calls:
                         tool_name = tc.function.name
-                        tool_args = json.loads(tc.function.arguments)
+                        raw_args = tc.function.arguments or "{}"
+                        try:
+                            tool_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            # Streaming may concatenate duplicate chunks → "Extra data".
+                            # Try extracting the first valid JSON object from the string.
+                            m = re.search(r'\{.*?\}', raw_args, re.DOTALL)
+                            try:
+                                tool_args = json.loads(m.group(0)) if m else {}
+                            except Exception:
+                                tool_args = {}
+                            logger.warning(
+                                "⚠️ [VoicePipeline] Malformed tool-call arguments for %s — "
+                                "raw: %r  parsed as: %r",
+                                tool_name, raw_args[:120], tool_args,
+                            )
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
 
                         # Thinking message — keep customer engaged during tool wait
@@ -1301,35 +1445,63 @@ class VoicePipeline:
                     await self._process_llm_response(None, 0)
                 self.current_turn_user_text = ""
 
+    def _strip_json_fragments(self, text: str) -> str:
+        """
+        Strips JSON objects, arrays, and bare key:value pairs from speech text.
+        Prose surrounding the JSON is preserved so a sentence like
+        "Great, I've noted that! {"email": "x@y.com"}" becomes "Great, I've noted that!"
+        """
+        if not text:
+            return text
+        # Remove { ... } JSON objects (handles one level of nesting via two passes)
+        for _ in range(3):
+            text = re.sub(r'\{[^{}]*\}', '', text)
+        # Remove [ ... ] arrays
+        text = re.sub(r'\[[^\[\]]*\]', '', text)
+        # Remove bare "key": "value"  /  "key": number  /  "key": true|false|null
+        text = re.sub(
+            r'"[a-z_]{2,24}"\s*:\s*(?:"[^"]*"|\d+(?:\.\d+)?|true|false|null)',
+            '', text,
+        )
+        # Clean up leftover commas, spaces, and sentence-ending artifacts
+        text = re.sub(r',\s*,', ',', text)
+        text = re.sub(r'^\s*[,;]\s*', '', text)
+        text = re.sub(r'\s*[,;]\s*$', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
     def _is_technical_leakage(self, text: str) -> bool:
         """Detects if a string looks like raw JSON, tool call fragments, or technical metadata."""
         if not text:
             return False
-        
+
         trimmed = text.strip()
         # 1. Starts with JSON braces/brackets
         if trimmed.startswith(("{", "[", '{"', '["')):
             return True
-        
+
         # 2. Contains key-value pair pattern (e.g. "key": "value" or "key": 123)
-        if re.search(r'["\']\w+["\']\s*:\s*', trimmed):
+        if re.search(r'"[a-z_]{2,24}"\s*:\s*(?:"[^"]*"|\d+|true|false|null)', trimmed):
             return True
-        
-        # 3. Contains tool call artifacts
+
+        # 3. Multiple bare quoted-key:value pairs (comma-separated JSON)
+        if len(re.findall(r'"[a-z_]+"\s*:', trimmed)) >= 2:
+            return True
+
+        # 4. Contains tool call artifacts
         technical_terms = ['"arguments":', '"name":', '"id":', 'function_call', 'tool_calls', 'call_id']
         if any(term in trimmed for term in technical_terms):
             return True
-            
-        # 4. Excessive technical characters
-        technical_chars = trimmed.count("{") + trimmed.count("}") + trimmed.count(":") + trimmed.count("[") + trimmed.count("]")
-        if technical_chars > 3 and (":" in trimmed or "{" in trimmed):
+
+        # 5. Excessive technical characters ratio
+        technical_chars = trimmed.count("{") + trimmed.count("}") + trimmed.count("[") + trimmed.count("]")
+        if technical_chars >= 2:
             return True
 
         return False
 
     def _filter_technical_speech(self, text: str) -> str:
         """Regex-based safety layer to strip technical leakages from the voice stream."""
-        import re
         # Catch: "lead ID 47", "ID of 47", "INTERNAL_ID", "ID is 47", "__META_ID__", etc.
         patterns = [
             r"(?i)lead\s+id\s+(?:of\s+)?\d+",
@@ -1339,11 +1511,11 @@ class VoicePipeline:
             r"(?i)internal\s+id",
             r"(?i)system\s+record",
             r"(?i)database\s+id",
-            r"__META_ID__"
+            r"__META_ID__",
         ]
         for pattern in patterns:
             text = re.sub(pattern, "", text)
-        
+
         # Clean up awkward double spaces or trailing conjunctions left by stripping
         text = re.sub(r"\s+", " ", text).strip()
         # Remove trailing "with a" or "and" if they were part of an ID phrase

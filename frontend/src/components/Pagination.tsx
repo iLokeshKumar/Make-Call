@@ -40,7 +40,7 @@ export default function Pagination({
                 pages.push('...');
             }
         }
-        return [...new Set(pages)]; // Remove duplicates just in case
+        return [...new Set(pages)];
     };
 
     return (

@@ -1,32 +1,24 @@
 """
-Real-time sentiment broadcaster.
+Real-time sentiment broadcaster — PostgreSQL-backed pub/sub.
 
-Lightweight in-process pub/sub for streaming sentiment updates from the
-VoicePipeline to any connected dashboard WebSocket clients.
+Events are written to the `sentiment_events` table so they are visible
+to all uvicorn workers. The WebSocket handler polls the table every 200ms
+using a cursor (last_id) instead of an in-process asyncio.Queue.
 
 Usage:
   # In VoicePipeline (after each final STT transcript):
-  await sentiment_broadcaster.publish(interaction_id, sentiment_data)
+  await sentiment_broadcaster.publish(interaction_id, sentiment_data, company_id)
 
-  # In WebSocket route handler:
-  queue = await sentiment_broadcaster.subscribe(interaction_id)
-  try:
-      while True:
-          data = await asyncio.wait_for(queue.get(), timeout=30)
-          await ws.send_json(data)
-  finally:
-      sentiment_broadcaster.unsubscribe(interaction_id, queue)
+  # In WebSocket route handler — see main.py /ws/sentiment/{interaction_id}
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-from collections import defaultdict
 
 logger = logging.getLogger(__name__)
 
-# sentiment keyword banks (reuse outcome_service signal sets via inline copy to avoid circular imports)
+# sentiment keyword banks
 _POSITIVE = {
     "interested", "yes", "tell me", "send", "share", "proposal",
     "pricing", "demo", "meeting", "available", "excited",
@@ -78,37 +70,22 @@ def analyze_sentiment(text: str) -> dict:
     }
 
 
-# pub/sub state
+async def publish(interaction_id: str, data: dict, company_id: int) -> None:
+    """
+    Write a sentiment event to PostgreSQL.
+    Works across all uvicorn workers — no shared in-process state.
+    """
+    try:
+        from database import engine as _db_engine
+        from sqlmodel import Session as _DbSession
+        from models.models import SentimentEvent
 
-_subscribers: dict[str, list[asyncio.Queue]] = defaultdict(list)
-
-
-async def subscribe(interaction_id: str) -> asyncio.Queue:
-    """Register a new subscriber for the given interaction. Returns a queue."""
-    q: asyncio.Queue = asyncio.Queue(maxsize=50)
-    _subscribers[interaction_id].append(q)
-    logger.debug("[Sentiment] Subscribed to interaction %s", interaction_id)
-    return q
-
-
-def unsubscribe(interaction_id: str, queue: asyncio.Queue) -> None:
-    """Remove a subscriber queue when the WebSocket disconnects."""
-    subs = _subscribers.get(interaction_id)
-    if subs:
-        try:
-            subs.remove(queue)
-        except ValueError:
-            pass
-        if not subs:
-            _subscribers.pop(interaction_id, None)
-    logger.debug("[Sentiment] Unsubscribed from interaction %s", interaction_id)
-
-
-async def publish(interaction_id: str, data: dict) -> None:
-    """Publish a sentiment update to all subscribers of an interaction."""
-    subs = _subscribers.get(str(interaction_id), [])
-    for q in list(subs):
-        try:
-            q.put_nowait(data)
-        except asyncio.QueueFull:
-            pass  # dashboard is too slow — drop silently
+        with _DbSession(_db_engine) as s:
+            s.add(SentimentEvent(
+                interaction_id=str(interaction_id),
+                company_id=company_id,
+                payload=data,
+            ))
+            s.commit()
+    except Exception as exc:
+        logger.debug("Sentiment DB write skipped: %s", exc)

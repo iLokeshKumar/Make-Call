@@ -324,7 +324,7 @@ export default function ObjectionsPage() {
               }`}
             >
               {editId === obj.id ? (
-                /* ── Edit mode ── */
+                /* Edit mode */
                 <div className="space-y-3">
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <div>
@@ -375,7 +375,7 @@ export default function ObjectionsPage() {
                   </div>
                 </div>
               ) : (
-                /* ── Read mode ── */
+                /* Read mode */
                 <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                   <div className="space-y-1.5 flex-1 min-w-0">
                     <div className="flex flex-wrap items-center gap-2">

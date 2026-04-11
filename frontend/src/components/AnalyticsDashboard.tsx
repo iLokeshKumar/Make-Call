@@ -77,13 +77,6 @@ interface AlertInfo {
   last_triggered_at?: string | null;
 }
 
-interface SummaryData {
-  campaign_conversion_trends: Array<{ name: string; responded: number; sent: number; conversion_rate: number }>;
-  quote_timeline_export: Array<{ quote_id: number; quote_number: string; status: string; dates: Record<string, string | null> }>;
-  campaign_status_over_time: Array<{ day: string; status: string; count: number }>;
-  campaign_funnel: Array<{ status: string; count: number; percent: number }>;
-}
-
 // Helpers
 
 const fms = (v: number) => v >= 1000 ? `${(v / 1000).toFixed(2)}s` : `${Math.round(v)}ms`;

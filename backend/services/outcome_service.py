@@ -254,10 +254,43 @@ def get_retry_policy(
     }
 
 
+_ISM_STAGE_ORDER = [
+    "new", "contacted", "engaged", "quote_sent", "negotiation", "closed_won", "closed_lost"
+]
+
+
+def _ism_stage_index(stage: str) -> int:
+    try:
+        return _ISM_STAGE_ORDER.index(stage)
+    except ValueError:
+        return 0
+
+
+def advance_ism_stage(lead: Lead, target_stage: str) -> bool:
+    """
+    Move lead.ism_stage to target_stage only if it is strictly forward.
+    Returns True if the stage was updated.
+    """
+    current = lead.ism_stage or "new"
+    if _ism_stage_index(target_stage) > _ism_stage_index(current):
+        lead.ism_stage = target_stage
+        return True
+    return False
+
+
+# Outcome → ISM stage target
+_OUTCOME_ISM_STAGE: dict[str, str] = {
+    OUTCOME_INTERESTED:        "engaged",
+    OUTCOME_CALLBACK_REQUESTED: "contacted",
+    OUTCOME_FOLLOW_UP:          "contacted",
+    OUTCOME_NOT_INTERESTED:    "closed_lost",
+}
+
+
 def derive_lead_status_patch(outcome: str) -> dict[str, Any]:
     """
     Map call outcome to lead field updates.
-    
+
     Returns dict of Lead field updates.
     """
     mapping: dict[str, dict[str, Any]] = {
@@ -412,6 +445,12 @@ def apply_call_outcome(
     patch = derive_lead_status_patch(normalized_outcome)
     for key, value in patch.items():
         setattr(lead, key, value)
+
+    # Advance ISM stage based on call outcome (forward-only — never goes backwards)
+    target_ism = _OUTCOME_ISM_STAGE.get(normalized_outcome)
+    if target_ism:
+        advance_ism_stage(lead, target_ism)
+
     lead.last_outreach_at = now
     lead.updated_at = now
     lead.updated_by = actor_user_id
@@ -435,6 +474,38 @@ def apply_call_outcome(
         invalidate_model_cache(company_id)
     except Exception:
         pass
+
+    # Auto-CSAT: send feedback request after positive call outcomes
+    if normalized_outcome in {OUTCOME_INTERESTED, OUTCOME_CALLBACK_REQUESTED}:
+        try:
+            from services.auto_csat_service import maybe_send_auto_csat
+            maybe_send_auto_csat(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=task.lead_id,
+                interaction_id=interaction_id,
+                trigger="call",
+                normalized_outcome=normalized_outcome,
+            )
+        except Exception as csat_exc:
+            logger.warning("[AutoCSAT] Dispatch failed after call: %s", csat_exc)
+
+    # Auto-CSAT: send a "we missed you" feedback email for no-answer / voicemail
+    elif normalized_outcome in {OUTCOME_NO_ANSWER, OUTCOME_VOICEMAIL}:
+        try:
+            from services.auto_csat_service import maybe_send_auto_csat
+            maybe_send_auto_csat(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=task.lead_id,
+                interaction_id=interaction_id,
+                trigger="missed_call",
+                normalized_outcome=normalized_outcome,
+            )
+        except Exception as csat_exc:
+            logger.warning("[AutoCSAT] Dispatch failed for missed call: %s", csat_exc)
 
     return {
         "task_id": task.id,

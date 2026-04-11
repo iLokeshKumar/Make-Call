@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import aiohttp
 import asyncio
 from types import SimpleNamespace
@@ -8,6 +9,18 @@ from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 from credentials_service import get_company_setting_value
 
 logger = logging.getLogger(__name__)
+
+# Patterns that definitively identify a streaming token as JSON / tool-call leakage.
+# These are checked against the current token AND the last ~80 chars of accumulated output.
+_JSON_TOKEN_PATTERNS = (
+    '"arguments":', '"name":', '"id":', '": "',
+    '"email":', '"phone":', '"lead_id":', '"status":',
+    '"company":', '"result":', '"function":', '"tool_call":',
+    '"value":', '"type":', '"data":', '"content":',
+    '"message":', '"role":', '"action":', '"parameters":',
+)
+# Regex for bare key-value pair in a sliding window: "some_key": "..." or "some_key": 123
+_JSON_KV_RE = re.compile(r'"[a-z_]{2,24}"\s*:\s*["{0-9\[Ttf]')
 
 class CerebrasLLM(BaseLLM):
     def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
@@ -94,6 +107,8 @@ class CerebrasLLM(BaseLLM):
                 full_reply = ""
                 tool_calls_dict = {}
                 error_occurred = False
+                _json_depth = 0        # brace-depth tracker for { ... } JSON blocks
+                _kv_window = ""        # sliding window for bare key:value detection
 
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(url, headers=headers, json=payload) as resp:
@@ -127,14 +142,29 @@ class CerebrasLLM(BaseLLM):
                                     # Check for server errors mid-stream
                                     if "error" in chunk:
                                         err = chunk['error']
+                                        err_code = err.get('code', '') if isinstance(err, dict) else ''
                                         logger.error(f"❌ [CerebrasLLM] Mid-stream Error: {err}")
-                                        
-                                        # If we haven't yielded any speech tokens yet, try a full retry
+
+                                        # incomplete_json_output = tool-call JSON was truncated
+                                        # because input context was too large. Retry with
+                                        # a shorter history so there's more room for output.
+                                        if err_code == 'incomplete_json_output' and retry_count < max_retries:
+                                            logger.warning(
+                                                "🔄 [CerebrasLLM] Tool-call JSON truncated (context too long). "
+                                                "Retrying with shorter history (limit 4)."
+                                            )
+                                            final_history = self.get_safe_history(limit=4)
+                                            sanitized_messages = sanitize_obj(final_history)
+                                            payload["messages"] = sanitized_messages
+                                            error_occurred = True
+                                            break
+
+                                        # Generic: retry if no speech was yielded yet
                                         if not full_reply and retry_count < max_retries:
                                             logger.warning("🔄 Attempting full retry since no tokens were spoken yet.")
-                                            error_occurred = True # This will trigger the retry loop
+                                            error_occurred = True
                                             break
-                                        
+
                                         yield {"type": "error", "content": "Cerebras server error mid-stream"}
                                         error_occurred = True
                                         break
@@ -148,11 +178,36 @@ class CerebrasLLM(BaseLLM):
                                     # 1. Content
                                     if 'content' in delta and delta['content']:
                                         content = delta['content']
-                                        
-                                        # Enhanced JSON Speech Filter: Suppress metadata leak
-                                        if any(p in content for p in ['"arguments":', '{"name":', '"name":', '"id":', '": "']):
-                                            logger.warning(f"🚫 [CerebrasLLM] Filtered JSON leakage from speech token: {content[:20]}...")
+
+                                        # ── JSON Leakage Filter (3-layer) ──────────────────
+                                        # Layer A: brace-depth tracker — suppresses { ... } blocks
+                                        opens = content.count('{')
+                                        closes = content.count('}')
+                                        was_in_json = _json_depth > 0
+                                        _json_depth = max(0, _json_depth + opens - closes)
+                                        if was_in_json or (opens > 0):
+                                            logger.warning(
+                                                "🚫 [CerebrasLLM] JSON block suppressed (depth %d→%d): %r",
+                                                _json_depth - opens + closes, _json_depth, content[:40],
+                                            )
                                             continue
+
+                                        # Layer B: per-token pattern check (known JSON keys)
+                                        if any(p in content for p in _JSON_TOKEN_PATTERNS):
+                                            logger.warning(
+                                                "🚫 [CerebrasLLM] JSON token pattern suppressed: %r", content[:40]
+                                            )
+                                            continue
+
+                                        # Layer C: sliding-window key:value regex
+                                        _kv_window = (_kv_window + content)[-80:]
+                                        if _JSON_KV_RE.search(_kv_window):
+                                            logger.warning(
+                                                "🚫 [CerebrasLLM] JSON kv window suppressed: %r", _kv_window[-40:]
+                                            )
+                                            _kv_window = ""  # reset so next clean tokens aren't blocked
+                                            continue
+                                        # ───────────────────────────────────────────────────
 
                                         accumulated_text += content
                                         full_reply += content
@@ -197,11 +252,26 @@ class CerebrasLLM(BaseLLM):
                 if tool_calls_dict:
                     for i in sorted(tool_calls_dict.keys()):
                         tc = tool_calls_dict[i]
+                        raw_args = tc["function"].get("arguments") or "{}"
+                        try:
+                            json.loads(raw_args)
+                            clean_args = raw_args
+                        except json.JSONDecodeError:
+                            m = re.search(r'\{.*?\}', raw_args, re.DOTALL)
+                            try:
+                                clean_args = json.dumps(json.loads(m.group(0))) if m else "{}"
+                            except Exception:
+                                clean_args = "{}"
+                            logger.warning(
+                                "⚠️ [CerebrasLLM] Malformed tool-call arguments for %s — "
+                                "raw: %r  cleaned: %r",
+                                tc["function"].get("name"), raw_args[:120], clean_args,
+                            )
                         obj = SimpleNamespace(
                             id=tc["id"],
                             function=SimpleNamespace(
                                 name=tc["function"]["name"],
-                                arguments=tc["function"]["arguments"]
+                                arguments=clean_args,
                             )
                         )
                         formatted_tool_calls.append(obj)

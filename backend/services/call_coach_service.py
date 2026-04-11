@@ -167,7 +167,10 @@ async def score_call_and_coach(
 
         data = _safe_parse(result_text)
         if not data:
-            logger.warning("[Coach] LLM returned unparseable response for interaction %s", interaction_id)
+            logger.error(
+                "[Coach] LLM returned unparseable response for interaction %s. Raw reply (%d chars): %r",
+                interaction_id, len(result_text), result_text[:500],
+            )
             return None
 
         overall = _weighted_overall(data)
@@ -213,7 +216,7 @@ async def score_call_and_coach(
         return score
 
     except Exception as exc:
-        logger.warning("[Coach] Scoring failed for interaction %s: %s", interaction_id, exc)
+        logger.error("[Coach] Scoring failed for interaction %s: %s", interaction_id, exc, exc_info=True)
         return None
 
 

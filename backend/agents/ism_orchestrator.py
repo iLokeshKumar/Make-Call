@@ -32,7 +32,7 @@ from services.communication_service import get_company_setting_value, send_email
 from services.message_render_service import render_template_by_id
 from services.next_action_service import dispatch_next_action, handle_inbound_quote_request
 from services.outbound_call_service import create_call_task
-from services.tracking_service import is_lead_opted_out
+from services.opt_out_service import is_lead_opted_out
 
 logger = logging.getLogger(__name__)
 

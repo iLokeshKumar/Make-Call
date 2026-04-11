@@ -4,7 +4,10 @@ import hmac
 import json
 import logging
 import os
+import time
+from collections import defaultdict, deque
 from pathlib import Path
+from threading import Lock
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,21 +17,63 @@ from sqlmodel import Session, select
 from credentials_service import get_company_credential, get_company_setting_value
 from database import get_session
 from models.models import Interaction, Quote, utc_now
-from services.quote_service import respond_to_quote_token
-from services.tracking_service import (
+from services.engagement_service import record_email_click, record_email_open
+from services.inbound_email_service import ingest_email_webhook_event, resolve_company_id_by_email_address
+from services.inbound_whatsapp_service import ingest_whatsapp_webhook_event, resolve_company_id_by_whatsapp_number
+from services.opt_out_service import unsubscribe_lead
+from services.quote_service import (
     get_public_quote_info,
     get_quote_by_tracking_token,
-    ingest_whatsapp_webhook_event,
-    ingest_email_webhook_event,
-    record_email_click,
-    record_email_open,
+    negotiate_quote_by_token,
     record_quote_open_by_token,
-    resolve_company_id_by_email_address,
-    resolve_company_id_by_whatsapp_number,
-    unsubscribe_lead,
+    respond_to_quote_token,
 )
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Rate limiting — sliding window, in-memory, per client IP
+# ---------------------------------------------------------------------------
+
+_RL_LOCK = Lock()
+_RL_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
+
+
+def _client_ip(request: Request) -> str:
+    """Best-effort real IP extraction (honours X-Forwarded-For behind proxies)."""
+    forwarded_for = request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        return forwarded_for.split(",")[0].strip()
+    if request.client:
+        return request.client.host
+    return "unknown"
+
+
+def _is_rate_limited(*, key: str, limit: int, window_seconds: int) -> bool:
+    """
+    Sliding-window counter.  Returns True when the caller is over budget.
+    Thread-safe via a single global Lock (in-process only — sufficient for
+    single-worker deployments; swap for Redis if you run multiple workers).
+    """
+    now = time.monotonic()
+    with _RL_LOCK:
+        dq = _RL_BUCKETS[key]
+        cutoff = now - window_seconds
+        while dq and dq[0] < cutoff:
+            dq.popleft()
+        if len(dq) >= limit:
+            return True
+        dq.append(now)
+        return False
+
+
+def _rate_limit_response() -> JSONResponse:
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Too many requests — please slow down."},
+        headers={"Retry-After": "60"},
+    )
+
 
 TRANSPARENT_GIF = base64.b64decode(
     "R0lGODlhAQABAIABAP///wAAACwAAAAAAQABAAACAkQBADs="
@@ -176,8 +221,14 @@ router = APIRouter(prefix="/tracking", tags=["Tracking"])
 @router.get("/email/open/{token}")
 async def email_open_tracking(
     token: str,
+    request: Request,
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"email_open:{ip}", limit=20, window_seconds=60):
+        # Still return the pixel so the email client doesn't show a broken image,
+        # but silently drop the recording.
+        return Response(content=TRANSPARENT_GIF, media_type="image/gif")
     try:
         record_email_open(session, token)
     except Exception:
@@ -188,9 +239,13 @@ async def email_open_tracking(
 @router.get("/email/click/{token}")
 async def email_click_tracking(
     token: str,
+    request: Request,
     target: str = Query(...),
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"email_click:{ip}", limit=30, window_seconds=60):
+        return _rate_limit_response()
     try:
         record_email_click(session, token, target)
     except Exception:
@@ -201,8 +256,12 @@ async def email_click_tracking(
 @router.get("/quote/open/{token}")
 async def quote_open_tracking(
     token: str,
+    request: Request,
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"quote_open:{ip}", limit=20, window_seconds=60):
+        return Response(content=TRANSPARENT_GIF, media_type="image/gif")
     try:
         record_quote_open_by_token(session, token)
     except Exception:
@@ -213,38 +272,36 @@ async def quote_open_tracking(
 @router.get("/quote/view/{token}")
 async def quote_view_tracking(
     token: str,
+    request: Request,
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"quote_view:{ip}", limit=30, window_seconds=60):
+        return _rate_limit_response()
     try:
         record_quote_open_by_token(session, token)
     except Exception:
         pass
 
-    quote = get_quote_by_tracking_token(session, token)
-    if not quote:
-        return {"status": "ignored", "reason": "token_not_found"}
-
-    if quote.pdf_path and Path(quote.pdf_path).exists():
-        return FileResponse(
-            path=quote.pdf_path,
-            media_type="application/pdf",
-            filename=f"{quote.quote_number}.pdf",
-        )
-    return {
-        "status": "tracked",
-        "quote_id": quote.id,
-        "quote_number": quote.quote_number,
-        "reason": "pdf_not_available",
-    }
+    frontend_base = (
+        os.getenv("FRONTEND_BASE_URL")
+        or os.getenv("TRACKING_BASE_URL")
+        or "http://localhost:3006"
+    )
+    return RedirectResponse(url=f"{frontend_base}/q/{token}", status_code=302)
 
 
 @router.post("/unsubscribe")
 async def unsubscribe_tracking(
+    request: Request,
     token: str = Query(...),
     channel: str = Query(...),
     reason: str | None = Query(default=None),
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"unsub:{ip}", limit=5, window_seconds=60):
+        return _rate_limit_response()
     interaction = session.exec(select(Interaction).where(Interaction.channel == "email")).all()
     matched = None
     for item in interaction:
@@ -391,8 +448,12 @@ async def email_tracking_webhook(
 @router.post("/quote/accept/{token}")
 async def public_accept_quote(
     token: str,
+    request: Request,
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"quote_accept:{ip}", limit=5, window_seconds=60):
+        return _rate_limit_response()
     quote = respond_to_quote_token(session, token, "accept")
     return {"status": "accepted", "quote_id": quote.id, "quote_number": quote.quote_number}
 
@@ -400,12 +461,45 @@ async def public_accept_quote(
 @router.post("/quote/reject/{token}")
 async def public_reject_quote(
     token: str,
+    request: Request,
     session: Session = Depends(get_session),
 ):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"quote_reject:{ip}", limit=5, window_seconds=60):
+        return _rate_limit_response()
     quote = respond_to_quote_token(session, token, "reject")
     return {"status": "rejected", "quote_id": quote.id, "quote_number": quote.quote_number}
 
 
+@router.post("/quote/negotiate/{token}")
+async def public_negotiate_quote(
+    token: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"quote_negotiate:{ip}", limit=5, window_seconds=60):
+        return _rate_limit_response()
+    body = await request.json()
+    message = (body.get("message") or "").strip()
+    if not message:
+        return JSONResponse(status_code=400, content={"detail": "Message is required"})
+    requested_discount = body.get("requested_discount")
+    if requested_discount is not None:
+        try:
+            requested_discount = float(requested_discount)
+        except (TypeError, ValueError):
+            requested_discount = None
+    return negotiate_quote_by_token(session, token, message, requested_discount)
+
+
 @router.get("/quote/info/{token}")
-async def public_quote_info(token: str, session: Session = Depends(get_session)):
+async def public_quote_info(
+    token: str,
+    request: Request,
+    session: Session = Depends(get_session),
+):
+    ip = _client_ip(request)
+    if _is_rate_limited(key=f"quote_info:{ip}", limit=30, window_seconds=60):
+        return _rate_limit_response()
     return get_public_quote_info(session, token)

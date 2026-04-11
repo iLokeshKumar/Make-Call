@@ -2,6 +2,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Iterable
 
 from fastapi import HTTPException
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 from models.models import (
@@ -119,46 +120,47 @@ def enroll_leads(
     lead_ids: Iterable[int],
 ) -> dict:
     campaign = get_campaign_or_404(session, company_id, campaign_id)
+    lead_ids_list = list(lead_ids)
 
-    added = 0
-    skipped = 0
+    if not lead_ids_list:
+        return {"added": 0, "skipped": 0}
 
-    for lead_id in lead_ids:
-        lead = session.exec(
-            select(Lead).where(
-                Lead.id == lead_id,
-                Lead.company_id == company_id,
-            )
-        ).first()
-        if not lead:
-            skipped += 1
-            continue
+    # Batch fetch valid leads (2 queries total instead of 2*N)
+    valid_leads = session.exec(
+        select(Lead).where(
+            Lead.id.in_(lead_ids_list),
+            Lead.company_id == company_id,
+        )
+    ).all()
+    valid_lead_ids = {lead.id for lead in valid_leads}
 
-        existing = session.exec(
-            select(CampaignRecipient).where(
+    # Batch fetch already-enrolled leads
+    existing_lead_ids = set(
+        session.exec(
+            select(CampaignRecipient.lead_id).where(
                 CampaignRecipient.campaign_id == campaign.id,
-                CampaignRecipient.lead_id == lead.id,
+                CampaignRecipient.lead_id.in_(valid_lead_ids),
             )
-        ).first()
-        if existing:
-            skipped += 1
-            continue
+        ).all()
+    )
 
-        recipient = CampaignRecipient(
+    new_lead_ids = valid_lead_ids - existing_lead_ids
+    skipped = len(lead_ids_list) - len(new_lead_ids)
+
+    for lead_id in new_lead_ids:
+        session.add(CampaignRecipient(
             campaign_id=campaign.id,
             company_id=company_id,
-            lead_id=lead.id,
+            lead_id=lead_id,
             status="pending",
             current_step=1,
             next_run_at=None,
             created_by=actor_user_id,
             updated_by=actor_user_id,
-        )
-        session.add(recipient)
-        added += 1
+        ))
 
     session.commit()
-    return {"added": added, "skipped": skipped}
+    return {"added": len(new_lead_ids), "skipped": skipped}
 
 
 def launch_campaign(
@@ -227,26 +229,34 @@ def pause_campaign(
 def list_campaigns(
     session: Session,
     company_id: int,
-) -> list[Campaign]:
-    return session.exec(
-        select(Campaign).where(
-            Campaign.company_id == company_id
-        ).order_by(Campaign.created_at.desc())
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    base = select(Campaign).where(Campaign.company_id == company_id)
+    total = len(session.exec(base).all())
+    items = session.exec(
+        base.order_by(Campaign.created_at.desc()).offset(offset).limit(limit)
     ).all()
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 
 def list_campaign_recipients(
     session: Session,
     company_id: int,
     campaign_id: int,
-) -> list[CampaignRecipient]:
+    limit: int = 100,
+    offset: int = 0,
+) -> dict:
     get_campaign_or_404(session, company_id, campaign_id)
-    return session.exec(
-        select(CampaignRecipient).where(
-            CampaignRecipient.company_id == company_id,
-            CampaignRecipient.campaign_id == campaign_id,
-        ).order_by(CampaignRecipient.created_at.desc())
+    base = select(CampaignRecipient).where(
+        CampaignRecipient.company_id == company_id,
+        CampaignRecipient.campaign_id == campaign_id,
+    )
+    total = len(session.exec(base).all())
+    items = session.exec(
+        base.order_by(CampaignRecipient.created_at.desc()).offset(offset).limit(limit)
     ).all()
+    return {"items": items, "total": total, "limit": limit, "offset": offset}
 
 def get_current_step(
     session: Session,
@@ -311,6 +321,7 @@ def schedule_campaign_recipient_next_step(
     if not next_step:
         recipient.status = "completed"
         recipient.next_run_at = None
+        recipient.processing_started_at = None  # release claim-lock
         recipient.updated_at = utc_now()
         recipient.updated_by = actor_user_id
         session.add(recipient)
@@ -320,6 +331,8 @@ def schedule_campaign_recipient_next_step(
 
     recipient.current_step = next_step.step_order
     recipient.next_run_at = utc_now() + timedelta(hours=next_step.delay_hours)
+    recipient.status = "active"
+    recipient.processing_started_at = None  # release claim-lock
     recipient.updated_at = utc_now()
     recipient.updated_by = actor_user_id
     session.add(recipient)
@@ -467,10 +480,19 @@ def get_due_campaign_recipients(
     company_id: int | None = None,
 ) -> list[CampaignRecipient]:
     now = utc_now()
+    # Rows where processing_started_at is within the last 10 minutes are
+    # currently being processed (or were being processed when the worker
+    # crashed).  Skip them to prevent double-send.  They become eligible
+    # again once the lock expires, at which point the step will be re-tried.
+    stale_threshold = now - timedelta(minutes=10)
     query = select(CampaignRecipient).where(
         CampaignRecipient.status == "active",
         CampaignRecipient.next_run_at != None,
         CampaignRecipient.next_run_at <= now,
+        or_(
+            CampaignRecipient.processing_started_at.is_(None),
+            CampaignRecipient.processing_started_at < stale_threshold,
+        ),
     )
 
     if company_id is not None:
@@ -485,6 +507,15 @@ def execute_campaign_recipient_step(
     recipient: CampaignRecipient,
     actor_user_id: int,
 ) -> dict:
+    # Claim the recipient before any I/O so a worker crash between here and
+    # the final commit doesn't cause another cycle to re-send immediately.
+    # get_due_campaign_recipients skips rows where processing_started_at is
+    # within the last 10 minutes, so this is the double-send guard.
+    recipient.processing_started_at = utc_now()
+    recipient.updated_at = utc_now()
+    session.add(recipient)
+    session.commit()
+
     step = get_current_step(
         session=session,
         company_id=recipient.company_id,
