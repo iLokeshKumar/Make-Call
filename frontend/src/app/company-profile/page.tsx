@@ -263,7 +263,7 @@ export default function CompanyProfilePage() {
             </label>
           </div>
 
-          {/* ── Contact & Billing (used on quotes/PDFs) ── */}
+          {/* Contact & Billing */}
           <div className="pt-2 border-t border-slate-100">
             <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-3">Contact &amp; Billing — shown on quotes &amp; invoices</p>
             <div className="grid grid-cols-1 gap-4 md:grid-cols-2">

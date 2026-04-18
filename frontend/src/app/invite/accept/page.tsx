@@ -2,7 +2,7 @@
 
 import { useSearchParams, useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Loader2, ShieldCheck, UserPlus } from "lucide-react";
+import { Eye, EyeOff, Loader2, Lock, Mail, ShieldCheck, User, UserPlus, Users } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
@@ -28,6 +28,7 @@ export default function InviteAcceptPage() {
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
     const [loading, setLoading] = useState(false);
+    const [showPassword, setShowPassword] = useState(false);
     const [fetching, setFetching] = useState(true);
     const [message, setMessage] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -90,10 +91,15 @@ export default function InviteAcceptPage() {
         }
     };
 
+    /* ── Loading state ─────────────────────────────────────────────── */
     if (fetching) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-                <div className="flex flex-col items-center space-y-3 rounded-2xl bg-slate-900 border border-slate-800 p-8 shadow-2xl">
+            <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-900 via-violet-950 to-slate-900 p-4">
+                <div className="pointer-events-none fixed inset-0 overflow-hidden">
+                    <div className="absolute -top-40 -left-40 h-80 w-80 rounded-full bg-violet-600/20 blur-3xl" />
+                    <div className="absolute -bottom-40 -right-40 h-80 w-80 rounded-full bg-blue-600/20 blur-3xl" />
+                </div>
+                <div className="relative flex flex-col items-center space-y-3 rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
                     <Loader2 className="h-10 w-10 animate-spin text-violet-400" />
                     <p className="text-sm font-semibold text-slate-300">Verifying your invite...</p>
                 </div>
@@ -101,17 +107,24 @@ export default function InviteAcceptPage() {
         );
     }
 
-    if (error || !inviteInfo) {
+    /* ── Error state ───────────────────────────────────────────────── */
+    if (error && !inviteInfo) {
         return (
-            <div className="min-h-screen flex items-center justify-center bg-slate-950 p-4">
-                <div className="w-full max-w-md rounded-2xl bg-slate-900 border border-slate-800 p-8 shadow-2xl">
+            <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-900 via-violet-950 to-slate-900 p-4">
+                <div className="pointer-events-none fixed inset-0 overflow-hidden">
+                    <div className="absolute -top-40 -left-40 h-80 w-80 rounded-full bg-violet-600/20 blur-3xl" />
+                    <div className="absolute -bottom-40 -right-40 h-80 w-80 rounded-full bg-blue-600/20 blur-3xl" />
+                </div>
+                <div className="relative w-full max-w-md rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
                     <div className="flex flex-col items-center gap-3">
-                        <ShieldCheck className="h-12 w-12 text-red-400" />
+                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-red-500/10">
+                            <ShieldCheck className="h-7 w-7 text-red-400" />
+                        </div>
                         <p className="text-lg font-semibold text-white">Invite Invalid</p>
-                        <p className="text-sm text-slate-400 text-center">{error || "This invite link cannot be used."}</p>
+                        <p className="text-sm text-slate-400 text-center">{error}</p>
                         <button
                             onClick={() => router.push("/register")}
-                            className="mt-4 rounded-xl bg-violet-600 hover:bg-violet-700 px-4 py-2 text-white font-semibold transition"
+                            className="mt-4 w-full rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-3 font-bold text-white shadow-lg shadow-violet-500/30 hover:from-violet-500 hover:to-blue-500 hover:shadow-violet-500/50 transition-all"
                         >
                             Return to Register
                         </button>
@@ -121,86 +134,153 @@ export default function InviteAcceptPage() {
         );
     }
 
+    /* ── Main form ─────────────────────────────────────────────────── */
     return (
-        <div className="min-h-screen flex items-center justify-center bg-slate-950 px-4 py-10">
-            <div className="w-full max-w-lg space-y-6 rounded-3xl bg-slate-900 border border-slate-800 p-8 shadow-2xl">
-                <div className="space-y-2">
-                    <p className="text-xs text-slate-500 uppercase tracking-[0.3em]">Invitation</p>
-                    <h1 className="text-3xl font-bold text-white">
-                        Join <span className="text-violet-400">{inviteInfo.company_name}</span>
+        <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-900 via-violet-950 to-slate-900 p-4 overflow-y-auto">
+            {/* Decorative blobs */}
+            <div className="pointer-events-none fixed inset-0 overflow-hidden">
+                <div className="absolute -top-40 -left-40 h-80 w-80 rounded-full bg-violet-600/20 blur-3xl" />
+                <div className="absolute -bottom-40 -right-40 h-80 w-80 rounded-full bg-blue-600/20 blur-3xl" />
+            </div>
+
+            <div className="relative w-full max-w-lg">
+                {/* Brand header */}
+                <div className="mb-8 text-center">
+                    <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-blue-600 shadow-lg shadow-violet-500/40">
+                        <Users className="h-7 w-7 text-white" />
+                    </div>
+                    <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Invitation</p>
+                    <h1 className="mt-1 text-3xl font-bold text-white tracking-tight">
+                        Join <span className="bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent">{inviteInfo!.company_name}</span>
                     </h1>
-                    <p className="text-sm text-slate-400">
-                        Invited by <strong className="text-slate-200">{inviteInfo.invited_by}</strong> for the role{" "}
-                        <strong className="text-slate-200">{inviteInfo.role_name}</strong> · expires{" "}
-                        {new Date(inviteInfo.expires_at).toLocaleString()}
+                    <p className="mt-2 text-sm text-slate-400">
+                        Invited by <strong className="text-slate-200">{inviteInfo!.invited_by}</strong> as{" "}
+                        <strong className="text-slate-200">{inviteInfo!.role_name}</strong>
+                    </p>
+                    <p className="mt-0.5 text-xs text-slate-500">
+                        Expires {new Date(inviteInfo!.expires_at).toLocaleString()}
                     </p>
                 </div>
 
-                {message && (
-                    <div className="rounded-2xl bg-emerald-500/10 border border-emerald-500/20 p-4 text-sm text-emerald-400">
-                        {message}
-                    </div>
-                )}
+                {/* Card */}
+                <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
+                    {message && (
+                        <div className="mb-5 rounded-xl bg-emerald-500/10 border border-emerald-500/20 px-4 py-3 text-sm text-emerald-400">
+                            {message}
+                        </div>
+                    )}
+                    {error && (
+                        <div className="mb-5 rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-sm text-red-400">
+                            {error}
+                        </div>
+                    )}
 
-                <form onSubmit={handleSubmit} className="grid gap-4">
-                    <div>
-                        <label className="text-xs font-semibold uppercase text-slate-500">Email</label>
-                        <input
-                            type="email"
-                            value={inviteInfo.email}
-                            disabled
-                            className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-slate-400 cursor-not-allowed"
-                        />
-                    </div>
-                    <div>
-                        <label className="text-xs font-semibold uppercase text-slate-500">Username</label>
-                        <input
-                            type="text"
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
-                            required
-                            className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
-                        />
-                    </div>
-                    <div className="grid gap-4 md:grid-cols-2">
-                        <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">First Name <span className="normal-case text-slate-600">(optional)</span></label>
-                            <input
-                                type="text"
-                                value={firstName}
-                                onChange={(e) => setFirstName(e.target.value)}
-                                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
-                            />
+                    <form onSubmit={handleSubmit} className="space-y-5">
+                        {/* Email (read-only) */}
+                        <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                Email
+                            </label>
+                            <div className="relative">
+                                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type="email"
+                                    value={inviteInfo!.email}
+                                    disabled
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-10 pr-4 text-slate-400 cursor-not-allowed"
+                                />
+                            </div>
                         </div>
-                        <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500">Last Name <span className="normal-case text-slate-600">(optional)</span></label>
-                            <input
-                                type="text"
-                                value={lastName}
-                                onChange={(e) => setLastName(e.target.value)}
-                                className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
-                            />
+
+                        {/* Username */}
+                        <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                Username
+                            </label>
+                            <div className="relative">
+                                <User className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type="text"
+                                    value={username}
+                                    onChange={(e) => setUsername(e.target.value)}
+                                    required
+                                    placeholder="your_username"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all"
+                                />
+                            </div>
                         </div>
-                    </div>
-                    <div>
-                        <label className="text-xs font-semibold uppercase text-slate-500">Password</label>
-                        <input
-                            type="password"
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            required
-                            className="w-full rounded-xl border border-slate-700 bg-slate-800 px-4 py-2 text-sm text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none"
-                        />
-                    </div>
-                    {error && <p className="text-xs text-red-400">{error}</p>}
-                    <button
-                        type="submit"
-                        disabled={loading}
-                        className="mt-2 flex items-center justify-center rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-violet-500/30 hover:from-violet-700 hover:to-blue-700 disabled:opacity-60 transition"
-                    >
-                        {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <><UserPlus className="mr-2 h-4 w-4" />Accept Invite &amp; Sign In</>}
-                    </button>
-                </form>
+
+                        {/* First Name / Last Name */}
+                        <div className="grid gap-4 sm:grid-cols-2">
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                    First Name <span className="normal-case text-slate-600">(optional)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={firstName}
+                                    onChange={(e) => setFirstName(e.target.value)}
+                                    placeholder="John"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-3 px-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all"
+                                />
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                    Last Name <span className="normal-case text-slate-600">(optional)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={lastName}
+                                    onChange={(e) => setLastName(e.target.value)}
+                                    placeholder="Doe"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-3 px-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all"
+                                />
+                            </div>
+                        </div>
+
+                        {/* Password */}
+                        <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                Password
+                            </label>
+                            <div className="relative">
+                                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type={showPassword ? "text" : "password"}
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    required
+                                    placeholder="Create a password"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-3 pl-10 pr-10 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowPassword(!showPassword)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                >
+                                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </button>
+                            </div>
+                        </div>
+
+                        {/* Submit */}
+                        <button
+                            type="submit"
+                            disabled={loading}
+                            className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 py-3 font-bold text-white shadow-lg shadow-violet-500/30 hover:from-violet-500 hover:to-blue-500 hover:shadow-violet-500/50 transition-all disabled:opacity-50 flex items-center justify-center gap-2"
+                        >
+                            {loading ? <Loader2 className="h-5 w-5 animate-spin" /> : <UserPlus className="h-4 w-4" />}
+                            {loading ? "Joining..." : "Accept Invite & Sign In"}
+                        </button>
+                    </form>
+
+                    <p className="mt-6 text-center text-sm text-slate-500">
+                        Want to create your own company?{" "}
+                        <a href="/register" className="font-semibold text-violet-400 hover:text-violet-300 transition-colors">
+                            Sign up instead
+                        </a>
+                    </p>
+                </div>
             </div>
         </div>
     );

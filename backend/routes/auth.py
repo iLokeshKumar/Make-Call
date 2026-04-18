@@ -51,7 +51,7 @@ from email_service import get_styled_html, send_smtp_email
 from utils.geoip import resolve_location
 from google_auth_oauthlib.flow import Flow
 from utils.url_utils import normalize_base_url
-from services.auth_service import (
+from services.core.auth_service import (
     create_default_permissions,
     create_default_roles_for_company,
     seed_default_role_permissions,
@@ -402,12 +402,13 @@ async def _update_login_location(login_id: int, ip: str | None) -> None:
     from database import engine as _db_engine
     from sqlmodel import Session as _Sess
 
-    location = await resolve_location(ip)
+    result = await resolve_location(ip)
     try:
         with _Sess(_db_engine) as s:
             row = s.get(LoginHistory, login_id)
             if row:
-                row.location = location
+                row.location = result["location"]
+                row.geo_data = result["geo_data"]
                 s.add(row)
                 s.commit()
     except Exception as exc:

@@ -14,11 +14,11 @@ from auth import PermissionChecker, get_current_user
 from communicators import ExotelCommunicator, TwilioCommunicator
 from credentials_service import get_company_credential
 from database import get_session
-from models.models import Company, Interaction, Lead, User, utc_now
-from services.dialer_service import initiate_outbound_call
-from services.outcome_service import apply_call_outcome
-from services.outbound_call_service import start_call_task
-from services.warm_transfer_service import execute_warm_transfer
+from models.models import CallTask, Company, Interaction, Lead, User, utc_now
+from services.campaign.dialer_service import initiate_outbound_call
+from services.call.outcome_service import apply_call_outcome
+from services.call.outbound_call_service import start_call_task
+from services.call.warm_transfer_service import execute_warm_transfer
 from utils.phone import normalize_phone
 from utils.url_utils import normalize_base_url
 
@@ -137,6 +137,30 @@ async def twilio_status_callback(
                 db_interaction.updated_by = actor_user.id
             session.add(db_interaction)
             session.commit()
+
+    # Call monitor: publish "ringing" and "ended" (unanswered) events. "connected" and "ended" (answered) are published by run_media_stream. "completed" terminal state is also handled by run_media_stream, so skip it here.
+    _UNANSWERED = {"busy", "no-answer", "failed", "canceled"}
+    if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0:
+        if CallStatus == "ringing" or CallStatus in _UNANSWERED:
+            try:
+                from services import call_status_broadcaster
+                _task = session.get(CallTask, int(call_task_id))
+                if _task:
+                    _lead = session.get(Lead, _task.lead_id) if _task.lead_id else None
+                    _monitor_status = "ringing" if CallStatus == "ringing" else "ended"
+                    _monitor_outcome = CallStatus.replace("-", "_") if CallStatus in _UNANSWERED else None
+                    call_status_broadcaster.publish(
+                        company_id=_task.company_id,
+                        campaign_id=_task.campaign_id,
+                        call_task_id=_task.id,
+                        interaction_id=interaction_id,
+                        lead_id=_task.lead_id,
+                        lead_name=_lead.name if _lead else None,
+                        status=_monitor_status,
+                        outcome=_monitor_outcome,
+                    )
+            except Exception:
+                pass
 
     # Outcome processing only for terminal state with a valid call task
     TERMINAL = {"completed", "busy", "no-answer", "failed", "canceled"}

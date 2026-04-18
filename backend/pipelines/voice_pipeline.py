@@ -16,15 +16,15 @@ import audioop
 from sqlmodel import Session, select
 
 from models.models import CompanySetting, Interaction, LatencyLog, User, utc_now
-from services.llm import get_llm_service
-from services.stt import get_stt_service
-from services.tts import get_tts_service
+from services.ai.llm import get_llm_service
+from services.ai.stt import get_stt_service
+from services.ai.tts import get_tts_service
 from tool_adapter import execute_mcp_tool, get_mistral_tools
 from utils.encryption import decrypt_value
 from utils.audio import clean_voice_text
 from utils.lead_utils import get_comprehensive_lead_context
 from utils import settings_cache as _sc
-from services import sentiment_broadcaster
+from services.call import sentiment_broadcaster
 
 logger = logging.getLogger(__name__)
 
@@ -144,7 +144,7 @@ class VoicePipeline:
         self.disable_barge_in = os.getenv("DISABLE_BARGE_IN", "0").lower() in {"1", "true", "yes", "on"}
         self._last_barge_trigger_ts = 0.0
 
-        # 3. Determine specific LLM, TTS, STT keys based on provider
+        # Determine specific LLM, TTS, STT keys based on provider
         # Use provider-specific keys (e.g., MISTRAL_API_KEY) or fall back to general keys
         llm_api_key = _resolve_setting(
             all_settings,
@@ -215,11 +215,11 @@ class VoicePipeline:
         # Store keys globally on instance for reference if needed
         self.integration_keys = all_settings
 
-        # 4. Inject pre-fetched lead/prospect context if provided at start
+        # Inject pre-fetched lead/prospect context if provided at start
         if lead_context:
             self._apply_context_to_prompt(lead_context)
 
-        # 5. Inject objection playbook from the company library
+        # Inject objection playbook from the company library
         if company_id:
             try:
                 from services.objection_service import get_objection_playbook
@@ -355,14 +355,45 @@ class VoicePipeline:
         return False
 
     async def _load_lead_context(self, lead_id: int):
-        """Proactively loads lead context from DB and updates prompt."""
+        """Load lead context from DB + pre-call KB cache and inject into system prompt."""
         if not lead_id or lead_id <= 0:
             return
-            
-        logger.info(f"🔍 [Pipeline] Proactively loading context for Lead #{lead_id}...")
+
+        logger.info(f"🔍 [Pipeline] Loading context for Lead #{lead_id}...")
+
+        # DB lead context (name, phone, history) — existing path
         context = get_comprehensive_lead_context(self.session, lead_id)
         if context:
             self._apply_context_to_prompt(context)
+
+        # Pre-call KB context (products, objections, competitors) from orchestrator cache
+        try:
+            from utils.precall_cache import get as cache_get, format_kb_context_for_prompt, evict
+            company_id = self.company_id
+            if company_id:
+                cached = cache_get(company_id, lead_id)
+                if cached:
+                    kb_text = format_kb_context_for_prompt(cached)
+                    if kb_text and hasattr(self, "llm_service") and self.llm_service:
+                        current = self.llm_service.system_prompt
+                        self.llm_service.update_system_prompt(current + kb_text)
+                        logger.info(
+                            "📚 [Pipeline] KB context injected (%d chunks) for lead %s",
+                            len(cached.get("kb_context", [])),
+                            lead_id,
+                        )
+                    # Inject ICP score hint for routing decisions
+                    icp = cached.get("icp_score", 0.0)
+                    if icp >= 0.75 and hasattr(self, "llm_service") and self.llm_service:
+                        current = self.llm_service.system_prompt
+                        icp_hint = (
+                            f"\n\n[ICP SIGNAL] This lead has a high fit score ({icp:.0%}). "
+                            "Prioritise demo booking and closing language."
+                        )
+                        self.llm_service.update_system_prompt(current + icp_hint)
+                    evict(company_id, lead_id)   # consume once
+        except Exception as exc:
+            logger.debug("[Pipeline] Pre-call cache read failed (non-blocking): %s", exc)
 
     async def run(self):
         speaker_task = asyncio.create_task(self._speaker_loop())
@@ -384,7 +415,7 @@ class VoicePipeline:
                     start_msg = data.get("start", {})
                     self.communicator.stream_sid = start_msg.get("streamSid")
                     
-                    # 1. Proactively check for lead_id/interaction_id in start parameters (Twilio specific)
+                    # Proactively check for lead_id/interaction_id in start parameters (Twilio specific)
                     params = start_msg.get("customParameters", {})
                     stream_lead_id = params.get("lead_id")
                     stream_int_id = params.get("interaction_id")
@@ -414,8 +445,7 @@ class VoicePipeline:
         greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         if self.lead_context:
             try:
-                # Extract name from "[PROSPECT DATA]\nName: XYZ, Phone: ..." format or self.lead_context
-                # Since lead_utils.py builds it as "Name: {lead.name}, Phone: {lead.phone}"
+                # Extract name from "[PROSPECT DATA]\nName: XYZ, Phone: ..." format or self.lead_context. Since lead_utils.py builds it as "Name: {lead.name}, Phone: {lead.phone}"
                 name_line = [l for l in self.lead_context.split("\n") if "Name:" in l]
                 if name_line:
                     lead_name = name_line[0].split(",")[0].replace("Name: ", "").replace("[PROSPECT DATA]", "").strip()
@@ -438,8 +468,7 @@ class VoicePipeline:
                 elif event == "stop":
                     break
 
-        # ── Two consumers of audio: barge-in detector + STT ──────────────
-        # We can't use the same generator twice, so we fan-out via a second queue
+        # Two consumers of audio: barge-in detector + STT. We can't use the same generator twice, so we fan-out via a second queue
         stt_queue = asyncio.Queue()
         barge_queue = asyncio.Queue()
 
@@ -492,13 +521,13 @@ class VoicePipeline:
 
                 now = time.time()
 
-                # Guard 1: within TTS-start window (Rio just started speaking)
+                # Guard: within TTS-start window (Rio just started speaking)
                 tts_start_guard = (
                     self.is_rio_speaking
                     and self.last_tts_start_time > 0
                     and (now - self.last_tts_start_time) * 1000 < self.barge_tts_guard_ms
                 )
-                # Guard 2: post-speech cooldown — audio tail/echo after Rio finishes
+                # Guard: post-speech cooldown — audio tail/echo after Rio finishes
                 post_speech_guard = (
                     not self.is_rio_speaking
                     and self.last_rio_speech_end_time > 0
@@ -526,8 +555,7 @@ class VoicePipeline:
                             speech_counter = 0
                             continue
 
-                        # Rio is silent — customer taking their turn
-                        # Retrigger cooldown: don't flood LLM with repeated triggers
+                        # Rio is silent — customer taking their turn. Retrigger cooldown: don't flood LLM with repeated triggers
                         if (now - self._last_barge_trigger_ts) * 1000 < self.barge_retrigger_cooldown_ms:
                             speech_counter = 0
                             continue
@@ -564,9 +592,7 @@ class VoicePipeline:
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
                         continue
 
-                    # Gate: discard echo while Rio is speaking.
-                    # Skip when interrupt_pending=True — user spoke during/after barge-in
-                    # and that speech must NOT be echo-gated (queue may still have stale items).
+                    # Gate: discard echo while Rio is speaking. Skip when interrupt_pending=True — user spoke during/after barge-in and that speech must NOT be echo-gated (queue may still have stale items).
                     if not self.interrupt_pending and (self.is_rio_speaking or not self.sentence_queue.empty()):
                         logger.info(f"🔇 Echo ignored: '{current_turn_transcript}'")
                         current_turn_transcript = ""
@@ -792,7 +818,7 @@ class VoicePipeline:
                         logger.warning("⚠️ Sarvam API key missing; falling back to REST for TTS.")
                     else:
                         sv_headers = {"api-subscription-key": sv_api_key}
-                        from services.tts.sarvam import SarvamTTS
+                        from services.ai.tts.sarvam import SarvamTTS
                         try:
                             sv_ws = await session.ws_connect(SarvamTTS.WS_URL, headers=sv_headers)
                             sv_config = SarvamTTS.ws_config_frame_static(
@@ -875,7 +901,7 @@ class VoicePipeline:
                                 sv_ws = None
                             else:
                                 sv_headers = {"api-subscription-key": sv_api_key}
-                                from services.tts.sarvam import SarvamTTS
+                                from services.ai.tts.sarvam import SarvamTTS
                                 try:
                                     sv_ws = await session.ws_connect(SarvamTTS.WS_URL, headers=sv_headers)
                                     sv_config = SarvamTTS.ws_config_frame_static(
@@ -1201,7 +1227,7 @@ class VoicePipeline:
 
             full_transcript = self._build_transcript_content()
 
-            # Step 1: save structured summary interaction.
+            # save structured summary interaction.
             summary = CallSummarizer.summarize_call(
                 lead_id=lead_id or 0,
                 transcript=full_transcript,
@@ -1214,7 +1240,7 @@ class VoicePipeline:
             if lead_id:
                 CallSummarizer.save_summary_to_crm(lead_id, summary, company_id=self.company_id or 0, actor_user_id=self.user_id)
 
-            # Step 2: log the completed call as a CRM interaction note.
+            # log the completed call as a CRM interaction note.
             if lead_id:
                 line_count = len(self.transcript_accumulator)
                 CRMUpdater.log_interaction(
@@ -1263,23 +1289,23 @@ class VoicePipeline:
             if chunk["type"] == "sentence":
                 sentence = chunk["content"]
 
-                # Step 1: strip JSON fragments out of an otherwise valid sentence
-                # (e.g. "Great! {"email": "x@y.com"}" → "Great!")
+                # strip JSON fragments out of an otherwise valid sentence
+
                 stripped = self._strip_json_fragments(sentence)
 
-                # Step 2: if stripping removed a meaningful chunk, log it
+                # if stripping removed a meaningful chunk, log it
                 if stripped != sentence:
                     logger.warning(
                         "🚫 [VoicePipeline] JSON fragments stripped from sentence: %r → %r",
                         sentence[:60], stripped[:60],
                     )
 
-                # Step 3: if what remains is still technical leakage, discard entirely
+                # if what remains is still technical leakage, discard entirely
                 if not stripped or self._is_technical_leakage(stripped):
                     logger.warning("🚫 [VoicePipeline] Discarding JSON-leaked sentence: %r", sentence[:60])
                     continue
 
-                # Step 4: strip markdown and internal ID patterns
+                # strip markdown and internal ID patterns
                 clean_sentence = self._strip_markdown(stripped)
                 clean_sentence = self._filter_technical_speech(clean_sentence)
 
@@ -1476,24 +1502,24 @@ class VoicePipeline:
             return False
 
         trimmed = text.strip()
-        # 1. Starts with JSON braces/brackets
+        # Starts with JSON braces/brackets
         if trimmed.startswith(("{", "[", '{"', '["')):
             return True
 
-        # 2. Contains key-value pair pattern (e.g. "key": "value" or "key": 123)
+        # Contains key-value pair pattern (e.g. "key": "value" or "key": 123)
         if re.search(r'"[a-z_]{2,24}"\s*:\s*(?:"[^"]*"|\d+|true|false|null)', trimmed):
             return True
 
-        # 3. Multiple bare quoted-key:value pairs (comma-separated JSON)
+        # Multiple bare quoted-key:value pairs (comma-separated JSON)
         if len(re.findall(r'"[a-z_]+"\s*:', trimmed)) >= 2:
             return True
 
-        # 4. Contains tool call artifacts
+        # Contains tool call artifacts
         technical_terms = ['"arguments":', '"name":', '"id":', 'function_call', 'tool_calls', 'call_id']
         if any(term in trimmed for term in technical_terms):
             return True
 
-        # 5. Excessive technical characters ratio
+        # Excessive technical characters ratio
         technical_chars = trimmed.count("{") + trimmed.count("}") + trimmed.count("[") + trimmed.count("]")
         if technical_chars >= 2:
             return True
@@ -1502,7 +1528,6 @@ class VoicePipeline:
 
     def _filter_technical_speech(self, text: str) -> str:
         """Regex-based safety layer to strip technical leakages from the voice stream."""
-        # Catch: "lead ID 47", "ID of 47", "INTERNAL_ID", "ID is 47", "__META_ID__", etc.
         patterns = [
             r"(?i)lead\s+id\s+(?:of\s+)?\d+",
             r"(?i)internal\s+id\s+(?:of\s+)?\d+",

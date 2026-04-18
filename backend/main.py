@@ -1,6 +1,7 @@
 import os
 import sys
 import time
+import asyncio
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,15 +19,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-from database import engine, init_db
-from models.models import BackgroundJob, Company, Interaction, Lead, SentimentEvent, User, utc_now
+from config import settings as app_settings
+from database import engine, init_db, rls_company_id
+from models.models import BackgroundJob, CallStatusEvent, CallTask, Company, Interaction, Lead, SentimentEvent, User, utc_now
 from pipelines.voice_pipeline import VoicePipeline
 from routes import admin, analytics, auth, automation, call_task, campaign, feedback, quote, requirement, templates, telephony, tracking
 from routes import accounts, coach, competitors, interactions, lead_import, leads, objections, products, settings as crm_settings
-from services.outcome_service import apply_call_outcome, classify_outcome_from_transcript
+from routes import knowledge
+from routes import agents as agent_routes
+from routes import agent_tasks as agent_tasks_routes
+from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
-from services import sentiment_broadcaster
+from utils.tracing import configure_tracing
+from services.call import call_status_broadcaster, sentiment_broadcaster
 
 logger = setup_logger(__name__)
 
@@ -59,6 +65,52 @@ class _RequestContextMiddleware(BaseHTTPMiddleware):
                 duration_ms,
             )
         return response
+
+
+class _RLSMiddleware(BaseHTTPMiddleware):
+    """
+    Extracts company_id from the Bearer JWT (without full auth validation —
+    that still happens in get_current_user) and stores it in the rls_company_id
+    ContextVar BEFORE any FastAPI dependency opens a DB session.
+
+    The after_begin listener in database.py reads this ContextVar and executes
+    SET LOCAL app.current_company_id = <id> so Postgres RLS policies filter rows.
+
+    Unauthenticated paths (health check, webhooks, public quote view) leave the
+    ContextVar as None, which the RLS policy treats as "bypass" — all rows visible.
+    """
+
+    # Paths that never carry a tenant Bearer token — skip JWT decode entirely.
+    _BYPASS_PREFIXES = ("/health", "/docs", "/openapi", "/redoc", "/uploads", "/static")
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if any(path.startswith(p) for p in self._BYPASS_PREFIXES):
+            return await call_next(request)
+
+        cid = self._extract_company_id(request)
+        if cid is None:
+            return await call_next(request)
+
+        token = rls_company_id.set(cid)
+        try:
+            return await call_next(request)
+        finally:
+            rls_company_id.reset(token)
+
+    @staticmethod
+    def _extract_company_id(request: Request) -> int | None:
+        auth = request.headers.get("Authorization", "")
+        if not auth.startswith("Bearer "):
+            return None
+        try:
+            import jwt as _jwt
+            from auth import SECRET_KEY, ALGORITHM
+            payload = _jwt.decode(auth[7:], SECRET_KEY, algorithms=[ALGORITHM])
+            cid = payload.get("company_id")
+            return int(cid) if cid else None
+        except Exception:
+            return None
 
 
 def get_company_setting_value(session: Session, company_id: int, key: str) -> str | None:
@@ -246,7 +298,27 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             lead_language=lead_language_code,
         )
 
-        max_call_duration = int(os.getenv("MAX_CALL_DURATION_SECONDS", "1800"))  # default 30 min
+        # Publish "connected" — audio stream is live, customer answered
+        try:
+            _ct_conn = (
+                session.get(CallTask, int(call_task_id))
+                if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0
+                else None
+            )
+            call_status_broadcaster.publish(
+                company_id=target_user.company_id if target_user else 0,
+                campaign_id=_ct_conn.campaign_id if _ct_conn else None,
+                call_task_id=int(call_task_id) if call_task_id and call_task_id.isdigit() else None,
+                interaction_id=interaction_id,
+                lead_id=lead.id if lead else None,
+                lead_name=lead.name if lead else None,
+                status="connected",
+            )
+        except Exception:
+            pass
+
+        max_call_duration = app_settings.MAX_CALL_DURATION_SECONDS
+        _ended_outcome: str | None = None
         call_status = "completed"
         try:
             await asyncio.wait_for(pipeline.run(), timeout=max_call_duration)
@@ -280,6 +352,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                         raw_status = classification["normalized_outcome"]
                         outcome_confidence = classification.get("confidence")
 
+                    _ended_outcome = raw_status
                     apply_call_outcome(
                         session=session,
                         company_id=target_user.company_id,
@@ -292,6 +365,23 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                     )
                 except Exception as exc:
                     logger.warning("Could not update CallTask %s: %s", call_task_id, exc)
+
+            # Publish "ended" — call has disconnected, outcome captured
+            try:
+                if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and target_user:
+                    _ct_end = session.get(CallTask, int(call_task_id))
+                    call_status_broadcaster.publish(
+                        company_id=target_user.company_id,
+                        campaign_id=_ct_end.campaign_id if _ct_end else None,
+                        call_task_id=int(call_task_id),
+                        interaction_id=interaction_id,
+                        lead_id=lead.id if lead else None,
+                        lead_name=lead.name if lead else None,
+                        status="ended",
+                        outcome=_ended_outcome,
+                    )
+            except Exception:
+                pass
 
             # Enqueue post-call processing as a crash-safe background job. The automation worker picks this up and runs extract_and_save_requirements + dispatch_next_action. Writing the job row is synchronous and survives a FastAPI process restart — unlike an in-process asyncio.create_task.
             if db_interaction and db_interaction.lead_id and db_interaction.transcript and target_user:
@@ -325,7 +415,7 @@ def _log_startup_checks() -> None:
         "CARTESIA_API_KEY": "TTS+STT (Cartesia)",
         "MISTRAL_API_KEY": "LLM+TTS (Mistral)",
         "OPENAI_API_KEY": "LLM (OpenAI)",
-        "SARVAM_API_KEY": "STT+TTS (Sarvam)",
+        "SARVAM_API_KEY": "STT+TTS+LLM (Sarvam)",
     }
     # LLM needs at least one key
     llm_keys = {"MISTRAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"}
@@ -340,18 +430,22 @@ def _log_startup_checks() -> None:
             continue
         if not os.getenv(env_var):
             logger.warning("[Startup] %s key not set (%s). Calls using this provider will fail.", label, env_var)
+
+    # LangSmith tracing
+    configure_tracing()
+
     logger.info("[Startup] Key validation complete.")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio as _asyncio
-    from services.email_outbox_service import email_outbox_loop
-    from services.imap_poller_service import imap_poll_loop
+    from services.communication.email_outbox_service import email_outbox_loop
+    from services.communication.imap_poller_service import imap_poll_loop
 
     _log_startup_checks()
     init_db()
-    enable_bg_workers = os.getenv("ENABLE_BACKGROUND_WORKERS", "1").lower() in {"1", "true", "yes", "on"}
+    enable_bg_workers = app_settings.ENABLE_BACKGROUND_WORKERS
     imap_task = None
     outbox_task = None
     if enable_bg_workers:
@@ -368,6 +462,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Multi-Tenant CRM API", lifespan=lifespan)
+_process_start_time: float = time.time()
+app.add_middleware(_RLSMiddleware)
 app.add_middleware(_RequestContextMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -398,6 +494,21 @@ app.include_router(templates.router)
 app.include_router(telephony.router)
 app.include_router(tracking.router)
 app.include_router(feedback.router)
+app.include_router(knowledge.router)
+app.include_router(agent_routes.router)
+app.include_router(agent_tasks_routes.router, prefix="/crm")
+
+# MCP server — mount SSE transport at /mcp (optional, degrades gracefully)
+try:
+    from mcp_server import get_mcp_asgi_app
+    _mcp_app = get_mcp_asgi_app()
+    if _mcp_app is not None:
+        app.mount("/mcp", _mcp_app)
+        logger.info("[MCP] Server mounted at /mcp (SSE transport)")
+    else:
+        logger.info("[MCP] SSE app not available — run mcp_server.py separately")
+except Exception as _mcp_err:
+    logger.warning("[MCP] Could not mount MCP server: %s", _mcp_err)
 
 uploads_path = os.path.join(os.getcwd(), "uploads")
 os.makedirs(uploads_path, exist_ok=True)
@@ -407,6 +518,65 @@ app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
 @app.get("/")
 async def root():
     return {"message": "API is running"}
+
+
+@app.get("/health")
+async def health_check():
+    """
+    Load-balancer / uptime-monitor health check.
+    Returns 200 when all systems are healthy, 503 when degraded.
+
+    Response fields
+    ---------------
+    status          : "healthy" | "degraded"
+    db              : "ok" | "error:<msg>"
+    worker_*        : forwarded from automation_worker_service.get_worker_health()
+    uptime_seconds  : seconds since this process started
+    """
+    from fastapi.responses import JSONResponse
+    from database import engine
+    from services.automation_worker_service import get_worker_health
+    import datetime
+
+    result: dict = {}
+    degraded = False
+
+    # DB connectivity
+    try:
+        with Session(engine) as s:
+            s.exec(select(1))
+        result["db"] = "ok"
+    except Exception as exc:
+        result["db"] = f"error:{exc}"
+        degraded = True
+
+    # Worker health
+    wh = get_worker_health()
+    result.update({
+        "worker_last_cycle_at":              wh.get("last_cycle_at"),
+        "worker_last_cycle_status":          wh.get("last_cycle_status"),
+        "worker_last_cycle_duration_seconds": wh.get("last_cycle_duration_seconds"),
+        "worker_total_cycles":               wh.get("total_cycles"),
+        "worker_total_failed_cycles":        wh.get("total_failed_cycles"),
+        "worker_paused":                     wh.get("paused"),
+    })
+
+    # Mark degraded if worker has never completed a cycle after 5 minutes of uptime or if the last cycle itself reported a failure.
+    if wh.get("last_cycle_status") in ("never", None) and _process_start_time and \
+            time.time() - _process_start_time > 300:
+        degraded = True
+    if wh.get("last_cycle_status") == "partial_failure":
+        # partial_failure is a warning, not hard degraded — leave status as healthy
+        pass
+
+    # Process uptime
+    uptime = round(time.time() - _process_start_time) if _process_start_time else None
+    result["uptime_seconds"] = uptime
+
+    result["status"] = "degraded" if degraded else "healthy"
+    result["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+    return JSONResponse(content=result, status_code=503 if degraded else 200)
 
 
 @app.websocket("/media-stream")
@@ -450,5 +620,56 @@ async def live_sentiment(websocket: WebSocket, interaction_id: str):
                 if idle_ticks % 150 == 0:  # ~30s: 150 × 200ms
                     await websocket.send_json({"type": "ping"})
             await asyncio.sleep(0.2)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/call-monitor/{company_id}")
+async def call_monitor(
+    websocket: WebSocket,
+    company_id: int,
+    campaign_id: int | None = None,
+):
+    """
+    Dashboard WebSocket: live call-status feed for a company.
+    Streams CallStatusEvent rows (ringing → connected → ended) scoped to
+    company_id, with an optional ?campaign_id=X filter.
+    Polls every 500ms using a cursor (last_id) — works across all uvicorn workers.
+    Sends {"type":"ping"} every ~30s when idle.
+    """
+    await websocket.accept()
+    last_id = 0
+    idle_ticks = 0  # 500ms ticks with no new events
+    try:
+        while True:
+            with Session(engine) as s:
+                q = (
+                    select(CallStatusEvent)
+                    .where(CallStatusEvent.company_id == company_id)
+                    .where(CallStatusEvent.id > last_id)
+                )
+                if campaign_id is not None:
+                    q = q.where(CallStatusEvent.campaign_id == campaign_id)
+                rows = s.exec(q.order_by(CallStatusEvent.id).limit(20)).all()
+            if rows:
+                for row in rows:
+                    await websocket.send_json({
+                        "type": "call_status",
+                        "call_task_id": row.call_task_id,
+                        "interaction_id": row.interaction_id,
+                        "campaign_id": row.campaign_id,
+                        "lead_id": row.lead_id,
+                        "lead_name": row.lead_name,
+                        "status": row.status,
+                        "outcome": row.outcome,
+                        "ts": row.created_at.isoformat(),
+                    })
+                    last_id = row.id
+                idle_ticks = 0
+            else:
+                idle_ticks += 1
+                if idle_ticks % 60 == 0:  # ~30s: 60 × 500ms
+                    await websocket.send_json({"type": "ping"})
+            await asyncio.sleep(0.5)
     except Exception:
         pass

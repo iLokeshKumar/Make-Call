@@ -14,7 +14,7 @@ from sqlmodel import Session
 
 from database import get_session
 from models.models import User
-from services.auth_service import get_user_permission_keys
+from services.core.auth_service import get_user_permission_keys
 
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"

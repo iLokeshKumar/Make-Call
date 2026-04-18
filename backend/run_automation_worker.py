@@ -80,7 +80,7 @@ def main() -> None:
                 company_id=args.company_id,
                 dial_limit_per_company=args.dial_limit,
             )
-            # run_worker_forever only returns if it exits cleanly (shouldn't happen normally, but handle it gracefully).
+            
             logger.warning("[supervisor] run_worker_forever returned unexpectedly – restarting")
             backoff = _BACKOFF_INITIAL_SECONDS  # reset: clean exit
 

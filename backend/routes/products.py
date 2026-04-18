@@ -146,7 +146,7 @@ async def delete_product(
     return {"message": "Product deleted"}
 
 
-# ── Inventory aliases (same data, separate URL namespace) ────────────────────
+# Inventory aliases (same data, separate URL namespace)
 
 @router.get("/inventory")
 async def list_inventory(

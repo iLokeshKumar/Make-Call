@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowLeft, Brain, Calendar, CheckCircle2, ChevronDown, ChevronUp, Edit3, FileText, Loader2, MapPin, RefreshCw, Save, Target, TrendingUp, UserCheck, XCircle, Zap } from "lucide-react";
+import { ArrowLeft, Brain, Calendar, CheckCircle2, ChevronDown, ChevronUp, Edit3, FileText, Loader2, MapPin, Phone, Plus, RefreshCw, Save, Send, Target, TrendingUp, UserCheck, X, XCircle, Zap } from "lucide-react";
 
 import InteractionTimeline from "@/components/leads/interaction_timeline";
 import LeadHeader from "@/components/leads/lead_header";
@@ -15,7 +15,6 @@ import SentimentGauge from "@/components/SentimentGauge";
 import WhatsAppThread from "@/components/leads/whatsapp_thread";
 import EmailThread from "@/components/leads/email_thread";
 import CompetitorBadges from "@/components/leads/competitor_badges";
-import WaveformPlayer from "@/components/leads/waveform_player";
 import EnrichmentTrace from "@/components/leads/enrichment_trace";
 import SalesCoachPanel from "@/components/leads/sales_coach_panel";
 import BestCallTimes from "@/components/leads/best_call_times";
@@ -246,6 +245,19 @@ export default function LeadDetailPage() {
   const [reqSaving, setReqSaving] = useState(false);
   const [reqMessage, setReqMessage] = useState<string | null>(null);
 
+  // Call history — which call row is expanded
+  const [expandedCallId, setExpandedCallId] = useState<number | null>(null);
+
+  // Quick-send quote drawer
+  const [showQuoteDrawer, setShowQuoteDrawer] = useState(false);
+  const [quoteItems, setQuoteItems] = useState<{ product_name_snapshot: string; sku_snapshot: string; quantity: number; unit_price: string; discount_percent: string }[]>([{ product_name_snapshot: "", sku_snapshot: "", quantity: 1, unit_price: "", discount_percent: "0" }]);
+  const [quoteCurrency, setQuoteCurrency] = useState("INR");
+  const [quoteValidUntil, setQuoteValidUntil] = useState("");
+  const [quoteNotes, setQuoteNotes] = useState("");
+  const [quoteSaving, setQuoteSaving] = useState(false);
+  const [quoteMsg, setQuoteMsg] = useState<string | null>(null);
+  const [quoteMsgError, setQuoteMsgError] = useState(false);
+
   useEffect(() => {
     async function fetchLeadDetail() {
       if (!token || !leadId) {
@@ -255,53 +267,40 @@ export default function LeadDetailPage() {
 
       try {
         const headers = { Authorization: `Bearer ${token}` };
-        const [leadRes, requirementRes, interactionRes, taskRes, dealRes, feedbackRes] = await Promise.all([
-          fetch(`${API_BASE}/crm/leads/${leadId}`, { headers }),
-          fetch(`${API_BASE}/requirements/${leadId}`, { headers }),
-          fetch(`${API_BASE}/crm/interactions?lead_id=${leadId}`, { headers }),
-          fetch(`${API_BASE}/call-tasks`, { headers }),
-          fetch(`${API_BASE}/crm/leads/${leadId}/deal-timeline`, { headers }),
-          fetch(`${API_BASE}/feedback?lead_id=${leadId}&limit=50`, { headers }),
-        ]);
+        const res = await fetch(`${API_BASE}/crm/leads/${leadId}/context`, { headers });
 
-        if ([leadRes, requirementRes, interactionRes, taskRes, dealRes, feedbackRes].some((response) => response.status === 401)) {
-          sessionTimeout();
-          return;
+        if (res.status === 401) { sessionTimeout(); return; }
+        if (!res.ok) throw new Error("Lead not found or you do not have access to it.");
+
+        const ctx = await res.json();
+
+        setLead(ctx.lead);
+
+        if (ctx.requirement) {
+          setRequirement(ctx.requirement);
+          setReqDraft(ctx.requirement);
         }
 
-        if (!leadRes.ok) {
-          throw new Error("Lead not found or you do not have access to it.");
-        }
+        setInteractions(Array.isArray(ctx.interactions) ? ctx.interactions : []);
+        setTasks(Array.isArray(ctx.tasks) ? ctx.tasks : []);
 
-        const leadPayload = await leadRes.json();
-        setLead(leadPayload);
-
-        if (requirementRes.ok) {
-          const reqPayload = await requirementRes.json();
-          setRequirement(reqPayload);
-          setReqDraft(reqPayload);
+        // Deal timeline: merge quotes + appointments from context
+        const dealEvents: DealEvent[] = [];
+        for (const q of ctx.quotes ?? []) {
+          dealEvents.push({ kind: "quote", ...q });
         }
-
-        if (interactionRes.ok) {
-          const interactionPayload = await interactionRes.json();
-          setInteractions(Array.isArray(interactionPayload) ? interactionPayload : interactionPayload.items || []);
+        for (const a of ctx.appointments ?? []) {
+          dealEvents.push({
+            kind: "appointment", id: a.id,
+            date: a.appointment_time, status: a.status,
+            demo_type: "Demo", products: null, location: null,
+            notes: a.notes, meeting_link: null,
+          });
         }
+        dealEvents.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+        setDealTimeline(dealEvents);
 
-        if (taskRes.ok) {
-          const taskPayload = await taskRes.json();
-          const allTasks = Array.isArray(taskPayload) ? taskPayload : [];
-          setTasks(allTasks.filter((task: CallTask) => task.lead_id === leadId));
-        }
-
-        if (dealRes.ok) {
-          const dealPayload = await dealRes.json();
-          setDealTimeline(dealPayload.events ?? []);
-        }
-
-        if (feedbackRes.ok) {
-          const fbPayload = await feedbackRes.json();
-          setFeedbackItems(fbPayload.items ?? []);
-        }
+        setFeedbackItems(Array.isArray(ctx.feedback) ? ctx.feedback : []);
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load Lead 360.");
       } finally {
@@ -476,17 +475,6 @@ export default function LeadDetailPage() {
       setReqSaving(false);
     }
   }
-
-  const transcript = useMemo(
-    () => interactions.find((interaction) => interaction.transcript)?.transcript || "",
-    [interactions]
-  );
-
-  const latestRecording = useMemo(() => {
-    // Most recent call with a transcript (coach scores on transcript, not recording_url)
-    const calls = interactions.filter((i) => i.type === "call" && i.transcript && i.transcript.trim().length >= 50);
-    return calls.length > 0 ? calls[calls.length - 1] : null;
-  }, [interactions]);
 
   const timelineItems = useMemo(() => {
     const items = [] as Array<{
@@ -669,6 +657,57 @@ export default function LeadDetailPage() {
     return () => clearInterval(interval);
   }, [callInteractionId, token]);
 
+  function openQuoteDrawer() {
+    // Pre-populate one item from requirement.required_products if available
+    const products = requirement?.required_products;
+    if (products && products.trim()) {
+      const names = products.split(",").map(s => s.trim()).filter(Boolean);
+      setQuoteItems(names.map(n => ({ product_name_snapshot: n, sku_snapshot: "", quantity: 1, unit_price: "", discount_percent: "0" })));
+    } else {
+      setQuoteItems([{ product_name_snapshot: "", sku_snapshot: "", quantity: 1, unit_price: "", discount_percent: "0" }]);
+    }
+    const d = new Date(); d.setDate(d.getDate() + 15);
+    setQuoteValidUntil(d.toISOString().split("T")[0]);
+    setQuoteNotes("");
+    setQuoteMsg(null);
+    setShowQuoteDrawer(true);
+  }
+
+  async function handleQuickSendQuote(send: boolean) {
+    if (!token || !lead) return;
+    const validItems = quoteItems.filter(i => i.product_name_snapshot.trim() && i.unit_price);
+    if (!validItems.length) { setQuoteMsg("Add at least one item with a name and price."); setQuoteMsgError(true); return; }
+    setQuoteSaving(true); setQuoteMsg(null);
+    try {
+      const h = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
+      const createRes = await fetch(`${API_BASE}/quotes`, {
+        method: "POST", headers: h,
+        body: JSON.stringify({
+          lead_id: lead.id, currency: quoteCurrency,
+          valid_until: quoteValidUntil || null,
+          notes: quoteNotes || null,
+          items: validItems.map(i => ({ ...i, quantity: Number(i.quantity), unit_price: parseFloat(i.unit_price) || 0, discount_percent: parseFloat(i.discount_percent) || 0 })),
+        }),
+      });
+      if (createRes.status === 401) { sessionTimeout(); return; }
+      if (!createRes.ok) throw new Error((await createRes.json().catch(() => ({}))).detail || "Failed to create quote");
+      const quote = await createRes.json();
+      if (send) {
+        const sendRes = await fetch(`${API_BASE}/quotes/${quote.id}/send`, {
+          method: "POST", headers: h,
+          body: JSON.stringify({ channels: ["email"], subject: `Quote for ${lead.name}`, message: "" }),
+        });
+        if (!sendRes.ok) throw new Error("Quote created but failed to send");
+        setQuoteMsg(`Quote ${quote.quote_number} sent to ${lead.email || lead.name}`);
+      } else {
+        setQuoteMsg(`Quote ${quote.quote_number} saved as draft`);
+      }
+      setQuoteMsgError(false);
+      setTimeout(() => setShowQuoteDrawer(false), 2000);
+    } catch (e) { setQuoteMsg(e instanceof Error ? e.message : "Failed"); setQuoteMsgError(true); }
+    finally { setQuoteSaving(false); }
+  }
+
   async function handleCall() {
     if (!token || !lead?.normalized_phone) return;
 
@@ -779,6 +818,16 @@ export default function LeadDetailPage() {
         onReviewAIInsights={fetchAiSummary}
         onDelete={handleDeleteLead}
       />
+
+      {/* Quick Quote button */}
+      <div className="flex justify-end">
+        <button
+          onClick={openQuoteDrawer}
+          className="inline-flex items-center gap-2 rounded-xl bg-violet-600 hover:bg-violet-700 px-4 py-2.5 text-sm font-semibold text-white transition-colors shadow-sm"
+        >
+          <FileText className="h-4 w-4" /> Send Quote
+        </button>
+      </div>
 
       {callMessage && (
         <div className={`rounded-2xl border px-4 py-3 text-sm flex items-center gap-2 animate-in fade-in slide-in-from-top-2 ${
@@ -1525,31 +1574,61 @@ export default function LeadDetailPage() {
             <InteractionTimeline items={timelineItems} />
           </CollapsibleSection>
 
-          <CollapsibleSection title="Call Transcript" icon={UserCheck}>
-            <TranscriptPanel transcript={transcript} />
-          </CollapsibleSection>
-
-          {/* Call recording + waveform player */}
-          {latestRecording?.recording_url && (
-            <CollapsibleSection title="Call Recording" icon={RefreshCw}>
-              <WaveformPlayer
-                recordingUrl={latestRecording.recording_url}
-                transcript={latestRecording.transcript}
-                duration={latestRecording.recording_duration}
-              />
-            </CollapsibleSection>
-          )}
-
-          {/* AI Sales Coach — show score for most recent call interaction */}
-          {latestRecording && (
-            <CollapsibleSection title="AI Sales Coach" icon={Brain}>
-              <SalesCoachPanel
-                interactionId={latestRecording.id}
-                token={token!}
-                onSessionTimeout={sessionTimeout}
-              />
-            </CollapsibleSection>
-          )}
+          {/* Per-call expandable history with transcript + coach score */}
+          {(() => {
+            const callInteractions = interactions.filter(
+              i => (i.type || "").toLowerCase().includes("call") && (i.transcript || i.id)
+            );
+            if (!callInteractions.length) return null;
+            return (
+              <CollapsibleSection title={`Call History (${callInteractions.length})`} icon={Phone} defaultOpen={callInteractions.length <= 3}>
+                <div className="space-y-2">
+                  {callInteractions.slice().reverse().map(ci => {
+                    const isOpen = expandedCallId === ci.id;
+                    const hasTranscript = ci.transcript && ci.transcript.trim().length > 10;
+                    const dateLabel = ci.started_at || ci.created_at
+                      ? new Date(ci.started_at || ci.created_at || "").toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
+                      : "Unknown date";
+                    const durLabel = ci.recording_duration ? `${Math.floor(ci.recording_duration / 60)}m ${ci.recording_duration % 60}s` : null;
+                    const statusColor = ci.status === "completed" ? "text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10" : ci.status === "failed" ? "text-red-500 bg-red-50 dark:bg-red-500/10" : "text-slate-500 bg-slate-100 dark:bg-white/5";
+                    return (
+                      <div key={ci.id} className="rounded-xl border border-white/10 bg-white/5 overflow-hidden">
+                        <button
+                          type="button"
+                          onClick={() => setExpandedCallId(isOpen ? null : ci.id)}
+                          className="w-full flex items-center justify-between px-4 py-3 text-sm hover:bg-white/5 transition-colors"
+                        >
+                          <div className="flex items-center gap-3 min-w-0">
+                            <Phone className="h-3.5 w-3.5 text-violet-400 flex-shrink-0" />
+                            <span className="text-slate-300 truncate">{dateLabel}</span>
+                            {durLabel && <span className="text-slate-500 text-xs flex-shrink-0">{durLabel}</span>}
+                            {hasTranscript && <span className="text-[10px] text-violet-400 font-medium flex-shrink-0">transcript</span>}
+                          </div>
+                          <div className="flex items-center gap-2 flex-shrink-0">
+                            {ci.status && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusColor}`}>{ci.status}</span>}
+                            {isOpen ? <ChevronUp className="h-3.5 w-3.5 text-slate-500" /> : <ChevronDown className="h-3.5 w-3.5 text-slate-500" />}
+                          </div>
+                        </button>
+                        {isOpen && (
+                          <div className="px-4 pb-4 space-y-4 border-t border-white/10 pt-4">
+                            {hasTranscript
+                              ? <TranscriptPanel transcript={ci.transcript} />
+                              : <p className="text-xs text-slate-500 italic">No transcript recorded for this call.</p>
+                            }
+                            <SalesCoachPanel
+                              interactionId={ci.id}
+                              token={token!}
+                              onSessionTimeout={sessionTimeout}
+                            />
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </CollapsibleSection>
+            );
+          })()}
 
           {/* Competitor signals detected on calls */}
           <CollapsibleSection title="Competitor Signals" icon={Target}>
@@ -1580,6 +1659,163 @@ export default function LeadDetailPage() {
           </CollapsibleSection>
         </div>
       </div>
+
+      {/* Quick-send Quote drawer (slide-over) */}
+      {showQuoteDrawer && (
+        <div className="fixed inset-0 z-50 flex">
+          {/* Backdrop */}
+          <div className="flex-1 bg-slate-950/60 backdrop-blur-sm" onClick={() => !quoteSaving && setShowQuoteDrawer(false)} />
+          {/* Panel */}
+          <div className="w-full max-w-lg bg-slate-900 border-l border-white/10 flex flex-col overflow-hidden">
+            {/* Header */}
+            <div className="flex items-center justify-between px-6 py-4 border-b border-white/10">
+              <div>
+                <h2 className="text-lg font-bold text-white">Send Quote</h2>
+                <p className="text-xs text-slate-400">{lead.name}{lead.email ? ` · ${lead.email}` : ""}</p>
+              </div>
+              <button onClick={() => setShowQuoteDrawer(false)} disabled={quoteSaving} className="text-slate-400 hover:text-white transition-colors">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            {/* Body */}
+            <div className="flex-1 overflow-y-auto px-6 py-5 space-y-5">
+              {/* Currency + Valid Until */}
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">Currency</label>
+                  <select
+                    value={quoteCurrency}
+                    onChange={e => setQuoteCurrency(e.target.value)}
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  >
+                    {["INR", "USD", "EUR", "GBP", "AED", "SGD"].map(c => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-400 mb-1">Valid Until</label>
+                  <input
+                    type="date"
+                    value={quoteValidUntil}
+                    onChange={e => setQuoteValidUntil(e.target.value)}
+                    className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  />
+                </div>
+              </div>
+
+              {/* Line items */}
+              <div>
+                <div className="flex items-center justify-between mb-2">
+                  <label className="text-xs font-semibold text-slate-400">Line Items</label>
+                  <button
+                    type="button"
+                    onClick={() => setQuoteItems(prev => [...prev, { product_name_snapshot: "", sku_snapshot: "", quantity: 1, unit_price: "", discount_percent: "0" }])}
+                    className="flex items-center gap-1 text-xs text-violet-400 hover:text-violet-300 transition-colors"
+                  >
+                    <Plus className="h-3.5 w-3.5" /> Add item
+                  </button>
+                </div>
+                <div className="space-y-2">
+                  {quoteItems.map((item, idx) => (
+                    <div key={idx} className="grid grid-cols-[1fr_80px_90px_80px_28px] gap-1.5 items-center">
+                      <input
+                        placeholder="Product name"
+                        value={item.product_name_snapshot}
+                        onChange={e => setQuoteItems(prev => prev.map((it, i) => i === idx ? { ...it, product_name_snapshot: e.target.value } : it))}
+                        className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                      />
+                      <input
+                        type="number" min="1" placeholder="Qty"
+                        value={item.quantity}
+                        onChange={e => setQuoteItems(prev => prev.map((it, i) => i === idx ? { ...it, quantity: Number(e.target.value) } : it))}
+                        className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                      />
+                      <input
+                        type="number" min="0" step="0.01" placeholder="Unit price"
+                        value={item.unit_price}
+                        onChange={e => setQuoteItems(prev => prev.map((it, i) => i === idx ? { ...it, unit_price: e.target.value } : it))}
+                        className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                      />
+                      <input
+                        type="number" min="0" max="100" placeholder="Disc%"
+                        value={item.discount_percent}
+                        onChange={e => setQuoteItems(prev => prev.map((it, i) => i === idx ? { ...it, discount_percent: e.target.value } : it))}
+                        className="rounded-lg border border-white/10 bg-white/5 px-2.5 py-1.5 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setQuoteItems(prev => prev.length > 1 ? prev.filter((_, i) => i !== idx) : prev)}
+                        className="text-slate-600 hover:text-red-400 transition-colors"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  ))}
+                  <div className="grid grid-cols-[1fr_80px_90px_80px_28px] gap-1.5 px-0.5">
+                    <span className="text-[10px] text-slate-600">Name</span>
+                    <span className="text-[10px] text-slate-600">Qty</span>
+                    <span className="text-[10px] text-slate-600">Unit price</span>
+                    <span className="text-[10px] text-slate-600">Disc %</span>
+                    <span />
+                  </div>
+                </div>
+              </div>
+
+              {/* Live total */}
+              {(() => {
+                const total = quoteItems.reduce((sum, it) => {
+                  const price = parseFloat(it.unit_price) || 0;
+                  const disc  = parseFloat(it.discount_percent) || 0;
+                  return sum + (price * it.quantity * (1 - disc / 100));
+                }, 0);
+                return total > 0 ? (
+                  <div className="flex justify-end">
+                    <span className="text-sm font-bold text-violet-400">{quoteCurrency} {total.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  </div>
+                ) : null;
+              })()}
+
+              {/* Notes */}
+              <div>
+                <label className="block text-xs font-semibold text-slate-400 mb-1">Notes / Terms</label>
+                <textarea
+                  rows={3}
+                  value={quoteNotes}
+                  onChange={e => setQuoteNotes(e.target.value)}
+                  placeholder="Payment terms, delivery notes..."
+                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none"
+                />
+              </div>
+
+              {/* Status message */}
+              {quoteMsg && (
+                <p className={`text-sm font-medium ${quoteMsgError ? "text-red-400" : "text-emerald-400"}`}>{quoteMsg}</p>
+              )}
+            </div>
+
+            {/* Footer actions */}
+            <div className="px-6 py-4 border-t border-white/10 flex gap-2">
+              <button
+                onClick={() => handleQuickSendQuote(false)}
+                disabled={quoteSaving}
+                className="flex-1 rounded-xl border border-white/10 bg-white/5 py-2.5 text-sm font-semibold text-slate-300 hover:text-white hover:bg-white/10 transition-colors disabled:opacity-40"
+              >
+                {quoteSaving ? <Loader2 className="h-4 w-4 animate-spin inline mr-1" /> : null}
+                Save Draft
+              </button>
+              <button
+                onClick={() => handleQuickSendQuote(true)}
+                disabled={quoteSaving || !lead.email}
+                title={!lead.email ? "Lead has no email address" : undefined}
+                className="flex-1 rounded-xl bg-violet-600 hover:bg-violet-700 py-2.5 text-sm font-semibold text-white transition-colors disabled:opacity-40 flex items-center justify-center gap-2"
+              >
+                {quoteSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                Send via Email
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

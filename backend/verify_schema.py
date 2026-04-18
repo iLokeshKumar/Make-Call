@@ -1,6 +1,3 @@
-#!/usr/bin/env python
-"""Verify schema migration completed successfully."""
-
 import sys
 sys.path.insert(0, '.')
 

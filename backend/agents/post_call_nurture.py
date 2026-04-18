@@ -266,8 +266,8 @@ class EmailWriter:
         Attaches a CSAT feedback link as the email CTA.
         """
         try:
-            from services.communication_service import send_email_to_lead
-            from services.csat_service import get_csat_base_url, get_or_create_pending_csat
+            from services.communication.communication_service import send_email_to_lead
+            from services.feedback.csat_service import get_csat_base_url, get_or_create_pending_csat
 
             subject, body = EmailWriter.generate_personalized_email(
                 lead_name, company, pain_points, questions, icp_score, suggested_action
@@ -311,11 +311,13 @@ class EmailWriter:
 async def execute_post_call_nurture(
     lead_id: int,
     lead_data: dict,
-    call_data: dict
+    call_data: dict,
+    company_id: int = 0,
+    actor_user_id: Optional[int] = None,
 ) -> dict:
     """
     Execute complete post-call nurture workflow.
-    
+
     Args:
         lead_id: ID of the lead
         lead_data: {"name": str, "email": str, "company": str}
@@ -328,25 +330,22 @@ async def execute_post_call_nurture(
             "bant_answers": dict,
             "call_outcome": str
         }
-    
+        company_id: Tenant ID (required for email dispatch)
+        actor_user_id: User initiating the workflow
+
     Returns:
         Result dict with workflow execution details
     """
-    
-    print(f"\n{'='*60}")
-    print(f"🔄 STARTING POST-CALL NURTURE FOR: {lead_data['name']}")
-    print(f"{'='*60}\n")
-    
     result = {
         "lead_id": lead_id,
         "summary_saved": False,
         "status_updated": False,
         "email_sent": False,
-        "errors": []
+        "errors": [],
     }
-    
+
     try:
-        # Step 1: Summarize call
+        # Summarize call
         summary = CallSummarizer.summarize_call(
             lead_id=lead_id,
             transcript=call_data["transcript"],
@@ -354,39 +353,42 @@ async def execute_post_call_nurture(
             sentiment=call_data["sentiment"],
             pain_points=call_data["pain_points"],
             questions_asked=call_data["questions_asked"],
-            bant_answers=call_data["bant_answers"]
+            bant_answers=call_data["bant_answers"],
         )
-        result["summary_saved"] = CallSummarizer.save_summary_to_crm(lead_id, summary)
-        
-        # Step 2: Update lead status in CRM (no notes — outcomes go on Interaction, not lead.notes)
+        result["summary_saved"] = CallSummarizer.save_summary_to_crm(
+            lead_id, summary, company_id=company_id, actor_user_id=actor_user_id
+        )
+
+        # Update lead status
         new_status = "Qualified" if call_data["icp_score"] > 0.75 else "Not Qualified"
-        notes = f"Call outcome: {call_data['call_outcome']}. ICP Score: {call_data['icp_score']}. Sentiment: {call_data['sentiment']}."
-        result["status_updated"] = CRMUpdater.update_lead_status(lead_id, new_status, notes)
-        
-        # Step 3: Send personalized follow-up email
-        suggested_action = summary["recommendations"]["next_action"]
-        result["email_sent"] = EmailWriter.send_personalized_followup(
-            lead_id=lead_id,
-            lead_name=lead_data["name"],
-            lead_email=lead_data["email"],
-            company=lead_data["company"],
-            pain_points=call_data["pain_points"],
-            questions=call_data["questions_asked"],
-            icp_score=call_data["icp_score"],
-            suggested_action=suggested_action
+        notes = (
+            f"Call outcome: {call_data['call_outcome']}. "
+            f"ICP Score: {call_data['icp_score']}. "
+            f"Sentiment: {call_data['sentiment']}."
         )
-        
+        result["status_updated"] = CRMUpdater.update_lead_status(lead_id, new_status, notes)
+
+        # Send personalized follow-up email
+        suggested_action = summary["recommendations"]["next_action"]
+        with Session(engine) as session:
+            result["email_sent"] = EmailWriter.send_personalized_followup(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=lead_id,
+                lead_name=lead_data["name"],
+                lead_email=lead_data["email"],
+                company=lead_data.get("company", ""),
+                pain_points=call_data["pain_points"],
+                questions=call_data["questions_asked"],
+                icp_score=call_data["icp_score"],
+                suggested_action=suggested_action,
+            )
+
     except Exception as e:
         result["errors"].append(str(e))
-        print(f"❌ POST-CALL NURTURE ERROR: {e}")
-    
-    print(f"\n{'='*60}")
-    print(f"✓ POST-CALL NURTURE COMPLETE")
-    print(f"Summary Saved: {result['summary_saved']}")
-    print(f"Status Updated: {result['status_updated']}")
-    print(f"Email Sent: {result['email_sent']}")
-    print(f"{'='*60}\n")
-    
+        print(f"POST-CALL NURTURE ERROR: {e}")
+
     return result
 
 if __name__ == "__main__":

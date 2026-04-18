@@ -90,6 +90,20 @@ const STATUS_COLORS: Record<string, string> = {
   expired: "bg-red-500/15 text-red-400",
 };
 
+const CLOSE_LOOP_COLORS: Record<string, string> = {
+  open: "bg-red-500/15 text-red-400",
+  in_progress: "bg-amber-500/15 text-amber-400",
+  resolved: "bg-emerald-500/15 text-emerald-400",
+  none: "",
+};
+
+const CLOSE_LOOP_LABELS: Record<string, string> = {
+  open: "Loop Open",
+  in_progress: "In Progress",
+  resolved: "Resolved",
+  none: "",
+};
+
 function Stars({ rating, size = 4 }: { rating: number | null; size?: number }) {
   if (!rating) return <span className="text-slate-600 text-xs">-</span>;
   return (
@@ -487,7 +501,7 @@ function CloseLoopEditor({
 
   return (
     <div className="mt-3 space-y-3 rounded-xl border border-amber-500/20 bg-amber-500/5 p-3">
-      <p className="text-xs font-semibold uppercase tracking-widest text-amber-400">Low CSAT Close Loop</p>
+      <p className="text-xs font-semibold uppercase tracking-widest text-amber-400">Close-Loop Action</p>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         <div className="space-y-1">
           <label className="text-xs font-semibold uppercase text-slate-500">Assignee</label>
@@ -873,7 +887,14 @@ export default function FeedbackPage() {
                       </td>
                       <td className="px-4 py-3 text-xs text-slate-500">{fb.source === "customer" ? <span className="text-blue-400">Customer</span> : fb.submitted_by_name || "-"}</td>
                       <td className="px-4 py-3">
-                        <span className={clsx("inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold", STATUS_COLORS[fb.status] ?? STATUS_COLORS.submitted)}>{fb.status}</span>
+                        <div className="flex flex-col gap-1">
+                          <span className={clsx("inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold", STATUS_COLORS[fb.status] ?? STATUS_COLORS.submitted)}>{fb.status}</span>
+                          {fb.close_loop_status && fb.close_loop_status !== "none" && (
+                            <span className={clsx("inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold", CLOSE_LOOP_COLORS[fb.close_loop_status] ?? "")}>
+                              {CLOSE_LOOP_LABELS[fb.close_loop_status] ?? fb.close_loop_status}
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="whitespace-nowrap px-4 py-3 text-xs text-slate-500">{fmtDate(fb.created_at)}</td>
                       <td className="px-4 py-3 text-right" onClick={(e) => e.stopPropagation()}>
@@ -894,7 +915,11 @@ export default function FeedbackPage() {
                               <span className="mr-2 text-[10px] uppercase tracking-widest text-slate-500">Comment:</span>
                               {fb.comment || "-"}
                             </div>
-                            {fb.feedback_type === "csat" && (fb.rating || 0) <= 2 && (
+                            {/* Show close-loop editor when: rating is low (≤3) for CSAT/call_review, OR the item already has an open/in_progress loop */}
+                            {(
+                              ((fb.feedback_type === "csat" || fb.feedback_type === "call_review") && (fb.rating ?? 5) <= 3) ||
+                              (fb.close_loop_status && fb.close_loop_status !== "none" && fb.close_loop_status !== "resolved")
+                            ) && (
                               <CloseLoopEditor token={token || ""} feedback={fb} users={users} onSaved={() => { void refreshData(page); }} />
                             )}
                           </div>

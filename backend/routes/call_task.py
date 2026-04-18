@@ -13,9 +13,9 @@ from models.models import (
     LeadOptOutRequest,
     User,
 )
-from services.dialer_service import create_batch_call_tasks, opt_out_lead_from_calls, run_batch_dialer
-from services.outcome_service import apply_call_outcome
-from services.outbound_call_service import (
+from services.campaign.dialer_service import create_batch_call_tasks, opt_out_lead_from_calls, run_batch_dialer
+from services.call.outcome_service import apply_call_outcome
+from services.call.outbound_call_service import (
     complete_call_task,
     create_call_task,
     fail_call_task,

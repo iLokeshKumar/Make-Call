@@ -1,35 +1,12 @@
+"""Unit tests for outcome classification and retry policy.
+
+Tests exercise normalize_call_outcome, classify_outcome_from_transcript,
+get_retry_policy, and _suggest_action_from_outcome — all pure functions,
+no DB required.
 """
-Unit tests for outcome_service.py
-
-Tests for outcome normalization, classification, retry policies, and lead status mapping.
-"""
-
-import sys
-import os
-
-# Add parent directory to path for imports
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import unittest
-from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from sqlalchemy import create_engine
-from sqlalchemy.orm import Session
-from sqlmodel import SQLModel
-
-# Import from parent backend directory
-try:
-    from models.models import CallTask, Interaction, Lead, Campaign, CampaignRecipient, utc_now
-except ImportError:
-    # Fallback if models import fails - tests can still validate functions without full model instances
-    CallTask = None
-    Interaction = None
-    Lead = None
-    Campaign = None
-    CampaignRecipient = None
-
-from services.outcome_service import (
+from services.call.outcome_service import (
     OUTCOME_ANSWERED,
     OUTCOME_BUSY,
     OUTCOME_CALLBACK_REQUESTED,
@@ -39,281 +16,186 @@ from services.outcome_service import (
     OUTCOME_NO_ANSWER,
     OUTCOME_NOT_INTERESTED,
     OUTCOME_VOICEMAIL,
-    normalize_call_outcome,
     classify_outcome_from_transcript,
     get_retry_policy,
-    derive_lead_status_patch,
+    normalize_call_outcome,
 )
 
 
-class TestOutcomeNormalization(unittest.TestCase):
-    """Test normalize_call_outcome function."""
+# normalize_call_outcome — direct status passthrough
 
-    def test_normalize_no_answer(self):
-        """Test no_answer outcome normalization."""
-        result = normalize_call_outcome("no_answer")
-        self.assertEqual(result, OUTCOME_NO_ANSWER)
+class TestNormalizeDirectStatus:
+    def test_already_canonical_passes_through(self):
+        for outcome in (OUTCOME_INTERESTED, OUTCOME_NOT_INTERESTED, OUTCOME_BUSY,
+                        OUTCOME_NO_ANSWER, OUTCOME_FAILED, OUTCOME_VOICEMAIL):
+            assert normalize_call_outcome(outcome) == outcome
 
-    def test_normalize_busy(self):
-        """Test busy outcome normalization."""
-        result = normalize_call_outcome("busy")
-        self.assertEqual(result, OUTCOME_BUSY)
+    def test_busy_status(self):
+        assert normalize_call_outcome("busy") == OUTCOME_BUSY
 
-    def test_normalize_voicemail(self):
-        """Test voicemail outcome normalization."""
-        result = normalize_call_outcome("voicemail")
-        self.assertEqual(result, OUTCOME_VOICEMAIL)
+    def test_no_answer_variants(self):
+        for status in ("no-answer", "no_answer", "ringing", "canceled", "cancelled"):
+            assert normalize_call_outcome(status) == OUTCOME_NO_ANSWER, f"Failed for {status}"
 
-    def test_normalize_failed(self):
-        """Test failed outcome normalization."""
-        result = normalize_call_outcome("failed")
-        self.assertEqual(result, OUTCOME_FAILED)
+    def test_voicemail_variants(self):
+        for status in ("voicemail", "machine", "answering_machine"):
+            assert normalize_call_outcome(status) == OUTCOME_VOICEMAIL, f"Failed for {status}"
 
-    def test_normalize_answered_with_positive_transcript(self):
-        """Test answered outcome with positive transcript."""
-        transcript = "Yes, I'm very interested in this solution. Can you send me a quote?"
-        result = normalize_call_outcome("answered", transcript)
-        self.assertEqual(result, OUTCOME_INTERESTED)
+    def test_failed_variants(self):
+        for status in ("failed", "error"):
+            assert normalize_call_outcome(status) == OUTCOME_FAILED, f"Failed for {status}"
 
-    def test_normalize_answered_with_negative_transcript(self):
-        """Test answered outcome with negative transcript."""
-        transcript = "I'm not interested, please stop calling me."
-        result = normalize_call_outcome("answered", transcript)
-        self.assertEqual(result, OUTCOME_NOT_INTERESTED)
+    def test_none_status_returns_failed(self):
+        assert normalize_call_outcome(None) == OUTCOME_FAILED
 
-    def test_normalize_answered_with_callback_request(self):
-        """Test answered outcome with callback request."""
-        transcript = "Can you call me back tomorrow?"
-        result = normalize_call_outcome("answered", transcript)
-        self.assertEqual(result, OUTCOME_CALLBACK_REQUESTED)
-
-    def test_normalize_answered_neutral_transcript(self):
-        """Test answered outcome with neutral transcript."""
-        transcript = "Tell me more about your product. Yes, I'm interested."
-        result = normalize_call_outcome("answered", transcript)
-        self.assertEqual(result, OUTCOME_INTERESTED)
-
-    def test_normalize_unknown_status_defaults_to_failed(self):
-        """Test that unknown status defaults to failed."""
-        result = normalize_call_outcome("something_weird")
-        self.assertEqual(result, OUTCOME_FAILED)
+    def test_unknown_status_returns_failed(self):
+        assert normalize_call_outcome("something_random") == OUTCOME_FAILED
 
 
-class TestOutcomeClassification(unittest.TestCase):
-    """Test classify_outcome_from_transcript function."""
+# normalize_call_outcome — transcript signal detection
 
-    def test_classify_positive_transcript(self):
-        """Test classification of positive transcript."""
-        transcript = "This is exactly what we need. Definitely interested."
-        result = classify_outcome_from_transcript(None, transcript)
-        
-        self.assertEqual(result["normalized_outcome"], OUTCOME_INTERESTED)
-        self.assertGreaterEqual(result["confidence"], Decimal("0.6"))
-        self.assertIn("summary", result)
-        self.assertIsInstance(result["signals"], list)
-        self.assertEqual(result["suggested_next_action"], "send_quote")
+class TestNormalizeWithTranscript:
+    def test_positive_signal_returns_interested(self):
+        assert normalize_call_outcome("completed", "Yes I'm interested in pricing") == OUTCOME_INTERESTED
 
-    def test_classify_negative_transcript(self):
-        """Test classification of negative transcript."""
-        transcript = "This doesn't fit our needs. Not interested at all."
-        result = classify_outcome_from_transcript(None, transcript)
-        
-        self.assertEqual(result["normalized_outcome"], OUTCOME_NOT_INTERESTED)
-        self.assertEqual(result["suggested_next_action"], "close_lost")
+    def test_negative_signal_returns_not_interested(self):
+        assert normalize_call_outcome("completed", "No thanks, not interested") == OUTCOME_NOT_INTERESTED
 
-    def test_classify_callback_transcript(self):
-        """Test classification of callback request."""
-        transcript = "Can you call me back next week? I'll have more information by then."
-        result = classify_outcome_from_transcript(None, transcript)
-        
-        self.assertEqual(result["normalized_outcome"], OUTCOME_CALLBACK_REQUESTED)
-        self.assertEqual(result["suggested_next_action"], "follow_up_call")
+    def test_callback_signal_returns_callback(self):
+        assert normalize_call_outcome("completed", "Can you call me back tomorrow?") == OUTCOME_CALLBACK_REQUESTED
 
-    def test_classify_empty_transcript(self):
-        """Test classification with empty transcript."""
+    def test_neutral_transcript_returns_follow_up(self):
+        assert normalize_call_outcome("completed", "I see, let me think about it") == OUTCOME_FOLLOW_UP
+
+    def test_negative_beats_positive_when_both_present(self):
+        # "not interested" appears before any positive signal
+        result = normalize_call_outcome("completed", "not interested in a demo")
+        assert result == OUTCOME_NOT_INTERESTED
+
+    def test_callback_beats_positive(self):
+        # "call me back" checked before positive signals
+        result = normalize_call_outcome("completed", "call me back, sounds good")
+        assert result == OUTCOME_CALLBACK_REQUESTED
+
+    def test_answered_status_also_triggers_detection(self):
+        assert normalize_call_outcome("answered", "send me a proposal") == OUTCOME_INTERESTED
+
+    def test_in_progress_status_also_triggers_detection(self):
+        assert normalize_call_outcome("in_progress", "not now") == OUTCOME_NOT_INTERESTED
+
+
+# classify_outcome_from_transcript
+
+class TestClassifyFromTranscript:
+    def test_empty_transcript_returns_failed(self):
         result = classify_outcome_from_transcript(None, "")
-        
-        self.assertEqual(result["normalized_outcome"], OUTCOME_FAILED)
-        self.assertLess(result["confidence"], Decimal("0.5"))
+        assert result["normalized_outcome"] == OUTCOME_FAILED
+        assert result["confidence"] == Decimal("0.25")
+        assert result["signals"] == []
 
+    def test_none_transcript_returns_failed(self):
+        result = classify_outcome_from_transcript(None, None)
+        assert result["normalized_outcome"] == OUTCOME_FAILED
 
-class TestRetryPolicy(unittest.TestCase):
-    """Test get_retry_policy function."""
-
-    def test_retry_policy_no_answer(self):
-        """Test retry policy for no_answer outcome."""
-        # First attempt should schedule retry
-        policy = get_retry_policy(OUTCOME_NO_ANSWER, attempt_count=0)
-        self.assertTrue(policy["should_retry"])
-        self.assertEqual(policy["retry_after_hours"], 1)
-        self.assertEqual(policy["max_attempts"], 6)
-        self.assertFalse(policy["max_attempts_reached"])
-
-    def test_retry_policy_busy(self):
-        """Test retry policy for busy outcome."""
-        policy = get_retry_policy(OUTCOME_BUSY, attempt_count=0)
-        self.assertTrue(policy["should_retry"])
-        self.assertEqual(policy["retry_after_hours"], 2)
-        self.assertEqual(policy["max_attempts"], 4)
-
-    def test_retry_policy_voicemail(self):
-        """Test retry policy for voicemail outcome."""
-        policy = get_retry_policy(OUTCOME_VOICEMAIL, attempt_count=0)
-        self.assertTrue(policy["should_retry"])
-        self.assertEqual(policy["retry_after_hours"], 24)
-        self.assertEqual(policy["max_attempts"], 2)
-
-    def test_retry_policy_max_attempts_reached(self):
-        """Test retry policy when max attempts reached."""
-        policy = get_retry_policy(OUTCOME_NO_ANSWER, attempt_count=6)
-        self.assertFalse(policy["should_retry"])
-        self.assertTrue(policy["max_attempts_reached"])
-
-    def test_retry_policy_interested_no_retry(self):
-        """Test that interested outcome doesn't retry."""
-        policy = get_retry_policy(OUTCOME_INTERESTED, attempt_count=0)
-        self.assertFalse(policy["should_retry"])
-        self.assertEqual(policy["max_attempts"], 1)  # max is 1, so no more attempts allowed
-
-    def test_retry_policy_progression(self):
-        """Test retry policy progression through attempts."""
-        outcomes_hours = [
-            (0, 1, True),    # Attempt 1: retry after 1 hour
-            (1, 2, True),    # Attempt 2: retry after 2 hours
-            (2, 4, True),    # Attempt 3: retry after 4 hours
-            (3, 8, True),    # Attempt 4: retry after 8 hours
-            (4, 16, True),   # Attempt 5: retry after 16 hours
-            (5, 24, True),   # Attempt 6: retry after 24 hours (still within max_attempts=6)
-        ]
-        
-        for attempt, expected_hours, should_retry in outcomes_hours:
-            policy = get_retry_policy(OUTCOME_NO_ANSWER, attempt_count=attempt)
-            self.assertEqual(policy["should_retry"], should_retry, f"Attempt {attempt}")
-            if should_retry:
-                self.assertEqual(policy["retry_after_hours"], expected_hours)
-
-
-class TestLeadStatusPatch(unittest.TestCase):
-    """Test derive_lead_status_patch function."""
-
-    def test_patch_for_interested(self):
-        """Test lead status patch for interested outcome."""
-        patch = derive_lead_status_patch(OUTCOME_INTERESTED)
-        
-        self.assertEqual(patch["status"], "contacted")
-        self.assertEqual(patch["qualification_status"], "qualified")
-        self.assertEqual(patch["next_action"], "send_quote")
-
-    def test_patch_for_not_interested(self):
-        """Test lead status patch for not interested outcome."""
-        patch = derive_lead_status_patch(OUTCOME_NOT_INTERESTED)
-        
-        self.assertEqual(patch["status"], "closed_lost")
-        self.assertEqual(patch["qualification_status"], "not_interested")
-
-    def test_patch_for_callback_requested(self):
-        """Test lead status patch for callback requested."""
-        patch = derive_lead_status_patch(OUTCOME_CALLBACK_REQUESTED)
-        
-        self.assertEqual(patch["status"], "contacted")
-        self.assertEqual(patch["qualification_status"], "follow_up")
-        self.assertEqual(patch["next_action"], "follow_up_call")
-
-    def test_patch_for_follow_up_needed(self):
-        """Test lead status patch for follow up needed."""
-        patch = derive_lead_status_patch(OUTCOME_FOLLOW_UP)
-        
-        self.assertEqual(patch["status"], "contacted")
-        self.assertEqual(patch["qualification_status"], "follow_up")
-        self.assertEqual(patch["next_action"], "follow_up_email")
-
-    def test_patch_for_unknown_outcome(self):
-        """Test lead status patch for unknown outcome returns empty dict."""
-        patch = derive_lead_status_patch("unknown_outcome")
-        self.assertEqual(patch, {})
-
-
-class TestOutcomeSignalDetection(unittest.TestCase):
-    """Test outcome classification signal detection."""
-
-    def test_positive_signal_detection(self):
-        """Test detection of positive signals."""
-        transcript = "This sounds great! I'm definitely interested."
-        result = classify_outcome_from_transcript(None, transcript)
-        
-        self.assertGreater(len(result["signals"]), 0)
-        self.assertEqual(result["normalized_outcome"], OUTCOME_INTERESTED)
-
-    def test_negative_signal_detection(self):
-        """Test detection of negative signals."""
-        transcript = "No, I'm not interested in this."
-        result = classify_outcome_from_transcript(None, transcript)
-        
-        self.assertGreater(len(result["signals"]), 0)
-        self.assertEqual(result["normalized_outcome"], OUTCOME_NOT_INTERESTED)
-
-    def test_multiple_signals(self):
-        """Test detection of multiple signals."""
-        transcript = (
-            "Tell me more about this proposal. I'm interested but need to review with my team. "
-            "Can you call me back Friday?"
+    def test_positive_transcript_heuristic(self):
+        result = classify_outcome_from_transcript(
+            None, "Yes please send me the proposal and pricing"
         )
-        result = classify_outcome_from_transcript(None, transcript)
-        
-        # Should detect interest and callback signals
-        self.assertGreater(len(result["signals"]), 0)
+        assert result["normalized_outcome"] == OUTCOME_INTERESTED
+        assert result["confidence"] == Decimal("0.70")
+        assert any("positive" in s or "signal_" in s for s in result["signals"])
+        assert result["suggested_next_action"] == "send_quote"
+
+    def test_negative_transcript_heuristic(self):
+        result = classify_outcome_from_transcript(
+            None, "No I'm not interested, please stop calling"
+        )
+        assert result["normalized_outcome"] == OUTCOME_NOT_INTERESTED
+        assert result["suggested_next_action"] == "close_lost"
+
+    def test_callback_transcript_heuristic(self):
+        # Use "call me back" without "later" (which is a negative signal)
+        result = classify_outcome_from_transcript(
+            None, "Sure, call me back in the evening please"
+        )
+        assert result["normalized_outcome"] == OUTCOME_CALLBACK_REQUESTED
+        assert result["suggested_next_action"] == "follow_up_call"
+
+    def test_summary_truncated_to_240(self):
+        long_text = "word " * 200  # 1000 chars
+        result = classify_outcome_from_transcript(None, long_text)
+        assert len(result["summary"]) <= 240
+
+    def test_llm_fallback_on_failure(self):
+        """When LLM raises, heuristic result is used."""
+
+        class BrokenLLM:
+            def invoke(self, prompt):
+                raise RuntimeError("LLM down")
+
+        result = classify_outcome_from_transcript(
+            BrokenLLM(), "I'm interested in a demo"
+        )
+        assert result["normalized_outcome"] == OUTCOME_INTERESTED
+
+    def test_llm_invalid_json_falls_back(self):
+        class BadJsonLLM:
+            def invoke(self, prompt):
+                return "this is not json"
+
+        result = classify_outcome_from_transcript(
+            BadJsonLLM(), "send me the quote"
+        )
+        assert result["normalized_outcome"] == OUTCOME_INTERESTED
 
 
-class TestOutcomeMapping(unittest.TestCase):
-    """Test outcome mappings for business logic."""
+# get_retry_policy
 
-    def test_all_outcomes_are_handled(self):
-        """Ensure all canonical outcomes have mappings."""
-        test_outcomes = [
-            OUTCOME_ANSWERED,
-            OUTCOME_NO_ANSWER,
-            OUTCOME_BUSY,
-            OUTCOME_FAILED,
-            OUTCOME_INTERESTED,
-            OUTCOME_NOT_INTERESTED,
-            OUTCOME_CALLBACK_REQUESTED,
-            OUTCOME_FOLLOW_UP,
-            OUTCOME_VOICEMAIL,
-        ]
-        
-        for outcome in test_outcomes:
-            # Should not raise error
-            retry_policy = get_retry_policy(outcome, attempt_count=0)
-            self.assertIn("should_retry", retry_policy)
-            self.assertIn("retry_after_hours", retry_policy)
-            self.assertIn("max_attempts", retry_policy)
+class TestRetryPolicy:
+    def test_no_answer_retries_up_to_6(self):
+        policy = get_retry_policy(OUTCOME_NO_ANSWER, 0)
+        assert policy["should_retry"] is True
+        assert policy["max_attempts"] == 6
+        assert policy["retry_after_hours"] == 1
 
-    def test_positive_outcomes_dont_retry(self):
-        """Test that positive outcomes don't trigger retry."""
-        positive_outcomes = [
-            OUTCOME_INTERESTED,
-            OUTCOME_NOT_INTERESTED,
-            OUTCOME_CALLBACK_REQUESTED,
-        ]
-        
-        for outcome in positive_outcomes:
-            policy = get_retry_policy(outcome, attempt_count=0)
-            self.assertFalse(policy["should_retry"], f"{outcome} should not retry")
+    def test_no_answer_escalating_backoff(self):
+        hours = []
+        for attempt in range(6):
+            p = get_retry_policy(OUTCOME_NO_ANSWER, attempt)
+            if p["retry_after_hours"]:
+                hours.append(p["retry_after_hours"])
+        assert hours == [1, 2, 4, 8, 16, 24]
 
-    def test_retriable_outcomes_retry(self):
-        """Test that retriable outcomes trigger retry."""
-        retriable_outcomes = [
-            OUTCOME_NO_ANSWER,
-            OUTCOME_BUSY,
-            OUTCOME_FAILED,
-            OUTCOME_VOICEMAIL,
-        ]
-        
-        for outcome in retriable_outcomes:
-            policy = get_retry_policy(outcome, attempt_count=0)
-            self.assertTrue(policy["should_retry"], f"{outcome} should retry")
-            self.assertIsNotNone(policy["retry_after_hours"], f"{outcome} should have retry_after_hours")
+    def test_no_answer_exhausted_at_6(self):
+        policy = get_retry_policy(OUTCOME_NO_ANSWER, 6)
+        assert policy["should_retry"] is False
+        assert policy["max_attempts_reached"] is True
 
+    def test_busy_retries_up_to_4(self):
+        policy = get_retry_policy(OUTCOME_BUSY, 0)
+        assert policy["should_retry"] is True
+        assert policy["max_attempts"] == 4
 
-if __name__ == "__main__":
-    unittest.main()
+    def test_interested_no_retry(self):
+        policy = get_retry_policy(OUTCOME_INTERESTED, 0)
+        assert policy["should_retry"] is False
+
+    def test_not_interested_no_retry(self):
+        policy = get_retry_policy(OUTCOME_NOT_INTERESTED, 0)
+        assert policy["should_retry"] is False
+
+    def test_voicemail_retries_twice(self):
+        p0 = get_retry_policy(OUTCOME_VOICEMAIL, 0)
+        assert p0["should_retry"] is True
+        assert p0["retry_after_hours"] == 24
+
+        p1 = get_retry_policy(OUTCOME_VOICEMAIL, 1)
+        assert p1["should_retry"] is True
+        assert p1["retry_after_hours"] == 72
+
+        p2 = get_retry_policy(OUTCOME_VOICEMAIL, 2)
+        assert p2["should_retry"] is False
+
+    def test_unknown_outcome_no_retry(self):
+        policy = get_retry_policy("some_random_outcome", 0)
+        assert policy["should_retry"] is False

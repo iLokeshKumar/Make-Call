@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Activity, BarChart2, Bell, Brain, Clock, Download, Loader2,
-  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2,
+  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2, Zap,
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -187,7 +187,24 @@ function DoDSummary({ trend }: { trend: TrendPoint[] }) {
   );
 }
 
-const MAIN_TABS = ["Overview", "Latency", "Alerts"] as const;
+type CallPerformance = {
+  days: number;
+  connect_rate_pct: number;
+  avg_talk_time_seconds: number;
+  total_with_outcome: number;
+  connected_calls: number;
+  outcome_counts: Record<string, number>;
+};
+
+type CallConversion = {
+  total_calls: number;
+  leads_called: number;
+  demos_booked: number;
+  quotes_sent: number;
+  closed_won: number;
+};
+
+const MAIN_TABS = ["Overview", "Latency", "Alerts", "Performance"] as const;
 type MainTab = typeof MAIN_TABS[number];
 type LatencySubTab = "engines" | "calls" | "models" | "trend";
 
@@ -225,6 +242,12 @@ export default function AnalyticsPage() {
   const [newAlertChannel, setNewAlertChannel]     = useState("email");
   const [alertSaving, setAlertSaving] = useState(false);
 
+  // Performance
+  const [perfDays, setPerfDays]               = useState(30);
+  const [perfLoading, setPerfLoading]         = useState(false);
+  const [perf, setPerf]                       = useState<CallPerformance | null>(null);
+  const [conv, setConv]                       = useState<CallConversion | null>(null);
+
   // Exports
   const [exportLoading, setExportLoading]           = useState(false);
   const [quoteExportLoading, setQuoteExportLoading] = useState(false);
@@ -252,8 +275,7 @@ export default function AnalyticsPage() {
       const res = await fetch(url, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) setSummary(await res.json());
-    } catch { /* ignore */ } finally { setSummaryLoading(false); }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    } catch {} finally { setSummaryLoading(false); }
   }, [token]);
 
   const fetchLatency = useCallback(async (silent = false) => {
@@ -263,8 +285,7 @@ export default function AnalyticsPage() {
       const res = await fetch(`${API_BASE}/analytics/latency?days=${latencyDays}&scope=${scope}`, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) { setLatency(await res.json()); setLastAt(new Date()); }
-    } catch { /* ignore */ } finally { setLatencyLoading(false); setLatencyRefreshing(false); }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    } catch {} finally { setLatencyLoading(false); setLatencyRefreshing(false); }
   }, [token, latencyDays, scope]);
 
   const fetchAlerts = useCallback(async () => {
@@ -274,9 +295,24 @@ export default function AnalyticsPage() {
       const res = await fetch(`${API_BASE}/analytics/alerts`, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) setAlerts(await res.json());
-    } catch { /* ignore */ } finally { setAlertsLoading(false); }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    } catch {} finally { setAlertsLoading(false); }
   }, [token]);
+
+  const fetchPerformance = useCallback(async (d: number) => {
+    if (!token) return;
+    setPerfLoading(true);
+    try {
+      const [pr, cr] = await Promise.all([
+        fetch(`${API_BASE}/analytics/call-performance?days=${d}`, { headers: authH }),
+        fetch(`${API_BASE}/analytics/call-conversion?days=${d}`, { headers: authH }),
+      ]);
+      if (pr.status === 401 || cr.status === 401) { sessionTimeout(); return; }
+      if (pr.ok) setPerf(await pr.json());
+      if (cr.ok) setConv(await cr.json());
+    } catch {} finally { setPerfLoading(false); }
+  }, [token]);
+
+  useEffect(() => { if (activeTab === "Performance") fetchPerformance(perfDays); }, [activeTab, fetchPerformance, perfDays]);
 
   useEffect(() => {
     if (useCustom && customFrom && customTo) {
@@ -407,9 +443,10 @@ export default function AnalyticsPage() {
           <button key={t} onClick={() => setActiveTab(t)}
             className={clsx("px-5 py-3 text-sm font-semibold capitalize rounded-t-xl transition-all border-b-2",
               activeTab === t ? "text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-white")}>
-            {t === "Overview" ? <><BarChart2 className="inline h-3.5 w-3.5 mr-1.5" />Overview</> :
-             t === "Latency"  ? <><Clock     className="inline h-3.5 w-3.5 mr-1.5" />Latency</>  :
-                                <><Bell      className="inline h-3.5 w-3.5 mr-1.5" />Alerts</>}
+            {t === "Overview"    ? <><BarChart2 className="inline h-3.5 w-3.5 mr-1.5" />Overview</>    :
+             t === "Latency"     ? <><Clock     className="inline h-3.5 w-3.5 mr-1.5" />Latency</>     :
+             t === "Performance" ? <><Zap       className="inline h-3.5 w-3.5 mr-1.5" />Performance</> :
+                                   <><Bell      className="inline h-3.5 w-3.5 mr-1.5" />Alerts</>}
           </button>
         ))}
       </div>
@@ -870,6 +907,145 @@ export default function AnalyticsPage() {
                 </tbody>
               </table>
             </div>
+          )}
+        </div>
+      )}
+
+      {/* PERFORMANCE TAB */}
+      {activeTab === "Performance" && (
+        <div className="space-y-6">
+          {/* Days selector */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500 font-medium">Period:</span>
+            <div className="flex rounded-xl overflow-hidden border border-white/10">
+              {[7, 14, 30, 90].map(d => (
+                <button key={d} onClick={() => setPerfDays(d)}
+                  className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
+                    perfDays === d ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                  {d}d
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {perfLoading ? (
+            <div className="flex items-center justify-center py-24 gap-3 text-slate-500">
+              <RefreshCw className="h-5 w-5 animate-spin" /> Loading…
+            </div>
+          ) : (
+            <>
+              {/* Stat cards */}
+              {(() => {
+                const connectRate  = perf?.connect_rate_pct ?? 0;
+                const talkSec      = perf?.avg_talk_time_seconds ?? 0;
+                const talkMin      = Math.floor(talkSec / 60);
+                const talkRemSec   = talkSec % 60;
+                const talkLabel    = talkSec > 0 ? `${talkMin}m ${talkRemSec}s` : "—";
+                const totalCalls   = conv?.total_calls ?? 0;
+                const demosBooked  = conv?.demos_booked ?? 0;
+                const closedWon    = conv?.closed_won ?? 0;
+                const demoRate     = totalCalls > 0 ? ((demosBooked / totalCalls) * 100).toFixed(1) : "0.0";
+                const closeRate    = totalCalls > 0 ? ((closedWon  / totalCalls) * 100).toFixed(1) : "0.0";
+                return (
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <KpiCard label="Connect Rate"  value={`${connectRate}%`}  icon={Phone}    color="#34d399" sub={`${perf?.connected_calls ?? 0} of ${perf?.total_with_outcome ?? 0} calls`} />
+                    <KpiCard label="Avg Talk Time" value={talkLabel}           icon={Mic}      color="#60a5fa" sub={`${perfDays}d window`} />
+                    <KpiCard label="Demo Rate"     value={`${demoRate}%`}      icon={Activity} color="#fbbf24" sub={`${demosBooked} demos / ${totalCalls} calls`} />
+                    <KpiCard label="Close Rate"    value={`${closeRate}%`}     icon={TrendingUp} color="#a78bfa" sub={`${closedWon} closed / ${totalCalls} calls`} />
+                  </div>
+                );
+              })()}
+
+              {/* Conversion funnel */}
+              {conv && (
+                <div className="glass rounded-2xl border border-white/10 p-6">
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-5">Conversion Funnel</p>
+                  {(() => {
+                    const totalCalls = conv.total_calls || 1;
+                    const connected  = perf?.connected_calls ?? 0;
+                    const stages: { label: string; value: number; color: string }[] = [
+                      { label: "Called",     value: conv.total_calls,    color: "#818cf8" },
+                      { label: "Connected",  value: connected,           color: "#60a5fa" },
+                      { label: "Interested", value: conv.leads_called,   color: "#34d399" },
+                      { label: "Quoted",     value: conv.quotes_sent,    color: "#fbbf24" },
+                      { label: "Closed Won", value: conv.closed_won,     color: "#a78bfa" },
+                    ];
+                    return (
+                      <div className="space-y-3">
+                        {stages.map((s, i) => {
+                          const pct = ((s.value / totalCalls) * 100).toFixed(1);
+                          const barW = Math.max((s.value / totalCalls) * 100, s.value > 0 ? 2 : 0);
+                          const indent = i * 12;
+                          return (
+                            <div key={s.label} className="flex items-center gap-3" style={{ paddingLeft: indent }}>
+                              <span className="w-20 text-xs text-slate-400 shrink-0">{s.label}</span>
+                              <div className="flex-1 h-[18px] rounded bg-white/5 overflow-hidden">
+                                <div
+                                  className="h-full rounded transition-all duration-700 flex items-center px-2"
+                                  style={{ width: `${barW}%`, background: s.color + "99" }}
+                                />
+                              </div>
+                              <span className="w-16 text-right font-mono text-xs font-bold shrink-0" style={{ color: s.color }}>
+                                {s.value.toLocaleString()}
+                              </span>
+                              <span className="w-12 text-right font-mono text-[10px] text-slate-500 shrink-0">
+                                {pct}%
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+
+              {/* Outcome breakdown table */}
+              {perf && Object.keys(perf.outcome_counts).length > 0 && (
+                <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+                  <div className="px-5 py-4 border-b border-white/10">
+                    <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500">Call Outcome Breakdown</p>
+                  </div>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="bg-white/5 border-b border-white/10">
+                        <th className="px-5 py-3 text-left text-slate-500 font-medium">Outcome</th>
+                        <th className="px-5 py-3 text-right text-slate-500 font-medium">Count</th>
+                        <th className="px-5 py-3 text-right text-slate-500 font-medium">Share</th>
+                        <th className="px-5 py-3 text-left text-slate-500 font-medium w-48">Bar</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {Object.entries(perf.outcome_counts)
+                        .sort(([, a], [, b]) => b - a)
+                        .map(([outcome, count]) => {
+                          const total = perf.total_with_outcome || 1;
+                          const pct   = ((count / total) * 100).toFixed(1);
+                          const isConn = outcome.startsWith("answered_");
+                          const color  = isConn ? "#34d399" : outcome.includes("busy") || outcome.includes("no") ? "#fbbf24" : "#f87171";
+                          return (
+                            <tr key={outcome} className="border-b border-white/5 hover:bg-white/5">
+                              <td className="px-5 py-3 font-mono text-slate-300">{outcome}</td>
+                              <td className="px-5 py-3 text-right font-bold" style={{ color }}>{count}</td>
+                              <td className="px-5 py-3 text-right text-slate-400">{pct}%</td>
+                              <td className="px-5 py-3">
+                                <div className="h-[4px] rounded-full bg-white/10 overflow-hidden">
+                                  <div className="h-full rounded-full transition-all duration-700"
+                                    style={{ width: `${(count / total) * 100}%`, background: color }} />
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {!perf && !conv && (
+                <p className="text-center py-24 text-slate-600">No call data for this period.</p>
+              )}
+            </>
           )}
         </div>
       )}

@@ -45,6 +45,7 @@ def build_template_context(
             select(Quote).where(
                 Quote.id == quote_id,
                 Quote.company_id == company_id,
+                Quote.deleted_at.is_(None),
             )
         ).first()
         if quote:

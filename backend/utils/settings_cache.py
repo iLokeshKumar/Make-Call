@@ -1,7 +1,7 @@
 import time
 from typing import Dict, Optional, Tuple
 
-# (value, expires_at) — expires_at is a float epoch second, or None for no expiry
+
 _CacheEntry = Tuple[str, Optional[float]]
 _cache: Dict[Optional[int], Dict[str, _CacheEntry]] = {}
 

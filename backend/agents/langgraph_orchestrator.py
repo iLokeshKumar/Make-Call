@@ -1,13 +1,34 @@
 """
-Rio multi-agent workflow powered by LangGraph.
+Rio CRM — Pre/Post Call Orchestration Shim  (agents/langgraph_orchestrator.py)
+===============================================================================
 
-Flow:
-  Pre-call:   researcher_agent → voice_agent (placeholder — real call happens in main.py)
-  Post-call:  summarizer_agent → decision → book_demo_agent | nurture_agent → END
+This module is ACTIVE and serves two purposes:
 
-Wire-up:
-  - Pre-call:  call run_researcher(lead_id, company_id, actor_user_id) before dialing
-  - Post-call: call run_post_call_workflow(...) from post_call_service.py after transcript ready
+1. Compatibility shim
+   Exposes the original public entry points that external code may import:
+     run_researcher(lead_id, company_id, actor_user_id) → dict
+     run_post_call_workflow(lead_id, company_id, ...)    → dict
+   Both delegate to the optimised specialist graphs first, then fall back
+   to the inline node implementations here if those graphs fail.
+
+2. Fallback node implementations
+   Contains standalone Python functions (no LLM dependency) for the full
+   post-call workflow:
+     researcher_agent   — enrich + score lead
+     voice_agent        — routing decision (book_demo / send_followup / none)
+     summarizer_agent   — save call summary to CRM
+     book_demo_agent    — update lead status + send demo confirmation email
+     nurture_agent      — update lead status for non-demo outcomes
+   These run synchronously and are used when LangGraph/LLM is unavailable.
+
+Relationship to other orchestration files
+-----------------------------------------
+  agents/graph.py              — live voice-call chatbot (ReAct + tools)
+  agents/pre_call_graph.py     — optimised pre-call LangGraph workflow
+  agents/post_call_graph.py    — optimised post-call LangGraph workflow
+  agents/orchestrator.py       — master multi-agent supervisor (9 agents)
+
+Do NOT delete this file — it is the guaranteed-available fallback layer.
 """
 import logging
 from typing import TypedDict, List, Optional
@@ -60,7 +81,7 @@ def researcher_agent(state: AgentState) -> AgentState:
     """
     logger.info("[RESEARCHER] Enriching lead %s for company %s", state["lead_id"], state["company_id"])
     try:
-        from services.demand_generation_service import enrich_lead_if_needed, score_lead
+        from services.leads.demand_generation_service import enrich_lead_if_needed, score_lead
         with Session(engine) as session:
             enrich_lead_if_needed(
                 session=session,
@@ -85,7 +106,7 @@ def researcher_agent(state: AgentState) -> AgentState:
     return state
 
 
-# VOICE AGENT — pass-through (real call happens in main.py / voice_pipeline.py)
+# VOICE AGENT — pass-through
 
 def voice_agent(state: AgentState) -> AgentState:
     """
@@ -197,7 +218,7 @@ def nurture_agent(state: AgentState) -> AgentState:
     return state
 
 
-# GRAPH BUILDER
+# GRAPH — compiled once at module level (not rebuilt per call)
 
 def _build_post_call_graph():
     """
@@ -221,37 +242,32 @@ def _build_post_call_graph():
     workflow.add_edge("nurture_agent", END)
     return workflow.compile()
 
+# Compiled once — reused across all invocations
+_post_call_app = _build_post_call_graph()
+
 
 # PUBLIC ENTRY POINTS
 
 async def run_researcher(lead_id: int, company_id: int, actor_user_id: int) -> dict:
     """
-    Pre-call: enrich + score the lead. Call from dialer_service before placing a call.
-    Returns the enriched icp_score and a minimal state snapshot.
-    Works even without langgraph installed (calls researcher_agent directly).
+    Pre-call entry point — delegates to pre_call_graph.run_pre_call_workflow().
+    Kept for backward compatibility with dialer_service.py.
     """
-    state: AgentState = {
-        "lead_id": lead_id,
-        "company_id": company_id,
-        "actor_user_id": actor_user_id,
-        "lead_name": "",
-        "lead_email": "",
-        "lead_phone": "",
-        "call_transcript": None,
-        "call_duration": 0,
-        "icp_score": 0.5,
-        "bant_answers": {},
-        "next_action": "",
-        "appointment_id": None,
-        "follow_up_sent": False,
-        "call_outcome": None,
-        "sentiment": None,
-        "pain_points": [],
-        "questions_asked": [],
-        "timestamp": "",
-    }
-    result = researcher_agent(state)
-    return {"lead_id": lead_id, "icp_score": result["icp_score"]}
+    try:
+        from agents.pre_call_graph import run_pre_call_workflow
+        return await run_pre_call_workflow(lead_id, company_id, actor_user_id)
+    except Exception as exc:
+        logger.warning("[Orchestrator] pre_call_graph failed, running researcher_agent directly: %s", exc)
+        state: AgentState = {
+            "lead_id": lead_id, "company_id": company_id, "actor_user_id": actor_user_id,
+            "lead_name": "", "lead_email": "", "lead_phone": "",
+            "call_transcript": None, "call_duration": 0, "icp_score": 0.5,
+            "bant_answers": {}, "next_action": "", "appointment_id": None,
+            "follow_up_sent": False, "call_outcome": None, "sentiment": None,
+            "pain_points": [], "questions_asked": [], "timestamp": "",
+        }
+        result = researcher_agent(state)
+        return {"lead_id": lead_id, "icp_score": result["icp_score"]}
 
 
 async def run_post_call_workflow(
@@ -270,43 +286,31 @@ async def run_post_call_workflow(
     bant_answers: dict,
 ) -> dict:
     """
-    Post-call: run summarizer → decision → booking|nurture.
-    Designed to be called from post_call_service.py via asyncio.create_task().
-    Falls back to direct node calls if langgraph is not installed.
+    Post-call entry point — delegates to post_call_graph.run_post_call_workflow().
+    Kept for backward compatibility with post_call_service.py.
     """
+    try:
+        from agents.post_call_graph import run_post_call_workflow as _run
+        return await _run(
+            lead_id=lead_id, company_id=company_id, actor_user_id=actor_user_id,
+            lead_name=lead_name, lead_email=lead_email, call_transcript=call_transcript,
+            call_duration=call_duration, call_outcome=call_outcome, sentiment=sentiment,
+            icp_score=icp_score, pain_points=pain_points, questions_asked=questions_asked,
+            bant_answers=bant_answers,
+        )
+    except Exception as exc:
+        logger.warning("[Orchestrator] post_call_graph failed, running nodes directly: %s", exc)
+
+    # Fallback: legacy node execution
     state: AgentState = {
-        "lead_id": lead_id,
-        "company_id": company_id,
-        "actor_user_id": actor_user_id,
-        "lead_name": lead_name,
-        "lead_email": lead_email,
-        "lead_phone": "",
-        "call_transcript": call_transcript,
-        "call_duration": call_duration,
-        "icp_score": icp_score,
-        "bant_answers": bant_answers,
-        "next_action": "",
-        "appointment_id": None,
-        "follow_up_sent": False,
-        "call_outcome": call_outcome,
-        "sentiment": sentiment,
-        "pain_points": pain_points,
-        "questions_asked": questions_asked,
+        "lead_id": lead_id, "company_id": company_id, "actor_user_id": actor_user_id,
+        "lead_name": lead_name, "lead_email": lead_email, "lead_phone": "",
+        "call_transcript": call_transcript, "call_duration": call_duration,
+        "icp_score": icp_score, "bant_answers": bant_answers, "next_action": "",
+        "appointment_id": None, "follow_up_sent": False, "call_outcome": call_outcome,
+        "sentiment": sentiment, "pain_points": pain_points, "questions_asked": questions_asked,
         "timestamp": datetime.now().isoformat(),
     }
-
-    if _LANGGRAPH_AVAILABLE:
-        try:
-            app = _build_post_call_graph()
-            if app:
-                final = await app.ainvoke(state)
-                logger.info("[LangGraph] Post-call workflow done. next_action=%s follow_up_sent=%s",
-                            final.get("next_action"), final.get("follow_up_sent"))
-                return dict(final)
-        except Exception as exc:
-            logger.warning("[LangGraph] Graph execution failed, running nodes directly: %s", exc)
-
-    # Fallback: run nodes sequentially without langgraph
     state = voice_agent(state)
     state = summarizer_agent(state)
     next_node = determine_next_action(state)
@@ -314,7 +318,6 @@ async def run_post_call_workflow(
         state = book_demo_agent(state)
     elif next_node == "nurture_agent":
         state = nurture_agent(state)
-
     return {
         "lead_id": state["lead_id"],
         "next_action": state["next_action"],

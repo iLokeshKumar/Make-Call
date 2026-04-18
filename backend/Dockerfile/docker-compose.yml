@@ -1,0 +1,11 @@
+services:
+  api:
+    build: ./backend
+    command: uvicorn main:app --host 0.0.0.0 --port 6060
+  worker:
+    build: ./backend
+    command: python run_automation_worker.py
+  db:
+    image: postgres:18
+  redis:
+    image: redis:7

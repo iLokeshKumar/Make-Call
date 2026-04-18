@@ -1,10 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { BarChart2, ChevronDown, ChevronUp, List, Loader2, Play, Pause, Plus, Users } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  BarChart2, ChevronDown, ChevronUp, GripVertical, List, Loader2,
+  Mail, MessageCircle, Pause, Pencil, Phone, Play, Plus, Trash2, Users, X,
+} from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+
+// Types
 
 type Campaign = {
   id: number;
@@ -20,15 +25,293 @@ type CampaignStep = {
   channel: string;
   template_id?: number | null;
   delay_hours: number;
-  message_body?: string | null;
+  objective?: string | null;
 };
 
 type Lead = { id: number; name: string; normalized_phone: string };
+type RecipientRow = {
+  id: number; lead_id: number; status: string;
+  current_step: number; next_run_at?: string | null; last_contact_at?: string | null;
+};
+
+// Helpers
 
 function humanize(v?: string | null) {
   if (!v) return "—";
   return v.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 }
+
+function delayLabel(hours: number) {
+  if (hours === 0) return "Immediately";
+  if (hours < 24) return `Wait ${hours}h`;
+  const days = Math.floor(hours / 24);
+  const rem = hours % 24;
+  return rem > 0 ? `Wait ${days}d ${rem}h` : `Wait ${days}d`;
+}
+
+const CHANNEL_META: Record<string, { label: string; Icon: React.ElementType; color: string }> = {
+  call:      { label: "Call",      Icon: Phone,         color: "text-emerald-600 dark:text-emerald-400" },
+  email:     { label: "Email",     Icon: Mail,          color: "text-blue-600 dark:text-blue-400" },
+  whatsapp:  { label: "WhatsApp",  Icon: MessageCircle, color: "text-green-600 dark:text-green-400" },
+};
+
+function ChannelIcon({ channel }: { channel: string }) {
+  const meta = CHANNEL_META[channel] ?? { Icon: Phone, color: "text-slate-500" };
+  return <meta.Icon className={`h-4 w-4 ${meta.color}`} />;
+}
+
+// Sequence Builder
+
+interface SequenceBuilderProps {
+  campaignId: number;
+  steps: CampaignStep[];
+  loading: boolean;
+  token: string | null;
+  onRefresh: () => void;
+}
+
+function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: SequenceBuilderProps) {
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+
+  // Drag state
+  const dragSrcIdx = useRef<number | null>(null);
+  const [dropTargetIdx, setDropTargetIdx] = useState<number | null>(null);
+
+  // Inline edit state
+  const [editId, setEditId] = useState<number | null>(null);
+  const [editChannel, setEditChannel] = useState("call");
+  const [editDelay, setEditDelay] = useState(0);
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Add step state
+  const [addSaving, setAddSaving] = useState<string | null>(null); // channel being added
+  const [stepMsg, setStepMsg] = useState<string | null>(null);
+
+  function openEdit(step: CampaignStep) {
+    setEditId(step.id);
+    setEditChannel(step.channel);
+    setEditDelay(step.delay_hours);
+  }
+
+  async function handleDelete(stepId: number) {
+    if (!confirm("Delete this step?")) return;
+    const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps/${stepId}`, {
+      method: "DELETE",
+      headers,
+    });
+    if (res.ok || res.status === 204) { onRefresh(); }
+    else { setStepMsg("Delete failed"); }
+  }
+
+  async function handleSaveEdit() {
+    if (editId == null) return;
+    setEditSaving(true);
+    try {
+      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps/${editId}`, {
+        method: "PATCH",
+        headers,
+        body: JSON.stringify({ channel: editChannel, delay_hours: editDelay }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "Save failed");
+      setEditId(null);
+      onRefresh();
+    } catch (e) {
+      setStepMsg(e instanceof Error ? e.message : "Save failed");
+    } finally {
+      setEditSaving(false);
+    }
+  }
+
+  async function handleAddStep(channel: string) {
+    setAddSaving(channel);
+    try {
+      const nextOrder = steps.length + 1;
+      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ channel, delay_hours: 24, step_order: nextOrder }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "Add failed");
+      onRefresh();
+    } catch (e) {
+      setStepMsg(e instanceof Error ? e.message : "Add failed");
+    } finally {
+      setAddSaving(null);
+    }
+  }
+
+
+  function onDragStart(idx: number) {
+    dragSrcIdx.current = idx;
+  }
+
+  function onDragOver(e: React.DragEvent, idx: number) {
+    e.preventDefault();
+    setDropTargetIdx(idx);
+  }
+
+  function onDragLeave() {
+    setDropTargetIdx(null);
+  }
+
+  async function onDrop(e: React.DragEvent, targetIdx: number) {
+    e.preventDefault();
+    setDropTargetIdx(null);
+    const srcIdx = dragSrcIdx.current;
+    dragSrcIdx.current = null;
+    if (srcIdx == null || srcIdx === targetIdx) return;
+
+    // Compute new order
+    const reordered = [...steps];
+    const [moved] = reordered.splice(srcIdx, 1);
+    reordered.splice(targetIdx, 0, moved);
+    const step_ids = reordered.map((s) => s.id);
+
+    const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps/reorder`, {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ step_ids }),
+    });
+    if (res.ok) { onRefresh(); }
+    else { setStepMsg("Reorder failed"); }
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-sm text-slate-500 py-2">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading steps…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {stepMsg && (
+        <p className="text-xs text-red-500">{stepMsg}</p>
+      )}
+
+      {/* Step cards */}
+      {steps.length === 0 && (
+        <p className="text-sm text-slate-500 dark:text-slate-400">No steps yet. Add one below.</p>
+      )}
+
+      <div className="space-y-1.5">
+        {steps.map((step, idx) => {
+          const meta = CHANNEL_META[step.channel] ?? { label: step.channel, color: "text-slate-500" };
+          const isEditing = editId === step.id;
+          const isDragTarget = dropTargetIdx === idx;
+
+          return (
+            <div
+              key={step.id}
+              draggable
+              onDragStart={() => onDragStart(idx)}
+              onDragOver={(e) => onDragOver(e, idx)}
+              onDragLeave={onDragLeave}
+              onDrop={(e) => onDrop(e, idx)}
+              className={`group flex items-center gap-3 rounded-xl border bg-white px-3 py-2.5 transition-all dark:bg-slate-900/40
+                ${isDragTarget
+                  ? "border-violet-400 shadow-md shadow-violet-200/40 dark:border-violet-500 dark:shadow-violet-500/20"
+                  : "border-slate-200 dark:border-white/10"
+                }`}
+            >
+              {/* Drag handle */}
+              <GripVertical className="h-4 w-4 flex-shrink-0 cursor-grab text-slate-300 group-hover:text-slate-400 active:cursor-grabbing dark:text-slate-600 dark:group-hover:text-slate-500" />
+
+              {/* Step number */}
+              <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-violet-100 text-xs font-bold text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+                {step.step_order}
+              </span>
+
+              {isEditing ? (
+                /* Inline edit row */
+                <>
+                  <select
+                    value={editChannel}
+                    onChange={(e) => setEditChannel(e.target.value)}
+                    className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm dark:border-white/10 dark:bg-slate-800"
+                  >
+                    {Object.entries(CHANNEL_META).map(([key, m]) => (
+                      <option key={key} value={key}>{m.label}</option>
+                    ))}
+                  </select>
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-xs text-slate-400">Wait</span>
+                    <input
+                      type="number"
+                      value={editDelay}
+                      min={0}
+                      onChange={(e) => setEditDelay(Number(e.target.value))}
+                      className="w-16 rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm dark:border-white/10 dark:bg-slate-800"
+                    />
+                    <span className="text-xs text-slate-400">h</span>
+                  </div>
+                  <div className="ml-auto flex items-center gap-1.5">
+                    <button
+                      onClick={handleSaveEdit}
+                      disabled={editSaving}
+                      className="rounded-lg bg-violet-600 px-2.5 py-1 text-xs font-semibold text-white disabled:opacity-60"
+                    >
+                      {editSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : "Save"}
+                    </button>
+                    <button
+                      onClick={() => setEditId(null)}
+                      className="rounded-lg border border-slate-200 px-2.5 py-1 text-xs text-slate-500 dark:border-white/10"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                </>
+              ) : (
+                /* Display row */
+                <>
+                  <ChannelIcon channel={step.channel} />
+                  <span className={`font-medium text-sm ${meta.color}`}>{meta.label}</span>
+                  <span className="text-xs text-slate-400 dark:text-slate-500">·</span>
+                  <span className="text-xs text-slate-500 dark:text-slate-400">{delayLabel(step.delay_hours)}</span>
+                  <div className="ml-auto flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                    <button
+                      onClick={() => openEdit(step)}
+                      title="Edit step"
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-700 dark:hover:text-slate-200"
+                    >
+                      <Pencil className="h-3.5 w-3.5" />
+                    </button>
+                    <button
+                      onClick={() => handleDelete(step.id)}
+                      title="Delete step"
+                      className="rounded-lg p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Add step buttons */}
+      <div className="flex flex-wrap items-center gap-2 pt-1">
+        <span className="text-xs text-slate-400">Add step:</span>
+        {Object.entries(CHANNEL_META).map(([key, meta]) => (
+          <button
+            key={key}
+            onClick={() => handleAddStep(key)}
+            disabled={addSaving === key}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:border-violet-400 hover:text-violet-700 disabled:opacity-60 dark:border-white/10 dark:text-slate-400 dark:hover:border-violet-400 dark:hover:text-violet-300"
+          >
+            {addSaving === key ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
+            {meta.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// Main page
 
 export default function CampaignsPage() {
   const { token, sessionTimeout } = useAuth();
@@ -37,7 +320,6 @@ export default function CampaignsPage() {
   const [loading, setLoading] = useState(true);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // expanded campaign state
   const [expanded, setExpanded] = useState<number | null>(null);
   const [steps, setSteps] = useState<Record<number, CampaignStep[]>>({});
   const [stepsLoading, setStepsLoading] = useState<Record<number, boolean>>({});
@@ -47,13 +329,6 @@ export default function CampaignsPage() {
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
   const [createSaving, setCreateSaving] = useState(false);
-
-  // add step form (per campaign)
-  const [addingStepFor, setAddingStepFor] = useState<number | null>(null);
-  const [stepChannel, setStepChannel] = useState("call");
-  const [stepBody, setStepBody] = useState("");
-  const [stepDelay, setStepDelay] = useState(24);
-  const [stepSaving, setStepSaving] = useState(false);
 
   // enroll leads modal
   const [enrollFor, setEnrollFor] = useState<number | null>(null);
@@ -65,15 +340,57 @@ export default function CampaignsPage() {
   const [actionLoading, setActionLoading] = useState<Record<number, boolean>>({});
 
   // email reports
-  const [emailReports, setEmailReports] = useState<Record<number, { emails_sent: number; opens: number; clicks: number; unsubscribes: number; open_rate: number; click_rate: number; unsubscribe_rate: number } | null>>({});
+  const [emailReports, setEmailReports] = useState<Record<number, {
+    emails_sent: number; opens: number; clicks: number; unsubscribes: number;
+    open_rate: number; click_rate: number; unsubscribe_rate: number;
+  } | null>>({});
   const [reportLoading, setReportLoading] = useState<Record<number, boolean>>({});
   const [showReport, setShowReport] = useState<Record<number, boolean>>({});
 
   // recipients
-  type RecipientRow = { id: number; lead_id: number; status: string; current_step: number; next_run_at?: string | null; last_contact_at?: string | null; };
   const [recipients, setRecipients] = useState<Record<number, RecipientRow[]>>({});
   const [recipientsLoading, setRecipientsLoading] = useState<Record<number, boolean>>({});
   const [showRecipients, setShowRecipients] = useState<Record<number, boolean>>({});
+
+  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+
+  // Data fetching
+
+  const fetchCampaigns = useCallback(async () => {
+    if (!token) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`${API_BASE}/campaigns`, { headers: { Authorization: `Bearer ${token}` } });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) throw new Error("Failed to load campaigns");
+      const data = await res.json();
+      setCampaigns(Array.isArray(data) ? data : data.items || []);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Could not load campaigns");
+    } finally {
+      setLoading(false);
+    }
+  }, [token, sessionTimeout]);
+
+  useEffect(() => { fetchCampaigns(); }, [fetchCampaigns]);
+
+  async function fetchSteps(campaignId: number) {
+    setStepsLoading((s) => ({ ...s, [campaignId]: true }));
+    try {
+      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps`, { headers: { Authorization: `Bearer ${token}` } });
+      if (!res.ok) return;
+      const data = await res.json();
+      setSteps((s) => ({ ...s, [campaignId]: data }));
+    } finally {
+      setStepsLoading((s) => ({ ...s, [campaignId]: false }));
+    }
+  }
+
+  function toggleExpand(id: number) {
+    if (expanded === id) { setExpanded(null); return; }
+    setExpanded(id);
+    if (!steps[id]) fetchSteps(id);
+  }
 
   async function fetchEmailReport(campaignId: number) {
     if (reportLoading[campaignId]) return;
@@ -109,50 +426,7 @@ export default function CampaignsPage() {
     setShowRecipients((r) => ({ ...r, [id]: !r[id] }));
   }
 
-  const recipientStatusColor: Record<string, string> = {
-    active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
-    paused: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
-    completed: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
-    pending: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-    failed: "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300",
-  };
-
-  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
-
-  const fetchCampaigns = useCallback(async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/campaigns`, { headers: { Authorization: `Bearer ${token}` } });
-      if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) throw new Error("Failed to load campaigns");
-      const data = await res.json();
-      setCampaigns(Array.isArray(data) ? data : data.items || []);
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Could not load campaigns");
-    } finally {
-      setLoading(false);
-    }
-  }, [token, sessionTimeout]);
-
-  useEffect(() => { fetchCampaigns(); }, [fetchCampaigns]);
-
-  async function fetchSteps(campaignId: number) {
-    setStepsLoading((s) => ({ ...s, [campaignId]: true }));
-    try {
-      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps`, { headers: { Authorization: `Bearer ${token}` } });
-      if (!res.ok) return;
-      const data = await res.json(); setSteps((s) => ({ ...s, [campaignId]: data }));
-    } finally {
-      setStepsLoading((s) => ({ ...s, [campaignId]: false }));
-    }
-  }
-
-  function toggleExpand(id: number) {
-    if (expanded === id) { setExpanded(null); return; }
-    setExpanded(id);
-    if (!steps[id]) fetchSteps(id);
-  }
+  // Actions
 
   async function handleCreateCampaign() {
     if (!newName.trim()) return;
@@ -173,25 +447,6 @@ export default function CampaignsPage() {
       setMsg(e instanceof Error ? e.message : "Failed to create campaign");
     } finally {
       setCreateSaving(false);
-    }
-  }
-
-  async function handleAddStep(campaignId: number) {
-    setStepSaving(true);
-    try {
-      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps`, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({ channel: stepChannel, message_body: stepBody.trim() || null, delay_hours: stepDelay }),
-      });
-      if (!res.ok) throw new Error((await res.json()).detail || "Failed to add step");
-      setAddingStepFor(null); setStepChannel("call"); setStepBody(""); setStepDelay(24);
-      fetchSteps(campaignId);
-      setMsg("Step added.");
-    } catch (e) {
-      setMsg(e instanceof Error ? e.message : "Failed to add step");
-    } finally {
-      setStepSaving(false);
     }
   }
 
@@ -251,12 +506,23 @@ export default function CampaignsPage() {
     }
   }
 
+  // Styles
+
   const statusColor: Record<string, string> = {
-    active: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
-    paused: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
-    draft: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+    active:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
+    paused:    "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
+    draft:     "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
     completed: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
   };
+  const recipientStatusColor: Record<string, string> = {
+    active:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
+    paused:    "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
+    completed: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
+    pending:   "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
+    failed:    "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300",
+  };
+
+  // Render
 
   return (
     <div className="space-y-6 pb-8">
@@ -316,7 +582,9 @@ export default function CampaignsPage() {
 
       {/* Campaign list */}
       {loading ? (
-        <div className="flex items-center justify-center py-16 text-slate-500"><Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading...</div>
+        <div className="flex items-center justify-center py-16 text-slate-500">
+          <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading…
+        </div>
       ) : campaigns.length === 0 ? (
         <div className="rounded-2xl glass border border-dashed border-slate-300 px-6 py-16 text-center text-slate-500 dark:border-white/10">
           No campaigns yet. Create your first one above.
@@ -334,7 +602,9 @@ export default function CampaignsPage() {
                       {humanize(campaign.status)}
                     </span>
                   </div>
-                  {campaign.description && <p className="text-sm text-slate-500 dark:text-slate-400">{campaign.description}</p>}
+                  {campaign.description && (
+                    <p className="text-sm text-slate-500 dark:text-slate-400">{campaign.description}</p>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap gap-2">
@@ -377,92 +647,33 @@ export default function CampaignsPage() {
                     onClick={() => toggleExpand(campaign.id)}
                     className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 dark:border-white/10 dark:text-slate-200"
                   >
-                    Steps {expanded === campaign.id ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                    Sequence {expanded === campaign.id ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
                   </button>
                 </div>
               </div>
 
-              {/* Steps panel */}
+              {/* Sequence Builder panel */}
               {expanded === campaign.id && (
-                <div className="border-t border-slate-200 bg-slate-50/50 p-5 dark:border-white/10 dark:bg-slate-900/30 space-y-4">
-                  {stepsLoading[campaign.id] ? (
-                    <div className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading steps...</div>
-                  ) : (steps[campaign.id] || []).length === 0 ? (
-                    <p className="text-sm text-slate-500">No steps yet. Add one below.</p>
-                  ) : (
-                    <div className="space-y-2">
-                      {(steps[campaign.id] || []).map((step) => (
-                        <div key={step.id} className="flex items-center gap-3 rounded-xl border border-slate-200 bg-white px-4 py-3 dark:border-white/10 dark:bg-slate-900/40">
-                          <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-violet-100 text-xs font-bold text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
-                            {step.step_order}
-                          </span>
-                          <div className="flex-1 min-w-0">
-                            <span className="font-medium text-slate-800 dark:text-slate-100 capitalize">{step.channel}</span>
-                            {step.message_body && <span className="ml-2 text-sm text-slate-500 dark:text-slate-400 truncate">— {step.message_body}</span>}
-                          </div>
-                          <span className="text-xs text-slate-400 whitespace-nowrap">+{step.delay_hours}h delay</span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-
-                  {addingStepFor === campaign.id ? (
-                    <div className="space-y-3 rounded-xl border border-violet-200 bg-violet-50/60 p-4 dark:border-violet-500/20 dark:bg-violet-500/5">
-                      <h4 className="text-sm font-semibold text-slate-800 dark:text-slate-100">Add step</h4>
-                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-                        <select
-                          value={stepChannel}
-                          onChange={(e) => setStepChannel(e.target.value)}
-                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                        >
-                          <option value="call">Call</option>
-                          <option value="whatsapp">WhatsApp</option>
-                          <option value="email">Email</option>
-                        </select>
-                        <input
-                          type="number"
-                          value={stepDelay}
-                          onChange={(e) => setStepDelay(Number(e.target.value))}
-                          placeholder="Delay (hours)"
-                          min={0}
-                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                        />
-                        <input
-                          value={stepBody}
-                          onChange={(e) => setStepBody(e.target.value)}
-                          placeholder="Message (optional)"
-                          className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
-                        />
-                      </div>
-                      <div className="flex gap-2">
-                        <button
-                          onClick={() => handleAddStep(campaign.id)}
-                          disabled={stepSaving}
-                          className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-3 py-2 text-sm font-semibold text-white disabled:opacity-60"
-                        >
-                          {stepSaving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />} Save step
-                        </button>
-                        <button onClick={() => setAddingStepFor(null)} className="rounded-xl border border-slate-200 px-3 py-2 text-sm text-slate-600 dark:border-white/10 dark:text-slate-300">
-                          Cancel
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <button
-                      onClick={() => setAddingStepFor(campaign.id)}
-                      className="inline-flex items-center gap-2 rounded-xl border border-dashed border-slate-300 px-3 py-2 text-sm text-slate-500 hover:border-violet-400 hover:text-violet-600 dark:border-white/10"
-                    >
-                      <Plus className="h-3 w-3" /> Add step
-                    </button>
-                  )}
+                <div className="border-t border-slate-200 bg-slate-50/50 p-5 dark:border-white/10 dark:bg-slate-900/30">
+                  <p className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">
+                    Sequence — drag to reorder
+                  </p>
+                  <SequenceBuilder
+                    campaignId={campaign.id}
+                    steps={steps[campaign.id] || []}
+                    loading={!!stepsLoading[campaign.id]}
+                    token={token}
+                    onRefresh={() => fetchSteps(campaign.id)}
+                  />
                 </div>
               )}
+
               {/* Recipients panel */}
               {showRecipients[campaign.id] && (
                 <div className="border-t border-slate-200 bg-blue-50/30 p-5 dark:border-white/10 dark:bg-blue-900/10">
                   <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Recipients</h4>
                   {recipientsLoading[campaign.id] ? (
-                    <div className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading...</div>
+                    <div className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
                   ) : !recipients[campaign.id] || recipients[campaign.id].length === 0 ? (
                     <p className="text-sm text-slate-500">No recipients enrolled yet.</p>
                   ) : (
@@ -481,7 +692,11 @@ export default function CampaignsPage() {
                           {recipients[campaign.id].map((r) => (
                             <tr key={r.id} className="border-t border-slate-100 dark:border-white/5">
                               <td className="px-4 py-2.5 font-mono text-xs text-violet-600 dark:text-violet-400">#{r.lead_id}</td>
-                              <td className="px-4 py-2.5"><span className={`rounded-full px-2 py-0.5 text-xs font-medium ${recipientStatusColor[r.status] || recipientStatusColor.pending}`}>{r.status}</span></td>
+                              <td className="px-4 py-2.5">
+                                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${recipientStatusColor[r.status] || recipientStatusColor.pending}`}>
+                                  {r.status}
+                                </span>
+                              </td>
                               <td className="px-4 py-2.5 text-slate-600 dark:text-slate-300">{r.current_step}</td>
                               <td className="px-4 py-2.5 text-xs text-slate-500">{r.next_run_at ? new Date(r.next_run_at).toLocaleString() : "—"}</td>
                               <td className="px-4 py-2.5 text-xs text-slate-500">{r.last_contact_at ? new Date(r.last_contact_at).toLocaleString() : "—"}</td>
@@ -499,15 +714,15 @@ export default function CampaignsPage() {
                 <div className="border-t border-slate-200 bg-emerald-50/30 p-5 dark:border-white/10 dark:bg-emerald-900/10">
                   <h4 className="mb-3 text-xs font-bold uppercase tracking-widest text-slate-400">Email Report</h4>
                   {reportLoading[campaign.id] ? (
-                    <div className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading...</div>
+                    <div className="flex items-center gap-2 text-sm text-slate-500"><Loader2 className="h-4 w-4 animate-spin" /> Loading…</div>
                   ) : !emailReports[campaign.id] ? (
                     <p className="text-sm text-slate-500">No report data yet.</p>
                   ) : (
                     <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
                       {[
                         { label: "Emails Sent", value: emailReports[campaign.id]!.emails_sent, rate: null, color: "text-slate-700 dark:text-slate-200" },
-                        { label: "Opens", value: emailReports[campaign.id]!.opens, rate: emailReports[campaign.id]!.open_rate, color: "text-blue-600 dark:text-blue-400" },
-                        { label: "Clicks", value: emailReports[campaign.id]!.clicks, rate: emailReports[campaign.id]!.click_rate, color: "text-violet-600 dark:text-violet-400" },
+                        { label: "Opens",        value: emailReports[campaign.id]!.opens,        rate: emailReports[campaign.id]!.open_rate,        color: "text-blue-600 dark:text-blue-400" },
+                        { label: "Clicks",       value: emailReports[campaign.id]!.clicks,       rate: emailReports[campaign.id]!.click_rate,       color: "text-violet-600 dark:text-violet-400" },
                         { label: "Unsubscribes", value: emailReports[campaign.id]!.unsubscribes, rate: emailReports[campaign.id]!.unsubscribe_rate, color: "text-red-600 dark:text-red-400" },
                       ].map((stat) => (
                         <div key={stat.label} className="rounded-xl border border-slate-200 bg-white p-3 dark:border-white/10 dark:bg-slate-900/40">
@@ -537,7 +752,9 @@ export default function CampaignsPage() {
                   <input
                     type="checkbox"
                     checked={selectedLeads.includes(lead.id)}
-                    onChange={(e) => setSelectedLeads((s) => e.target.checked ? [...s, lead.id] : s.filter((id) => id !== lead.id))}
+                    onChange={(e) =>
+                      setSelectedLeads((s) => e.target.checked ? [...s, lead.id] : s.filter((id) => id !== lead.id))
+                    }
                     className="h-4 w-4 rounded border-slate-300 text-violet-600"
                   />
                   <span className="text-sm text-slate-800 dark:text-slate-100">{lead.name}</span>
@@ -551,9 +768,13 @@ export default function CampaignsPage() {
                 disabled={enrollSaving || selectedLeads.length === 0}
                 className="inline-flex items-center gap-2 rounded-xl bg-violet-600 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60"
               >
-                {enrollSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : null} Enroll {selectedLeads.length > 0 ? `(${selectedLeads.length})` : ""}
+                {enrollSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
+                Enroll {selectedLeads.length > 0 ? `(${selectedLeads.length})` : ""}
               </button>
-              <button onClick={() => setEnrollFor(null)} className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 dark:border-white/10 dark:text-slate-300">
+              <button
+                onClick={() => setEnrollFor(null)}
+                className="rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 dark:border-white/10 dark:text-slate-300"
+              >
                 Cancel
               </button>
             </div>

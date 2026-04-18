@@ -7,6 +7,7 @@ from auth import PermissionChecker, get_current_user
 from database import get_session
 from models.models import (
     Appointment,
+    CallCoachScore,
     CallTask,
     CampaignRecipient,
     Interaction,
@@ -22,9 +23,10 @@ from models.models import (
     User,
     utc_now,
 )
-from services.auth_service import user_has_any_permission
-from services.demand_generation_service import enrich_lead_if_needed, score_lead, trigger_new_lead_outreach
-from services.opt_out_service import unsubscribe_lead
+from utils.timezone_utils import detect_timezone
+from services.core.auth_service import user_has_any_permission
+from services.leads.demand_generation_service import enrich_lead_if_needed, score_lead, trigger_new_lead_outreach
+from services.leads.opt_out_service import unsubscribe_lead
 
 router = APIRouter(prefix="/crm", tags=["CRM"])
 
@@ -47,31 +49,59 @@ async def create_lead(
     if not owner:
         raise HTTPException(status_code=400, detail="Invalid lead owner")
 
+    phone = data.normalized_phone.strip()
+
+    # Check for active duplicate
     existing = session.exec(
         select(Lead).where(
             Lead.company_id == current_user.company_id,
-            Lead.normalized_phone == data.normalized_phone.strip(),
+            Lead.normalized_phone == phone,
             Lead.deleted_at.is_(None),
         )
     ).first()
     if existing:
         raise HTTPException(status_code=400, detail="Lead already exists for this company")
 
-    lead = Lead(
-        company_id=current_user.company_id,
-        owner_user_id=owner_user_id,
-        name=data.name.strip(),
-        normalized_phone=data.normalized_phone.strip(),
-        email=data.email.strip().lower() if data.email else None,
-        status=data.status or "new",
-        notes=data.notes,
-        source="manual",
-        created_by=current_user.id,
-        updated_by=current_user.id,
-    )
-    session.add(lead)
-    session.commit()
-    session.refresh(lead)
+    # Restore soft-deleted lead if one exists with the same phone
+    deleted_lead = session.exec(
+        select(Lead).where(
+            Lead.company_id == current_user.company_id,
+            Lead.normalized_phone == phone,
+            Lead.deleted_at.isnot(None),
+        )
+    ).first()
+
+    if deleted_lead:
+        deleted_lead.deleted_at = None
+        deleted_lead.name = data.name.strip()
+        deleted_lead.email = data.email.strip().lower() if data.email else deleted_lead.email
+        deleted_lead.owner_user_id = owner_user_id
+        deleted_lead.status = data.status or "new"
+        deleted_lead.qualification_status = "unqualified"
+        deleted_lead.notes = data.notes
+        deleted_lead.ism_stage = "new"
+        deleted_lead.updated_by = current_user.id
+        deleted_lead.updated_at = utc_now()
+        session.add(deleted_lead)
+        session.commit()
+        session.refresh(deleted_lead)
+        lead = deleted_lead
+    else:
+        lead = Lead(
+            company_id=current_user.company_id,
+            owner_user_id=owner_user_id,
+            name=data.name.strip(),
+            normalized_phone=phone,
+            email=data.email.strip().lower() if data.email else None,
+            status=data.status or "new",
+            notes=data.notes,
+            source="manual",
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+        session.add(lead)
+        session.commit()
+        session.refresh(lead)
     try:
         trigger_new_lead_outreach(
             session=session,
@@ -557,7 +587,7 @@ async def get_best_call_times(
     if not lead:
         raise HTTPException(status_code=404, detail="Lead not found")
 
-    from services.predictive_dialer_service import get_best_call_windows
+    from services.call.predictive_dialer_service import get_best_call_windows
     return get_best_call_windows(
         session=session,
         company_id=current_user.company_id,
@@ -661,3 +691,154 @@ async def get_lead_deal_timeline(
     events.sort(key=lambda e: e.get("date") or "")
 
     return {"lead_id": lead_id, "events": events}
+
+
+@router.get("/leads/{lead_id}/context")
+async def get_lead_context(
+    lead_id: int,
+    interaction_limit: int = Query(30, ge=1, le=100),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Single-request comprehensive lead context bundle:
+    lead + interactions + call tasks + requirement + deal timeline
+    + feedback + opt-out channels + latest coach score + detected timezone.
+    Replaces 6 separate API calls on the lead detail page.
+    """
+    can_read_company = user_has_any_permission(session, current_user.id, {"lead.read_company"})
+    can_read_own     = user_has_any_permission(session, current_user.id, {"lead.read_own"})
+    if not can_read_company and not can_read_own:
+        raise HTTPException(status_code=403, detail="Permission denied")
+
+    lead_query = select(Lead).where(
+        Lead.id == lead_id,
+        Lead.company_id == current_user.company_id,
+        Lead.deleted_at.is_(None),
+    )
+    if not can_read_company:
+        lead_query = lead_query.where(Lead.owner_user_id == current_user.id)
+    lead = session.exec(lead_query).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    # Detect / confirm timezone
+    effective_tz = lead.timezone or detect_timezone(lead.city, lead.state, lead.country)
+
+    # Interactions (most recent first)
+    interactions = session.exec(
+        select(Interaction)
+        .where(Interaction.lead_id == lead_id, Interaction.company_id == current_user.company_id)
+        .order_by(Interaction.created_at.desc())
+        .limit(interaction_limit)
+    ).all()
+
+    # Call tasks
+    tasks = session.exec(
+        select(CallTask)
+        .where(CallTask.lead_id == lead_id, CallTask.company_id == current_user.company_id)
+        .order_by(CallTask.created_at.desc())
+        .limit(20)
+    ).all()
+
+    # Requirement
+    requirement = session.exec(
+        select(LeadRequirement).where(
+            LeadRequirement.lead_id == lead_id,
+            LeadRequirement.company_id == current_user.company_id,
+        )
+    ).first()
+
+    # Quotes (most recent 10) with line items
+    quotes_raw = session.exec(
+        select(Quote)
+        .where(Quote.lead_id == lead_id, Quote.company_id == current_user.company_id, Quote.deleted_at.is_(None))
+        .order_by(Quote.created_at.desc())
+        .limit(10)
+    ).all()
+    quote_ids = [q.id for q in quotes_raw]
+    all_items = session.exec(select(QuoteItem).where(QuoteItem.quote_id.in_(quote_ids))).all() if quote_ids else []
+    items_by_quote: dict[int, list] = {}
+    for it in all_items:
+        items_by_quote.setdefault(it.quote_id, []).append(it)
+
+    quotes = []
+    for q in quotes_raw:
+        quotes.append({
+            "id": q.id, "quote_number": q.quote_number, "status": q.status,
+            "currency": q.currency,
+            "total_amount": str(q.total_amount) if q.total_amount is not None else None,
+            "valid_until": q.valid_until.isoformat() if q.valid_until else None,
+            "sent_at": q.sent_at.isoformat() if q.sent_at else None,
+            "opened_at": q.opened_at.isoformat() if q.opened_at else None,
+            "accepted_at": q.accepted_at.isoformat() if q.accepted_at else None,
+            "rejected_at": q.rejected_at.isoformat() if q.rejected_at else None,
+            "notes": q.notes,
+            "created_at": q.created_at.isoformat() if q.created_at else None,
+            "items": [
+                {
+                    "product_name": i.product_name_snapshot, "sku": i.sku_snapshot,
+                    "quantity": i.quantity, "unit_price": str(i.unit_price),
+                    "discount_percent": str(i.discount_percent), "line_total": str(i.line_total),
+                }
+                for i in items_by_quote.get(q.id, [])
+            ],
+        })
+
+    # Appointments
+    appointments = session.exec(
+        select(Appointment)
+        .where(Appointment.lead_id == lead_id, Appointment.company_id == current_user.company_id)
+        .order_by(Appointment.appointment_time.asc())
+    ).all()
+
+    # Feedback
+    from models.models import Feedback  # local import to avoid circular issues
+    feedback = session.exec(
+        select(Feedback)
+        .where(Feedback.lead_id == lead_id, Feedback.company_id == current_user.company_id)
+        .order_by(Feedback.created_at.desc())
+        .limit(20)
+    ).all()
+
+    # Opt-out channels
+    opt_outs = session.exec(
+        select(OptOut).where(
+            OptOut.lead_id == lead_id, OptOut.company_id == current_user.company_id
+        )
+    ).all()
+    opt_out_channels = [o.channel for o in opt_outs]
+
+    # Latest coach score (most recent call interaction with a score)
+    latest_coach_score = session.exec(
+        select(CallCoachScore)
+        .where(CallCoachScore.lead_id == lead_id, CallCoachScore.company_id == current_user.company_id)
+        .order_by(CallCoachScore.id.desc())
+        .limit(1)
+    ).first()
+
+    return {
+        "lead": lead,
+        "effective_timezone": effective_tz,
+        "interactions": interactions,
+        "tasks": tasks,
+        "requirement": requirement,
+        "quotes": quotes,
+        "appointments": [
+            {
+                "id": a.id,
+                "appointment_time": a.appointment_time.isoformat() if a.appointment_time else None,
+                "status": a.status, "notes": a.notes,
+            }
+            for a in appointments
+        ],
+        "feedback": [
+            {
+                "id": f.id, "rating": f.rating, "comment": f.comment,
+                "source": f.source, "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in feedback
+        ],
+        "opt_out_channels": opt_out_channels,
+        "latest_coach_score": latest_coach_score,
+    }

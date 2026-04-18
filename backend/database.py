@@ -1,10 +1,16 @@
+import logging
 import os
-from typing import Generator
+from contextvars import ContextVar
+from typing import Generator, Optional
 
 from dotenv import load_dotenv
+from sqlalchemy import event, text as sa_text
+from sqlalchemy.orm import Session as _SASession
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from models.models import Permission, Role, RolePermission
+
+logger = logging.getLogger(__name__)
 
 current_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(current_dir, ".env"))
@@ -18,6 +24,31 @@ engine = create_engine(
     echo=True,
     pool_pre_ping=True,
 )
+
+rls_company_id: ContextVar[Optional[int]] = ContextVar("rls_company_id", default=None)
+
+
+_RLS_WARN_ENABLED = os.getenv("RLS_WARN_ON_MISSING", "1") == "1"
+
+
+@event.listens_for(_SASession, "after_begin", propagate=True)
+def _apply_rls_context(session: _SASession, transaction, connection) -> None:  # type: ignore[type-arg]
+    """
+    Fires once per transaction begin on every SQLAlchemy Session.
+    Injects SET LOCAL so the Postgres RLS policy can read it.
+    SET LOCAL is transaction-scoped — resets automatically on commit/rollback,
+    so pooled connections are never left with a stale company_id.
+    """
+    cid = rls_company_id.get()
+    if cid is not None:
+        connection.execute(sa_text(f"SET LOCAL app.current_company_id = {int(cid)}"))
+    elif _RLS_WARN_ENABLED:
+        logger.warning(
+            "DB session opened without rls_company_id — RLS policies will "
+            "see all rows. This is expected for init/migrations but not for "
+            "request or worker code.",
+            stacklevel=2,
+        )
 
 
 def get_session() -> Generator[Session, None, None]:
@@ -51,6 +82,7 @@ def seed_permissions(session: Session) -> None:
         ("settings.manage_company", "settings", "Manage company settings"),
         ("integrations.read_company", "integrations", "Read company integrations"),
         ("integrations.manage_company", "integrations", "Manage company integrations"),
+        ("analytics.read_own", "analytics", "Read own analytics"),
         ("analytics.read_company", "analytics", "Read company analytics"),
         ("campaign.read", "campaign", "Read campaigns"),
         ("campaign.manage", "campaign", "Manage campaigns"),
@@ -62,6 +94,8 @@ def seed_permissions(session: Session) -> None:
         ("quote.read", "quote", "Read quotes"),
         ("quote.manage", "quote", "Manage quotes"),
         ("quote.send", "quote", "Send quotes"),
+        ("agent.manage", "agent", "View and manage agent tasks"),
+        ("agent.review", "agent", "Approve or reject agent actions"),
     ]
 
     existing = {item.key for item in session.exec(select(Permission)).all()}
@@ -74,13 +108,13 @@ def seed_permissions(session: Session) -> None:
 
 _SALES_REP_PERMISSIONS = {
     "lead.read_own", "lead.create", "lead.update_own",
-    "interaction.read_own", "interaction.read_company",
+    "interaction.read_own",
     "product.read",
     "appointment.read", "appointment.manage",
     "campaign.read",
     "call_task.read", "call_task.manage",
     "quote.read", "quote.manage", "quote.send",
-    "analytics.read_company",
+    "analytics.read_own",
     "requirements.read", "requirements.manage",
     "user.read",
 }
@@ -89,7 +123,8 @@ _SALES_REP_PERMISSIONS = {
 def patch_sales_rep_permissions(session: Session) -> None:
     """
     Idempotent — ensures every sales_representative role in every company
-    has the current set of sales permissions. Safe to run on every startup.
+    has exactly the current set of sales permissions.
+    Adds missing permissions and removes stale ones. Safe to run on every startup.
     """
     sales_roles = session.exec(
         select(Role).where(Role.name == "sales_representative")
@@ -101,15 +136,31 @@ def patch_sales_rep_permissions(session: Session) -> None:
         existing_perms = set(session.exec(
             select(RolePermission.permission_key).where(RolePermission.role_id == role.id)
         ).all())
+
+        # Add missing permissions
         for key in _SALES_REP_PERMISSIONS:
             if key in existing_keys and key not in existing_perms:
                 session.add(RolePermission(role_id=role.id, permission_key=key))
+
+        # Remove permissions no longer in the set
+        stale = existing_perms - _SALES_REP_PERMISSIONS
+        for key in stale:
+            rp = session.exec(
+                select(RolePermission).where(
+                    RolePermission.role_id == role.id,
+                    RolePermission.permission_key == key,
+                )
+            ).first()
+            if rp:
+                session.delete(rp)
 
     session.commit()
 
 
 def init_db() -> None:
-    SQLModel.metadata.create_all(engine)
+    SQLModel.metadata.create_all(engine, checkfirst=True)
     with Session(engine) as session:
         seed_permissions(session)
         patch_sales_rep_permissions(session)
+    from migrations.apply_rls import ensure_rls
+    ensure_rls()

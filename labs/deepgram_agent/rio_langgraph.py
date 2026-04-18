@@ -192,7 +192,7 @@ import sys
 import os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "../../")))
 
-from backend.agents.graph_agent import app as graph_app
+from backend.agents.graph import app as graph_app
 from langchain_core.messages import HumanMessage
 
 async def connect_to_deepgram_agent(client_ws: WebSocket, encoding: str, sample_rate: int, stream_sid: str = None):

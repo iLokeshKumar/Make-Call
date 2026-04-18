@@ -17,11 +17,11 @@ from sqlmodel import Session, select
 from credentials_service import get_company_credential, get_company_setting_value
 from database import get_session
 from models.models import Interaction, Quote, utc_now
-from services.engagement_service import record_email_click, record_email_open
-from services.inbound_email_service import ingest_email_webhook_event, resolve_company_id_by_email_address
-from services.inbound_whatsapp_service import ingest_whatsapp_webhook_event, resolve_company_id_by_whatsapp_number
-from services.opt_out_service import unsubscribe_lead
-from services.quote_service import (
+from services.leads.engagement_service import record_email_click, record_email_open
+from services.communication.inbound_email_service import ingest_email_webhook_event, resolve_company_id_by_email_address
+from services.communication.inbound_whatsapp_service import ingest_whatsapp_webhook_event, resolve_company_id_by_whatsapp_number
+from services.leads.opt_out_service import unsubscribe_lead
+from services.quote.quote_service import (
     get_public_quote_info,
     get_quote_by_tracking_token,
     negotiate_quote_by_token,
@@ -31,9 +31,7 @@ from services.quote_service import (
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Rate limiting — sliding window, in-memory, per client IP
-# ---------------------------------------------------------------------------
 
 _RL_LOCK = Lock()
 _RL_BUCKETS: dict[str, deque[float]] = defaultdict(deque)
@@ -79,9 +77,7 @@ TRANSPARENT_GIF = base64.b64decode(
     "R0lGODlhAQABAIABAP///wAAACwAAAAAAQABAAACAkQBADs="
 )
 
-# ---------------------------------------------------------------------------
 # Signature verification
-# ---------------------------------------------------------------------------
 
 # Set WEBHOOK_SIGNATURE_STRICT=true in production to reject unsigned requests.
 _STRICT_MODE: bool = os.getenv("WEBHOOK_SIGNATURE_STRICT", "true").lower() == "true"
@@ -135,7 +131,7 @@ def verify_twilio_signature(
         if _STRICT_MODE:
             logger.warning("Twilio signature missing (strict mode) url=%s", url)
             return False
-        return True  # dev / local  – skip check
+        return True
 
     to_sign = url + _sorted_payload_pairs(payload)
     expected = base64.b64encode(
@@ -188,8 +184,7 @@ def _whatsapp_webhook_guard(
     company_id = resolve_company_id_by_whatsapp_number(session, payload.get("To"))
 
     if not company_id:
-        # Can't look up auth token without knowing the company.
-        # In strict mode we reject; in dev mode we let it through.
+        # Can't look up auth token without knowing the company. In strict mode we reject; in dev mode we let it through.
         if _STRICT_MODE and not signature:
             return JSONResponse(
                 status_code=403,
@@ -211,10 +206,6 @@ def _whatsapp_webhook_guard(
     return None
 
 
-# ---------------------------------------------------------------------------
-# Router
-# ---------------------------------------------------------------------------
-
 router = APIRouter(prefix="/tracking", tags=["Tracking"])
 
 
@@ -226,8 +217,7 @@ async def email_open_tracking(
 ):
     ip = _client_ip(request)
     if _is_rate_limited(key=f"email_open:{ip}", limit=20, window_seconds=60):
-        # Still return the pixel so the email client doesn't show a broken image,
-        # but silently drop the recording.
+        # Still return the pixel so the email client doesn't show a broken image, but silently drop the recording.
         return Response(content=TRANSPARENT_GIF, media_type="image/gif")
     try:
         record_email_open(session, token)

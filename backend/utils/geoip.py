@@ -1,14 +1,18 @@
 """
 Lightweight IP geolocation using ip-api.com (free, no API key).
-Returns an approximate "City, Region, Country" string.
 
+Fields requested: city, region, country, timezone, ISP, proxy/mobile/hosting flags.
 Rate limit: 45 req/min on the free HTTP endpoint — sufficient for login events.
-Private/loopback IPs resolve immediately without a network call.
+Private/loopback IPs fall back to the server's own public IP so logs always
+carry some geography (useful in dev; in prod the real IP comes via X-Forwarded-For).
 """
 
+from __future__ import annotations
+
+import asyncio
 import ipaddress
 import logging
-import asyncio
+from typing import TypedDict
 
 import aiohttp
 
@@ -26,7 +30,16 @@ _PRIVATE_RANGES = (
     "fc", "fd",  # IPv6 private
 )
 
-_IP_API_URL = "http://ip-api.com/json/{ip}?fields=status,city,regionName,country"
+# All fields we care about — drives both the query string and what we store.
+_FIELDS = "status,city,regionName,country,countryCode,timezone,isp,org,proxy,mobile,hosting,lat,lon,query"
+
+_IP_API_URL = f"http://ip-api.com/json/{{ip}}?fields={_FIELDS}"
+_IP_API_SELF_URL = f"http://ip-api.com/json/?fields={_FIELDS}"
+
+
+class GeoResult(TypedDict):
+    location: str        # Human-readable "City, Region, Country"
+    geo_data: dict       # Full response for storage / alerting
 
 
 def _is_private(ip: str) -> bool:
@@ -42,33 +55,68 @@ def _is_private(ip: str) -> bool:
         return False
 
 
-async def resolve_location(ip: str | None) -> str:
-    """
-    Return an approximate location string for *ip*.
-    Never raises — returns "Unknown" on any failure.
-    """
-    if not ip:
-        return "Unknown"
-    ip = ip.strip()
-    if _is_private(ip):
-        return "Local / Private network"
+def _parse(data: dict, server_fallback: bool = False) -> GeoResult:
+    """Turn a successful ip-api response into a GeoResult."""
+    parts = [data.get("city"), data.get("regionName"), data.get("country")]
+    location = ", ".join(p for p in parts if p) or "Unknown"
+    if server_fallback:
+        location = f"{location} (server)"
+
+    geo_data = {
+        "city":         data.get("city"),
+        "region":       data.get("regionName"),
+        "country":      data.get("country"),
+        "country_code": data.get("countryCode"),
+        "timezone":     data.get("timezone"),
+        "isp":          data.get("isp"),
+        "org":          data.get("org"),
+        "is_proxy":     data.get("proxy", False),
+        "is_mobile":    data.get("mobile", False),
+        "is_hosting":   data.get("hosting", False),
+        "lat":          data.get("lat"),
+        "lon":          data.get("lon"),
+        "query_ip":     data.get("query"),
+    }
+    return GeoResult(location=location, geo_data=geo_data)
+
+
+async def _fetch(url: str, server_fallback: bool = False) -> GeoResult | None:
+    """Return a GeoResult or None on failure."""
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(
-                _IP_API_URL.format(ip=ip),
-                timeout=aiohttp.ClientTimeout(total=4),
-            ) as resp:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=4)) as resp:
                 if resp.status != 200:
-                    return "Unknown"
+                    return None
                 data = await resp.json()
                 if data.get("status") != "success":
-                    return "Unknown"
-                parts = [data.get("city"), data.get("regionName"), data.get("country")]
-                location = ", ".join(p for p in parts if p)
-                return location or "Unknown"
+                    return None
+                return _parse(data, server_fallback=server_fallback)
     except asyncio.TimeoutError:
-        logger.debug("geoip timeout for %s", ip)
-        return "Unknown"
+        logger.debug("geoip timeout for %s", url)
+        return None
     except Exception as exc:
-        logger.debug("geoip failed for %s: %s", ip, exc)
-        return "Unknown"
+        logger.debug("geoip error for %s: %s", url, exc)
+        return None
+
+
+_UNKNOWN: GeoResult = GeoResult(location="Unknown", geo_data={})
+
+
+async def resolve_location(ip: str | None) -> GeoResult:
+    """
+    Return a GeoResult for *ip*.
+
+    For private/loopback IPs falls back to the server's own public IP —
+    ensures logs always carry some geography even in local dev.
+    Never raises.
+    """
+    if not ip:
+        return _UNKNOWN
+    ip = ip.strip()
+
+    if _is_private(ip):
+        result = await _fetch(_IP_API_SELF_URL, server_fallback=True)
+        return result or _UNKNOWN
+
+    result = await _fetch(_IP_API_URL.format(ip=ip))
+    return result or _UNKNOWN

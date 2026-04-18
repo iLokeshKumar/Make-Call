@@ -4,8 +4,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, SQLModel, func, select
 
 from auth import get_current_user
+from services.core.auth_service import user_has_any_permission
 from database import get_session
-from models.models import Account, User, utc_now
+from models.models import Account, Lead, User, utc_now
 
 router = APIRouter(prefix="/crm", tags=["CRM"])
 
@@ -44,6 +45,18 @@ async def list_accounts(
 ):
     query = select(Account).where(Account.company_id == current_user.company_id)
     count_query = select(func.count()).select_from(Account).where(Account.company_id == current_user.company_id)
+
+    # Sales reps only see accounts that have leads assigned to them
+    can_read_company = user_has_any_permission(session, current_user.id, {"lead.read_company"})
+    if not can_read_company:
+        user_account_ids = select(Lead.account_id).where(
+            Lead.company_id == current_user.company_id,
+            Lead.owner_user_id == current_user.id,
+            Lead.account_id.is_not(None),
+            Lead.deleted_at.is_(None),
+        ).distinct()
+        query = query.where(Account.id.in_(user_account_ids))
+        count_query = count_query.where(Account.id.in_(user_account_ids))
 
     if search:
         like = f"%{search}%"

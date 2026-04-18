@@ -3,10 +3,12 @@ from sqlmodel import Session, select
 
 from auth import PermissionChecker
 from database import get_session
-from models.models import CampaignCreate, CampaignStepCreate, User, CampaignRecipient
-from services.campaign_service import (
+from models.models import CampaignCreate, CampaignStepCreate, CampaignStepUpdate, CampaignStepsReorder, User, CampaignRecipient
+from services.core.feature_flag_service import require_feature
+from services.campaign.campaign_service import (
     add_campaign_step,
     create_campaign,
+    delete_campaign_step,
     enroll_leads,
     launch_campaign,
     list_campaign_recipients,
@@ -14,10 +16,12 @@ from services.campaign_service import (
     list_campaigns,
     pause_campaign,
     process_campaign_call_step,
+    reorder_campaign_steps,
     schedule_campaign_recipient_next_step,
     run_due_campaign_recipients,
     pause_campaign_recipient,
     retry_campaign_recipient,
+    update_campaign_step,
 )
 
 
@@ -30,6 +34,7 @@ async def create_campaign_route(
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("campaign.manage")),
 ):
+    require_feature(session, current_user.company_id, "campaigns")
     return create_campaign(session, current_user.company_id, current_user.id, data)
 
 
@@ -62,6 +67,41 @@ async def list_campaign_steps_route(
     return list_campaign_steps(session, current_user.company_id, campaign_id)
 
 
+@router.delete("/{campaign_id}/steps/{step_id}", status_code=204)
+async def delete_campaign_step_route(
+    campaign_id: int,
+    step_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    delete_campaign_step(session, current_user.company_id, campaign_id, step_id)
+
+
+@router.patch("/{campaign_id}/steps/{step_id}")
+async def update_campaign_step_route(
+    campaign_id: int,
+    step_id: int,
+    data: CampaignStepUpdate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    return update_campaign_step(
+        session, current_user.company_id, campaign_id, step_id, current_user.id, data
+    )
+
+
+@router.put("/{campaign_id}/steps/reorder")
+async def reorder_campaign_steps_route(
+    campaign_id: int,
+    data: CampaignStepsReorder,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    return reorder_campaign_steps(
+        session, current_user.company_id, campaign_id, current_user.id, data
+    )
+
+
 @router.post("/{campaign_id}/enroll")
 async def enroll_campaign_route(
     campaign_id: int,
@@ -78,6 +118,7 @@ async def launch_campaign_route(
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("campaign.launch")),
 ):
+    require_feature(session, current_user.company_id, "campaigns")
     return launch_campaign(session, current_user.company_id, campaign_id, current_user.id)
 
 

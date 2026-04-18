@@ -78,7 +78,7 @@ export default function WaveformPlayer({ recordingUrl, transcript, duration }: P
       setWaveformData(data.map((v) => v / max));
       await ctx.close();
     } catch {
-      // Waveform optional — player still works without it
+
     }
   }, [recordingUrl]);
 

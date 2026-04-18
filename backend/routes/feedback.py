@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlmodel import Session, func, select
 
 from auth import get_current_user
+from services.core.auth_service import user_has_any_permission
 from database import get_session
 from email_service import get_styled_html
 from models.models import (
@@ -31,9 +32,9 @@ from models.models import (
     User,
     utc_now,
 )
-from services.csat_service import get_csat_base_url, get_or_create_pending_csat
-from services.email_outbox_service import enqueue_email
-from services.outbound_call_service import create_call_task
+from services.feedback.csat_service import get_csat_base_url, get_or_create_pending_csat
+from services.communication.email_outbox_service import enqueue_email
+from services.call.outbound_call_service import create_call_task
 from utils.encryption import decrypt_value
 
 router = APIRouter(prefix="/feedback", tags=["feedback"])
@@ -208,6 +209,17 @@ async def list_feedback(
     current_user: User = Depends(get_current_user),
 ):
     q = select(Feedback).where(Feedback.company_id == current_user.company_id)
+
+    # Sales reps only see feedback for their own leads
+    can_read_company = user_has_any_permission(session, current_user.id, {"lead.read_company"})
+    if not can_read_company:
+        user_lead_ids = select(Lead.id).where(
+            Lead.company_id == current_user.company_id,
+            Lead.owner_user_id == current_user.id,
+            Lead.deleted_at.is_(None),
+        )
+        q = q.where(Feedback.lead_id.in_(user_lead_ids))
+
     if feedback_type:
         q = q.where(Feedback.feedback_type == feedback_type)
     if source:
@@ -238,14 +250,25 @@ async def feedback_summary(
 ):
     cid = current_user.company_id
 
+    # Sales reps only see feedback summary for their own leads
+    base_filters = [Feedback.company_id == cid]
+    can_read_company = user_has_any_permission(session, current_user.id, {"lead.read_company"})
+    if not can_read_company:
+        user_lead_ids = select(Lead.id).where(
+            Lead.company_id == cid,
+            Lead.owner_user_id == current_user.id,
+            Lead.deleted_at.is_(None),
+        )
+        base_filters.append(Feedback.lead_id.in_(user_lead_ids))
+
     total = session.exec(
-        select(func.count(Feedback.id)).where(Feedback.company_id == cid)
+        select(func.count(Feedback.id)).where(*base_filters)
     ).one()
 
     # Internal feedback analytics (exclude customer CSAT)
     internal_avg_rating = session.exec(
         select(func.avg(Feedback.rating)).where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.source == "internal",
             Feedback.rating.isnot(None),
         )
@@ -254,7 +277,7 @@ async def feedback_summary(
     internal_dist_rows = session.exec(
         select(Feedback.rating, func.count(Feedback.id))
         .where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.source == "internal",
             Feedback.rating.isnot(None),
         )
@@ -265,7 +288,7 @@ async def feedback_summary(
     disp_rows = session.exec(
         select(Feedback.disposition, func.count(Feedback.id))
         .where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.source == "internal",
             Feedback.disposition.isnot(None),
         )
@@ -277,7 +300,7 @@ async def feedback_summary(
     # Customer CSAT analytics
     csat_sent = session.exec(
         select(func.count(Feedback.id)).where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.feedback_type == "csat",
             Feedback.source == "customer",
         )
@@ -285,7 +308,7 @@ async def feedback_summary(
 
     csat_responded = session.exec(
         select(func.count(Feedback.id)).where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.feedback_type == "csat",
             Feedback.source == "customer",
             Feedback.status == "submitted",
@@ -294,7 +317,7 @@ async def feedback_summary(
 
     csat_avg_rating = session.exec(
         select(func.avg(Feedback.rating)).where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.feedback_type == "csat",
             Feedback.source == "customer",
             Feedback.status == "submitted",
@@ -305,7 +328,7 @@ async def feedback_summary(
     csat_dist_rows = session.exec(
         select(Feedback.rating, func.count(Feedback.id))
         .where(
-            Feedback.company_id == cid,
+            *base_filters,
             Feedback.feedback_type == "csat",
             Feedback.source == "customer",
             Feedback.status == "submitted",

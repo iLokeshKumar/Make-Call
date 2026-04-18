@@ -5,11 +5,13 @@ from datetime import timedelta
 from sqlmodel import Session, select
 
 from models.models import Appointment, CallTask, Lead, LeadRequirement, Product, Quote, QuoteItemCreate, QuoteCreate, utc_now
-from services.communication_service import get_company_setting_value, send_quote_to_lead, send_email_to_lead
+from services.communication.communication_service import get_company_setting_value, send_quote_to_lead, send_email_to_lead
 from services.message_render_service import render_template_by_id
-from services.outbound_call_service import create_call_task
+from services.call.outbound_call_service import create_call_task
 from services.requirement_service import get_latest_requirements
-from services.opt_out_service import is_lead_opted_out
+from services.leads.opt_out_service import is_lead_opted_out
+from services.quote.quote_service import create_quote
+from services.quote.quote_pdf_service import generate_quote_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +199,8 @@ def handle_inbound_quote_request(
             "call_task_id": None,
         }
 
-    from services.quote_service import create_quote
-    from services.quote_pdf_service import generate_quote_pdf
+    from quote.quote_service import create_quote
+    from quote.quote_pdf_service import generate_quote_pdf
 
     quote = create_quote(
         session=session,

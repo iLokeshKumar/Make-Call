@@ -82,8 +82,7 @@ class LLMClient:
         from tool_adapter import get_mistral_tools
         
         if provider == LLMProvider.GEMINI:
-            # Gemini uses MCP protocol natively
-            return []  # MCP server handles it
+            return []
         
         elif provider == LLMProvider.MISTRAL:
             return get_mistral_tools()
@@ -127,7 +126,6 @@ def get_qwen_tools() -> list:
                 }
             }
         },
-        # ... add other tools
     ]
 
 def get_claude_tools() -> list:
@@ -146,7 +144,6 @@ def get_claude_tools() -> list:
                 "required": ["company_size", "industry", "employee_count"]
             }
         },
-        # ... add other tools
     ]
 
 def get_openai_tools() -> list:
@@ -168,12 +165,11 @@ def get_openai_tools() -> list:
                 }
             }
         },
-        # ... add other tools
     ]
 
 def get_llama_tools() -> list:
     """Convert MCP tools to LLaMA format (if supported)"""
-    return []  # META LLaMA typically runs locally, adjust as needed
+    return []
 
 # DEMO USAGE EXAMPLES
 

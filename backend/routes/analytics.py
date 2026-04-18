@@ -6,10 +6,12 @@ from typing import List, Optional
 from database import get_session
 from models.models import AnalyticsAlert, LatencyLog, User
 from auth import get_current_user
-from services.analytics_service import (
+from services.core.auth_service import user_has_any_permission
+from services.analytics.analytics_service import (
     create_alert,
     evaluate_alerts,
     get_call_conversion_summary,
+    get_call_performance_metrics,
     get_campaign_drilldown,
     get_campaign_email_report,
     get_engagement_summary,
@@ -28,6 +30,15 @@ class AlertRequest(BaseModel):
 
 
 router = APIRouter(prefix="/analytics", tags=["Analytics"])
+
+
+def _resolve_scope_user_id(session: Session, current_user: User) -> int | None:
+    """Return current_user.id if they only have analytics.read_own, else None (company-wide)."""
+    can_read_company = user_has_any_permission(session, current_user.id, {"analytics.read_company"})
+    if can_read_company:
+        return None
+    return current_user.id
+
 
 @router.get("/latency")
 async def get_latency_analytics(
@@ -294,7 +305,8 @@ async def engagement_summary(
         if days < 1:
             raise HTTPException(status_code=400, detail="days must be >= 1")
         since = datetime.now(timezone.utc) - timedelta(days=days)
-    return get_engagement_summary(session, current_user.company_id, since=since, until=until)
+    scope_user_id = _resolve_scope_user_id(session, current_user)
+    return get_engagement_summary(session, current_user.company_id, since=since, until=until, scope_user_id=scope_user_id)
 
 
 @router.get("/call-conversion")
@@ -305,10 +317,24 @@ async def call_conversion(
 ):
     """
     Call-to-outcome conversion rates for the last N days.
-    Returns: total_calls, leads_called, demos_booked, quotes_sent,
-             closed_won, demo_rate_pct, quote_rate_pct, close_rate_pct.
+    Sales reps see only their own metrics; admins/owners see company-wide.
     """
-    return get_call_conversion_summary(session, current_user.company_id, days=days)
+    scope_user_id = _resolve_scope_user_id(session, current_user)
+    return get_call_conversion_summary(session, current_user.company_id, days=days, scope_user_id=scope_user_id)
+
+
+@router.get("/call-performance")
+async def call_performance(
+    days: int = 30,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Call performance metrics for the Performance dashboard tab.
+    Sales reps see only their own metrics; admins/owners see company-wide.
+    """
+    scope_user_id = _resolve_scope_user_id(session, current_user)
+    return get_call_performance_metrics(session, current_user.company_id, days=days, scope_user_id=scope_user_id)
 
 
 @router.get("/campaign-drilldown")

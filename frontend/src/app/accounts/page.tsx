@@ -17,7 +17,7 @@ import { useAuth } from "@/context/AuthContext";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
-// ─── Types ────────────────────────────────────────────────────────────────────
+// Types
 
 type Account = {
   id: number;
@@ -57,7 +57,7 @@ const emptyForm: AccountForm = {
   is_active: true,
 };
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// Helpers
 
 function formToPayload(f: AccountForm): Record<string, unknown> {
   return {
@@ -91,7 +91,7 @@ function locationString(a: Account): string {
   return [a.city, a.state, a.country].filter(Boolean).join(", ") || "";
 }
 
-// ─── Account Card ─────────────────────────────────────────────────────────────
+// Account Card
 
 function AccountCard({
   account,
@@ -205,7 +205,7 @@ function AccountCard({
   );
 }
 
-// ─── Form Panel ───────────────────────────────────────────────────────────────
+// Form Panel
 
 function AccountFormPanel({
   form,
@@ -386,7 +386,7 @@ function AccountFormPanel({
   );
 }
 
-// ─── Main Page ────────────────────────────────────────────────────────────────
+// Main Page
 
 export default function AccountsPage() {
   const { token, sessionTimeout } = useAuth();
@@ -405,7 +405,7 @@ export default function AccountsPage() {
 
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
-  // ── Fetch accounts ──────────────────────────────────────────────────────────
+  // Fetch accounts
 
   const fetchAccounts = useCallback(async () => {
     if (!token) return;
@@ -436,7 +436,7 @@ export default function AccountsPage() {
     fetchAccounts();
   }, [fetchAccounts]);
 
-  // ── Form helpers ────────────────────────────────────────────────────────────
+  // Form helpers
 
   function openCreate() {
     setForm(emptyForm);
@@ -464,7 +464,7 @@ export default function AccountsPage() {
     setSaveError(null);
   }
 
-  // ── Save ────────────────────────────────────────────────────────────────────
+  // Save
 
   async function handleSave() {
     if (!token || !form.name.trim()) return;
@@ -501,7 +501,7 @@ export default function AccountsPage() {
     }
   }
 
-  // ── Delete ──────────────────────────────────────────────────────────────────
+  // Delete
 
   async function handleDelete(id: number) {
     if (!token) return;
@@ -522,13 +522,13 @@ export default function AccountsPage() {
     }
   }
 
-  // ── Filtered accounts ───────────────────────────────────────────────────────
+  // Filtered accounts
 
   const filtered = accounts.filter((a) =>
     a.name.toLowerCase().includes(query.toLowerCase())
   );
 
-  // ── Render ──────────────────────────────────────────────────────────────────
+  // Render
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-50 via-white to-slate-100 dark:from-slate-950 dark:via-slate-900 dark:to-slate-950 p-6 lg:p-8">

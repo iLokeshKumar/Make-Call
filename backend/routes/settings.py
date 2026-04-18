@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 
 from auth import PermissionChecker, get_current_user
@@ -114,8 +114,6 @@ SECRET_INTEGRATION_KEYS = {
     "LUSHA_API_KEY",
     "ZOOMINFO_CLIENT_ID",
     "ZOOMINFO_API_KEY",
-    "WHATSAPP_NUMBER",
-    "WHATSAPP_NUMBER_FROM",
 }
 
 PLAIN_INTEGRATION_KEYS = ALL_INTEGRATION_KEYS - SECRET_INTEGRATION_KEYS
@@ -221,14 +219,25 @@ async def update_company_integrations(
 ):
     allowed_keys = SECRET_INTEGRATION_KEYS | PLAIN_INTEGRATION_KEYS | {"SMTP_HOST", "SMTP_SERVER"}
 
+    import logging
+    _log = logging.getLogger(__name__)
+    _log.warning("[INTEGRATION PATCH] payload has %d items", len(payload.items))
+
     for item in payload.items:
         if item.key not in allowed_keys:
+            _log.warning("[INTEGRATION PATCH] SKIP (not allowed): key=%s", item.key)
             continue
 
         normalized_key = "SMTP_HOST" if item.key == "SMTP_SERVER" else item.key
         value = item.value.strip()
-        if not value or value == "***MASKED***" or "..." in value:
+        if not value:
+            _log.warning("[INTEGRATION PATCH] SKIP (empty): key=%s", normalized_key)
             continue
+        if value == "***MASKED***" or "..." in value:
+            _log.warning("[INTEGRATION PATCH] SKIP (masked): key=%s value=%.20s", normalized_key, value)
+            continue
+
+        _log.warning("[INTEGRATION PATCH] SAVE: key=%s is_secret=%s value_len=%d", normalized_key, normalized_key in SECRET_INTEGRATION_KEYS, len(value))
 
         is_secret = normalized_key in SECRET_INTEGRATION_KEYS
         stored_value = encrypt_value(value) if is_secret else value
@@ -319,3 +328,54 @@ async def save_my_email_settings(
             save_user_setting(session, current_user.id, key, value)
     session.commit()
     return {"status": "saved"}
+
+
+def _mask_debug_value(key: str, value: str) -> str:
+    """Mask likely secret values in debug output."""
+    if not value:
+        return ""
+    upper = key.upper()
+    secretish = (
+        key in SECRET_INTEGRATION_KEYS
+        or "PASSWORD" in upper
+        or "SECRET" in upper
+        or "TOKEN" in upper
+        or "API_KEY" in upper
+        or upper.endswith("_KEY")
+    )
+    if not secretish:
+        return value
+    if len(value) <= 8:
+        return "***MASKED***"
+    return value[:3] + "..." + value[-3:]
+
+
+@router.get("/debug/settings-cache/{company_id}")
+async def debug_settings_cache(
+    company_id: int,
+    include_values: bool = Query(default=False, description="Include cached values (secrets are masked)"),
+    current_user: User = Depends(PermissionChecker("settings.read_company")),
+):
+    """
+    Debug endpoint to inspect in-process settings cache for the current company.
+    Useful to verify cache warm/cold behavior during call setup.
+    """
+    if company_id != current_user.company_id:
+        raise HTTPException(status_code=403, detail="You can only inspect your own company cache")
+
+    loaded = _sc.get("__cache_loaded__", user_id=company_id) is not None
+    items = _sc.get_all(user_id=company_id)
+    items.pop("__cache_loaded__", None)
+    keys = sorted(items.keys())
+
+    response: dict = {
+        "company_id": company_id,
+        "cache_loaded": loaded,
+        "entry_count": len(keys),
+        "keys": keys,
+    }
+
+    if include_values:
+        response["values"] = {k: _mask_debug_value(k, str(v)) for k, v in items.items()}
+
+    return response

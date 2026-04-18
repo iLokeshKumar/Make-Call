@@ -71,16 +71,16 @@ class DateNormalizer:
         """Post-parsing validation to strictly ensure only future weekdays are booked."""
         original_dt = dt
         
-        # 1. Rule: Only Future (Strictly)
+
         if dt <= now:
-            # If it's in the past, shift to tomorrow same time
+
             dt = dt + timedelta(days=1)
-            # Re-check if still in the past (e.g. if now is afternoon and user said 9 AM)
+
             if dt <= now:
                 dt = dt + timedelta(days=1)
             logger.info(f"🔄 [DateNormalizer] Shifting Past/Today to Future: {original_dt} -> {dt}")
 
-        # 2. Rule: Avoid Weekends (5=Saturday, 6=Sunday)
+
         while dt.weekday() >= 5:
             logger.info(f"🔄 [DateNormalizer] {dt.strftime('%A')} is a weekend. Shifting to Monday.")
             dt = dt + timedelta(days=1)

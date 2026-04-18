@@ -28,17 +28,15 @@ from typing import Literal
 from sqlmodel import Session, select
 
 from models.models import CallTask, Campaign, CampaignRecipient, Lead, utc_now
-from services.communication_service import get_company_setting_value, send_email_to_lead
+from services.communication.communication_service import get_company_setting_value, send_email_to_lead
 from services.message_render_service import render_template_by_id
 from services.next_action_service import dispatch_next_action, handle_inbound_quote_request
-from services.outbound_call_service import create_call_task
-from services.opt_out_service import is_lead_opted_out
+from services.call.outbound_call_service import create_call_task
+from services.leads.opt_out_service import is_lead_opted_out
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
 # Stage ordering / progression map
-# ---------------------------------------------------------------------------
 
 ISM_STAGE_ORDER: list[str] = [
     "new",
@@ -77,9 +75,7 @@ _STAGE_CHANNEL_PREFERENCE: dict[str, list[str]] = {
 }
 
 
-# ---------------------------------------------------------------------------
 # Internal helpers
-# ---------------------------------------------------------------------------
 
 def _stage_index(stage: str) -> int:
     try:
@@ -164,9 +160,7 @@ def _pick_channel(
     return None
 
 
-# ---------------------------------------------------------------------------
 # Per-channel dispatch helpers
-# ---------------------------------------------------------------------------
 
 def _dispatch_call(
     session: Session,
@@ -196,7 +190,7 @@ def _dispatch_whatsapp(
     lead: Lead,
     stage: str,
 ) -> dict:
-    from services.communication_service import send_whatsapp_to_lead
+    from services.communication.communication_service import send_whatsapp_to_lead
 
     template_setting = f"ISM_WHATSAPP_TEMPLATE_{stage.upper()}"
     template_id_str = get_company_setting_value(session, company_id, template_setting)
@@ -267,9 +261,7 @@ def _dispatch_email(
     return {"channel": "email", "action": "sent_email", "result": result}
 
 
-# ---------------------------------------------------------------------------
-# Default copy (used when no template is configured)
-# ---------------------------------------------------------------------------
+# Default (used when no template is configured)
 
 def _default_subject(lead: Lead, stage: str) -> str:
     name = (lead.name or "there").split()[0]
@@ -295,9 +287,7 @@ def _default_message(lead: Lead, stage: str, channel: str) -> str:
     return msgs.get(stage, f"Hi {name}, reaching out to stay in touch.")
 
 
-# ---------------------------------------------------------------------------
 # Stage transition logic
-# ---------------------------------------------------------------------------
 
 def _advance_stage(lead: Lead, actor_user_id: int, session: Session) -> str:
     """Move lead to next ISM stage and persist."""
@@ -345,11 +335,9 @@ def _next_action_for_stage(stage: str) -> str:
     return mapping.get(stage, "follow_up")
 
 
-# ---------------------------------------------------------------------------
 # Public entry-point
-# ---------------------------------------------------------------------------
 
-ISMResult = dict  # typed alias for readability
+ISMResult = dict
 
 
 def run_ism_cycle(
@@ -449,9 +437,7 @@ def run_ism_cycle(
     }
 
 
-# ---------------------------------------------------------------------------
 # Batch runner — called by the automation worker
-# ---------------------------------------------------------------------------
 
 def run_ism_for_company(
     session: Session,
@@ -481,9 +467,7 @@ def run_ism_for_company(
     from models.models import Lead, utc_now
 
     # Pull active leads that are not in terminal stages.
-    # We also pre-filter on `last_outreach_at` to avoid loading thousands of
-    # rows when most are in cooldown — the tightest cooldown window is 6h
-    # (WhatsApp), so any lead outreached in the last 6h can be skipped here.
+    # We also pre-filter on `last_outreach_at` to avoid loading thousands of rows when most are in cooldown — the tightest cooldown window is 6h (WhatsApp), so any lead outreached in the last 6h can be skipped here.
     min_cooldown_hours = min(_CHANNEL_COOLDOWN_HOURS.values())
     cutoff = utc_now() - timedelta(hours=min_cooldown_hours)
 
@@ -503,8 +487,7 @@ def run_ism_for_company(
         logger.info("ISM[company=%d]: no eligible leads found", company_id)
         return []
 
-    # Build a set of lead IDs that are actively enrolled in a running campaign
-    # so ISM doesn't double-process them.
+    # Build a set of lead IDs that are actively enrolled in a running campaign so ISM doesn't double-process them.
     active_campaign_lead_ids: set[int] = set()
     active_enrolled = session.exec(
         select(CampaignRecipient.lead_id).join(

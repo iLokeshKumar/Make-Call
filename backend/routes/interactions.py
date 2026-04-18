@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, SQLModel, func, select
 
 from auth import get_current_user
+from services.core.auth_service import user_has_any_permission
 from database import get_session
 from models.models import EngagementEvent, Interaction, Lead, User, utc_now
 
@@ -30,8 +31,19 @@ async def list_interactions(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
+    can_read_company = user_has_any_permission(session, current_user.id, {"interaction.read_company"})
+    can_read_own = user_has_any_permission(session, current_user.id, {"interaction.read_own"})
+
+    if not can_read_company and not can_read_own:
+        raise HTTPException(status_code=403, detail="No permission to view interactions")
+
     query = select(Interaction).where(Interaction.company_id == current_user.company_id)
     count_query = select(func.count()).select_from(Interaction).where(Interaction.company_id == current_user.company_id)
+
+    # Sales reps with only read_own see their own interactions
+    if not can_read_company:
+        query = query.where(Interaction.user_id == current_user.id)
+        count_query = count_query.where(Interaction.user_id == current_user.id)
 
     if lead_id is not None:
         query = query.where(Interaction.lead_id == lead_id)
@@ -72,7 +84,7 @@ async def create_interaction(
     return interaction
 
 
-# ── WhatsApp Thread ───────────────────────────────────────────────────────────
+# WhatsApp
 
 class WhatsAppSendRequest(SQLModel):
     message: str
@@ -128,7 +140,7 @@ async def send_whatsapp_to_lead_route(
     Routes to the configured telephony provider: Twilio, Exotel (or Twilio fallback for EnableX).
     Logs the interaction regardless of delivery outcome.
     """
-    from services.communication_service import send_whatsapp_to_lead as _send_wa
+    from services.communication.communication_service import send_whatsapp_to_lead as _send_wa
     result = _send_wa(
         session=session,
         company_id=current_user.company_id,
@@ -139,7 +151,7 @@ async def send_whatsapp_to_lead_route(
     return result
 
 
-# ── Email Thread ──────────────────────────────────────────────────────────────
+# Email
 
 class EmailSendRequest(SQLModel):
     subject: str
@@ -240,7 +252,7 @@ async def send_email_to_lead_route(
     current_user: User = Depends(get_current_user),
 ):
     """Send an email to a lead and log it as an interaction."""
-    from services.communication_service import send_email_to_lead as _send_email
+    from services.communication.communication_service import send_email_to_lead as _send_email
     result = _send_email(
         session=session,
         company_id=current_user.company_id,
@@ -258,6 +270,6 @@ async def trigger_imap_sync(
     current_user: User = Depends(get_current_user),
 ):
     """Trigger an immediate IMAP inbox poll for the current company."""
-    from services.imap_poller_service import trigger_imap_poll
+    from services.communication.imap_poller_service import trigger_imap_poll
     result = await trigger_imap_poll(current_user.company_id, user_id=current_user.id)
     return result

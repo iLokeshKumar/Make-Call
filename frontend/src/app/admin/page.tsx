@@ -60,7 +60,6 @@ function Toast({ message, onClose }: { message: string; onClose: () => void }) {
   );
 }
 
-/* ─── Users Tab ─────────────────────────────────────────────────────────── */
 function UsersTab({
   users,
   roles,
@@ -258,7 +257,7 @@ function UsersTab({
   );
 }
 
-/* ─── Roles Tab ─────────────────────────────────────────────────────────── */
+/* Roles Tab */
 function RolesTab({
   roles,
   permissions,
@@ -498,7 +497,6 @@ function RolesTab({
   );
 }
 
-/* ─── Permissions Tab ────────────────────────────────────────────────────── */
 function PermissionsTab({ permissions }: { permissions: Permission[] }) {
   return (
     <div className="rounded-2xl glass border border-white/40 dark:border-white/10 overflow-hidden">
@@ -529,7 +527,7 @@ function PermissionsTab({ permissions }: { permissions: Permission[] }) {
   );
 }
 
-/* ─── Page ───────────────────────────────────────────────────────────────── */
+/* Page */
 export default function AdminPage() {
   const { token, sessionTimeout } = useAuth();
   const [activeTab, setActiveTab] = useState<"Users" | "Roles" | "Permissions">("Users");
@@ -558,7 +556,7 @@ export default function AdminPage() {
       if (rRes.ok) setRoles(await rRes.json());
       if (pRes.ok) setPermissions(await pRes.json());
     } finally { setLoading(false); }
-  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [token]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 

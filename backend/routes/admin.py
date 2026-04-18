@@ -359,3 +359,79 @@ async def worker_resume(
 ):
     from services.automation_worker_service import resume_worker
     return resume_worker()
+
+
+# ── Usage metering ────────────────────────────────────────────────────────────
+
+@router.get("/usage/current-month")
+async def get_current_month_usage(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Usage summary for the current month — shown on the company dashboard."""
+    from services.core.usage_service import get_usage_summary
+    return get_usage_summary(session, current_user.company_id)
+
+
+@router.get("/usage/history")
+async def get_usage_history(
+    months: int = 6,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Last N months of usage per metric — for a usage trend chart."""
+    import datetime
+    from services.core.usage_service import KNOWN_METRICS
+    from models.models import CompanyUsage
+    from sqlmodel import select
+
+    # Build list of YYYY-MM strings
+    now = datetime.datetime.utcnow()
+    month_strs = []
+    for i in range(months - 1, -1, -1):
+        d = now.replace(day=1) - datetime.timedelta(days=i * 28)
+        month_strs.append(d.strftime("%Y-%m"))
+    month_strs = sorted(set(month_strs))[-months:]
+
+    rows = session.exec(
+        select(CompanyUsage).where(
+            CompanyUsage.company_id == current_user.company_id,
+            CompanyUsage.month.in_(month_strs),
+        )
+    ).all()
+    by_month: dict[str, dict[str, int]] = {m: {} for m in month_strs}
+    for r in rows:
+        by_month[r.month][r.metric] = r.count
+
+    return {
+        "months": [
+            {"month": m, **{metric: by_month[m].get(metric, 0) for metric in KNOWN_METRICS}}
+            for m in month_strs
+        ]
+    }
+
+
+# ── Feature flags ─────────────────────────────────────────────────────────────
+
+@router.get("/feature-flags")
+async def list_feature_flags(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("user.manage")),
+):
+    """Return the full feature flag map for the current company."""
+    from services.core.feature_flag_service import get_all_flags
+    return get_all_flags(session, current_user.company_id)
+
+
+@router.put("/feature-flags/{feature}")
+async def set_feature_flag(
+    feature: str,
+    enabled: bool,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("user.manage")),
+):
+    """Enable or disable a feature for the current company (superadmin / support tool)."""
+    from services.core.feature_flag_service import set_feature_flag as _set
+    flag = _set(session, current_user.company_id, feature, enabled,
+                actor_note=f"set by user {current_user.id}")
+    return {"company_id": current_user.company_id, "feature": flag.feature, "enabled": flag.enabled}

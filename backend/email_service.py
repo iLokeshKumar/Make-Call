@@ -10,9 +10,9 @@ from utils.encryption import decrypt_value
 
 logger = logging.getLogger(__name__)
 
-_URL_RE = re.compile(r'(https?://[^\s<>"\']+)')
+_URL_RE = re.compile(r'(https?://[^\s<>"\')\]]+)')
 
-# Matches common sign-off patterns the LLM adds at the end of email bodies
+
 _SIGNOFF_RE = re.compile(
     r'\n{0,2}(best regards|regards|warm regards|sincerely|cheers|thanks|thank you)'
     r'[\s\S]*$',
@@ -33,8 +33,74 @@ def _linkify(text: str) -> str:
     )
 
 
+def _markdown_table_to_html(text: str) -> str:
+    """Convert markdown pipe-tables to styled HTML <table> blocks.
+
+    Handles the standard format:
+        | Header1 | Header2 |
+        |---------|---------|
+        | cell1   | cell2   |
+
+    Must run BEFORE newline→<br> conversion.
+    """
+    _TABLE_RE = re.compile(
+        r'(^\|.+\|[ \t]*\n'          # header row
+        r'\|[\s:|-]+\|[ \t]*\n'      # separator row (dashes, colons, pipes)
+        r'(?:\|.+\|[ \t]*\n?)+)',     # one or more data rows
+        re.MULTILINE,
+    )
+
+    _TH_STYLE = (
+        'style="padding:10px 14px;text-align:left;font-size:13px;font-weight:700;'
+        'color:#fff;background:linear-gradient(135deg,#0f766e,#1d4ed8);'
+        'border-bottom:2px solid #e2e8f0;"'
+    )
+    _TD_STYLE = (
+        'style="padding:10px 14px;font-size:13px;color:#334155;'
+        'border-bottom:1px solid #f1f5f9;"'
+    )
+    _TD_ALT_STYLE = (
+        'style="padding:10px 14px;font-size:13px;color:#334155;'
+        'background:#f8fafc;border-bottom:1px solid #f1f5f9;"'
+    )
+    _TABLE_STYLE = (
+        'style="width:100%;border-collapse:collapse;margin:16px 0;'
+        'border-radius:12px;overflow:hidden;border:1px solid #e2e8f0;'
+        'font-family:\'Segoe UI\',Tahoma,Geneva,Verdana,sans-serif;"'
+    )
+
+    def _parse_row(line: str) -> list[str]:
+        cells = line.strip().strip("|").split("|")
+        return [c.strip() for c in cells]
+
+    def _convert(m: re.Match) -> str:
+        lines = m.group(0).strip().splitlines()
+        if len(lines) < 3:
+            return m.group(0)
+
+        headers = _parse_row(lines[0])
+        # lines[1] is the separator — skip
+        data_rows = [_parse_row(l) for l in lines[2:] if l.strip()]
+
+        ths = "".join(f"<th {_TH_STYLE}>{h}</th>" for h in headers)
+        thead = f"<thead><tr>{ths}</tr></thead>"
+
+        body_rows = []
+        for i, row in enumerate(data_rows):
+            style = _TD_ALT_STYLE if i % 2 == 1 else _TD_STYLE
+            tds = "".join(f"<td {style}>{c}</td>" for c in row)
+            body_rows.append(f"<tr>{tds}</tr>")
+        tbody = f"<tbody>{''.join(body_rows)}</tbody>"
+
+        return f"<table {_TABLE_STYLE}>{thead}{tbody}</table>"
+
+    return _TABLE_RE.sub(_convert, text)
+
+
 def _markdown_to_html(text: str) -> str:
     """Convert a small subset of markdown to HTML suitable for email."""
+    # Tables (must run before newline→<br> conversion):
+    text = _markdown_table_to_html(text)
     # Bold:
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
@@ -65,7 +131,7 @@ def _markdown_to_html(text: str) -> str:
         )
         return f'<ol style="padding-left:20px;margin:8px 0;">{lis}</ol>'
     text = re.sub(r'(^\d+\. .+(\n\d+\. .+)*)', _wrap_olist, text, flags=re.MULTILINE)
-    # Newlines → <br> (after list conversion so we don't break list blocks)
+    # Newlines → <br> (after list/table conversion so we don't break blocks)
     text = text.replace("\\n", "\n").replace("\n", "<br>")
     return text
 
@@ -112,7 +178,6 @@ def get_styled_html(
 ) -> str:
     company_link = f'<a href="{company_website}" style="color:inherit;text-decoration:none;">{company_name}</a>'
 
-    # Strip duplicate LLM greeting/sign-off, convert markdown, then linkify bare URLs
     cleaned = _clean_llm_body(body, lead_name)
     rendered_body = _linkify(_markdown_to_html(cleaned))
 
@@ -177,7 +242,7 @@ def send_smtp_email(
     smtp_from_email = smtp_from_email or os.getenv("SMTP_FROM_EMAIL") or os.getenv("SENDER_EMAIL")
     smtp_security = (smtp_security or os.getenv("SMTP_SECURITY") or "").strip().lower()
 
-    # Derive security mode: explicit setting wins; fall back to port-based heuristic
+
     if smtp_security not in ("ssl", "starttls", "none"):
         smtp_security = "ssl" if smtp_port == 465 else "starttls"
 
