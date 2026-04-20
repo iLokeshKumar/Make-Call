@@ -11,6 +11,7 @@ import LeadProfileCard from "@/components/leads/lead_profile_card";
 import NextActionCard from "@/components/leads/next_action_card";
 import QualificationCard from "@/components/leads/qualification_card";
 import TranscriptPanel from "@/components/leads/transcript_panel";
+import WaveformPlayer from "@/components/leads/waveform_player";
 import SentimentGauge from "@/components/SentimentGauge";
 import WhatsAppThread from "@/components/leads/whatsapp_thread";
 import EmailThread from "@/components/leads/email_thread";
@@ -75,12 +76,15 @@ type Requirement = {
 type Interaction = {
   id: number;
   type?: string | null;
+  direction?: string | null;
+  channel?: string | null;
   status?: string | null;
   content?: string | null;
   transcript?: string | null;
   recording_url?: string | null;
   recording_duration?: number | null;
   started_at?: string | null;
+  ended_at?: string | null;
   created_at?: string | null;
 };
 
@@ -1576,9 +1580,36 @@ export default function LeadDetailPage() {
 
           {/* Per-call expandable history with transcript + coach score */}
           {(() => {
+            // Only show actual call rows. Sibling events (call_completed, call_summary) get merged in below so each call renders once.
             const callInteractions = interactions.filter(
-              i => (i.type || "").toLowerCase().includes("call") && (i.transcript || i.id)
+              i => (i.type || "").toLowerCase() === "call"
             );
+            // Build a lookup of summaries keyed by their nearest preceding call. call_summary rows share a timestamp with (or come right after) the call they describe, so matching by lead_id + closest-earlier started_at is good enough for a display hint.
+            const summaryByCallId = new Map<number, string>();
+            const callSummaries = interactions
+              .filter(i => (i.type || "").toLowerCase() === "call_summary" && i.content)
+              .slice()
+              .sort((a, b) => {
+                const at = new Date(a.started_at || a.created_at || 0).getTime();
+                const bt = new Date(b.started_at || b.created_at || 0).getTime();
+                return at - bt;
+              });
+            for (const summary of callSummaries) {
+              const sTime = new Date(summary.started_at || summary.created_at || 0).getTime();
+              // Find the most recent call whose started_at is <= summary time.
+              let best: Interaction | null = null;
+              let bestTime = -Infinity;
+              for (const call of callInteractions) {
+                const cTime = new Date(call.started_at || call.created_at || 0).getTime();
+                if (cTime <= sTime && cTime > bestTime) {
+                  best = call;
+                  bestTime = cTime;
+                }
+              }
+              if (best && best.id != null && !summaryByCallId.has(best.id)) {
+                summaryByCallId.set(best.id, summary.content!);
+              }
+            }
             if (!callInteractions.length) return null;
             return (
               <CollapsibleSection title={`Call History (${callInteractions.length})`} icon={Phone} defaultOpen={callInteractions.length <= 3}>
@@ -1590,7 +1621,9 @@ export default function LeadDetailPage() {
                       ? new Date(ci.started_at || ci.created_at || "").toLocaleString("en-IN", { day: "2-digit", month: "short", year: "numeric", hour: "2-digit", minute: "2-digit" })
                       : "Unknown date";
                     const durLabel = ci.recording_duration ? `${Math.floor(ci.recording_duration / 60)}m ${ci.recording_duration % 60}s` : null;
+                    const dirLabel = ci.direction === "inbound" ? "Inbound" : ci.direction === "outbound" ? "Outbound" : null;
                     const statusColor = ci.status === "completed" ? "text-emerald-600 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-500/10" : ci.status === "failed" ? "text-red-500 bg-red-50 dark:bg-red-500/10" : "text-slate-500 bg-slate-100 dark:bg-white/5";
+                    const summary = summaryByCallId.get(ci.id);
                     return (
                       <div key={ci.id} className="rounded-xl border border-white/10 bg-white/5 overflow-hidden">
                         <button
@@ -1600,9 +1633,11 @@ export default function LeadDetailPage() {
                         >
                           <div className="flex items-center gap-3 min-w-0">
                             <Phone className="h-3.5 w-3.5 text-violet-400 flex-shrink-0" />
+                            {dirLabel && <span className="text-[10px] font-semibold text-slate-400 uppercase tracking-wider flex-shrink-0">{dirLabel}</span>}
                             <span className="text-slate-300 truncate">{dateLabel}</span>
                             {durLabel && <span className="text-slate-500 text-xs flex-shrink-0">{durLabel}</span>}
                             {hasTranscript && <span className="text-[10px] text-violet-400 font-medium flex-shrink-0">transcript</span>}
+                            {ci.recording_url && <span className="text-[10px] text-blue-400 font-medium flex-shrink-0">audio</span>}
                           </div>
                           <div className="flex items-center gap-2 flex-shrink-0">
                             {ci.status && <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${statusColor}`}>{ci.status}</span>}
@@ -1611,7 +1646,20 @@ export default function LeadDetailPage() {
                         </button>
                         {isOpen && (
                           <div className="px-4 pb-4 space-y-4 border-t border-white/10 pt-4">
-                            {hasTranscript
+                            {summary && (
+                              <div className="rounded-lg border border-violet-500/20 bg-violet-500/5 p-3">
+                                <p className="text-[10px] font-bold uppercase tracking-widest text-violet-400 mb-1.5">AI Summary</p>
+                                <p className="text-xs text-slate-300 leading-relaxed whitespace-pre-wrap">{summary}</p>
+                              </div>
+                            )}
+                            {ci.recording_url ? (
+                              <WaveformPlayer
+                                interactionId={ci.id}
+                                token={token!}
+                                transcript={ci.transcript}
+                                duration={ci.recording_duration}
+                              />
+                            ) : hasTranscript
                               ? <TranscriptPanel transcript={ci.transcript} />
                               : <p className="text-xs text-slate-500 italic">No transcript recorded for this call.</p>
                             }

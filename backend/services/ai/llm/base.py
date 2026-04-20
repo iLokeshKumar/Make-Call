@@ -81,17 +81,14 @@ class BaseLLM(ABC):
             # Check if there are corresponding 'tool' messages in the history
             tool_call_ids = {tc.get("id") for tc in last_msg.get("tool_calls", []) if tc.get("id")}
             
-            # Since LLM protocol requires tool messages to follow immediately, 
-            # if the NEXT message is not a tool message, it's an interrupted sequence.
-            # However, the user might have already spoken (next message is 'user').
-            # Simply: if no tool messages followed, it's interrupted.
+            # Since LLM protocol requires tool messages to follow immediately, if the NEXT message is not a tool message, it's an interrupted sequence.
+            # However, the user might have already spoken (next message is 'user'). Simply: if no tool messages followed, it's interrupted.
             
             # We look for ANY tool messages that follow this assistant message.
             # But in our case, if it's the LAST message, it's definitely interrupted.
             logger.info(f"🧹 [BaseLLM] Cleaning interrupted tool calls from last assistant message.")
             last_msg.pop("tool_calls", None)
-            # Optional: if the content is also empty, we might want to remove the message entirely,
-            # but usually it has a "Thinking..." phrase.
+            # Optional: if the content is also empty, we might want to remove the message entirely, but usually it has a "Thinking..." phrase.
 
     def get_safe_history(self, limit: int = 10) -> List[Dict[str, Any]]:
         """
@@ -112,8 +109,8 @@ class BaseLLM(ABC):
         truncated = other_msgs[-limit:]
         
         # Check if we started in the middle of a tool chain
-        # 1. If first message is 'tool', we MUST go back to find the assistant message
-        # 2. If first message is 'assistant' with tool_calls, we are okay
+        # If first message is 'tool', we MUST go back to find the assistant message
+        # If first message is 'assistant' with tool_calls, we are okay
         
         while truncated and truncated[0].get("role") == "tool":
             # Find how many more messages we need to reach the previous one
@@ -147,8 +144,7 @@ class BaseLLM(ABC):
         remaining = full_text
         
         if len(parts) > 1:
-            # Join parts back while keeping delimiters
-            # parts looks like: ["Hello", ".", " How are you", "?", " I'm fine"]
+            # Join parts back while keeping delimiters parts looks like: ["Hello", ".", " How are you", "?", " I'm fine"]
             for i in range(0, len(parts) - 1, 2):
                 sentence = parts[i] + parts[i+1]
                 sentences.append(sentence.strip())

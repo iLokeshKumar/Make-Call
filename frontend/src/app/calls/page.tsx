@@ -9,11 +9,19 @@ import Pagination from "@/components/Pagination";
 interface Interaction {
     id: number;
     type: string;
-    content: string;
+    channel?: string | null;
+    direction?: string | null;
+    status?: string;
+    delivery_status?: string | null;
+    content?: string | null;
+    transcript?: string | null;
+    recording_url?: string | null;
+    recording_duration?: number | null;
     timestamp?: string;
     started_at?: string;
+    ended_at?: string | null;
     created_at?: string;
-    transcript?: string;
+    lead_id?: number | null;
     lead_name?: string;
 }
 
@@ -60,7 +68,7 @@ export default function CallsPage() {
             
             setCalls(data.items || []);
             setTotalCalls(data.total || 0);
-            setCurrentPage(data.page || 1);
+            // Don't reset currentPage from the response — the backend doesn't return it, so `data.page || 1` always snapped back to page 1 and thrashed useEffect into re-fetching page 1 right after every page change.
             setError(null);
         } catch (err: any) {
             console.error("Failed to fetch calls:", err);
@@ -115,15 +123,34 @@ export default function CallsPage() {
         return "bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400";
     };
 
+    const TYPE_LABELS: Record<string, string> = {
+        call: "Voice Call",
+        call_completed: "Call Ended",
+        call_summary: "Call Summary",
+        whatsapp: "WhatsApp Message",
+        email: "Email",
+        sms: "SMS",
+    };
+
     const getInteractionTitle = (call: Interaction) => {
         if (call.type === "call") {
-            if (call.content.includes("Outbound")) {
-                return call.lead_name ? `Outbound to ${call.lead_name}` : "Outbound Call";
-            }
+            const isOutbound = call.direction === "outbound" || (call.content || "").includes("Outbound");
+            if (isOutbound) return call.lead_name ? `Outbound to ${call.lead_name}` : "Outbound Call";
             return call.lead_name ? `Inbound from ${call.lead_name}` : "Inbound Call";
         }
-        return call.type;
+        if (call.type === "call_completed" && call.lead_name) return `Call ended — ${call.lead_name}`;
+        if (call.type === "call_summary" && call.lead_name) return `Call summary — ${call.lead_name}`;
+        return TYPE_LABELS[call.type] || call.type;
     };
+
+    const formatDuration = (seconds?: number | null) => {
+        if (!seconds || seconds <= 0) return null;
+        const m = Math.floor(seconds / 60);
+        const s = seconds % 60;
+        return m > 0 ? `${m}m ${s}s` : `${s}s`;
+    };
+
+    const truncate = (text: string, max = 140) => (text.length > max ? text.slice(0, max).trimEnd() + "…" : text);
 
     return (
         <div className="space-y-6 pb-8">
@@ -230,15 +257,37 @@ export default function CallsPage() {
                                 onClick={() => toggleExpand(call.id)}
                                 className="p-4 flex items-center justify-between cursor-pointer"
                             >
-                                <div className="flex items-center space-x-4">
-                                    <div className={clsx("flex h-10 w-10 items-center justify-center rounded-lg shadow-sm font-bold", getInteractionColor(call.type))}>
+                                <div className="flex items-center space-x-4 min-w-0 flex-1">
+                                    <div className={clsx("flex h-10 w-10 items-center justify-center rounded-lg shadow-sm font-bold flex-shrink-0", getInteractionColor(call.type))}>
                                         {getInteractionIcon(call.type)}
                                     </div>
-                                    <div>
-                                        <p className="font-semibold text-slate-900 dark:text-white capitalize">
-                                            {getInteractionTitle(call)}
-                                        </p>
-                                        <p className="text-xs text-slate-400 dark:text-slate-500">
+                                    <div className="min-w-0 flex-1">
+                                        <div className="flex items-center gap-2 flex-wrap">
+                                            <p className="font-semibold text-slate-900 dark:text-white">
+                                                {getInteractionTitle(call)}
+                                            </p>
+                                            {formatDuration(call.recording_duration) && (
+                                                <span className="text-[10px] font-mono text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                                                    {formatDuration(call.recording_duration)}
+                                                </span>
+                                            )}
+                                            {call.status && call.status !== "active" && call.status !== "logged" && (
+                                                <span className="text-[10px] font-medium uppercase tracking-wide text-slate-500 bg-slate-100 dark:bg-slate-800 px-1.5 py-0.5 rounded">
+                                                    {call.status}
+                                                </span>
+                                            )}
+                                            {call.delivery_status && (
+                                                <span className="text-[10px] font-medium uppercase tracking-wide text-violet-600 bg-violet-50 dark:bg-violet-900/30 dark:text-violet-300 px-1.5 py-0.5 rounded">
+                                                    {call.delivery_status}
+                                                </span>
+                                            )}
+                                        </div>
+                                        {call.content && call.type !== "call" && (
+                                            <p className="mt-1 text-sm text-slate-600 dark:text-slate-300 truncate">
+                                                {truncate(call.content)}
+                                            </p>
+                                        )}
+                                        <p className="text-xs text-slate-400 dark:text-slate-500 mt-0.5">
                                             {(() => {
                                                 const ts = call.started_at ?? call.created_at ?? call.timestamp;
                                                 if (!ts) return "Unknown";

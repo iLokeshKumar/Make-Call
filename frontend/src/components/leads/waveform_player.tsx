@@ -11,10 +11,20 @@ type TranscriptLine = {
 };
 
 type Props = {
-  recordingUrl: string;
+  /** Legacy: directly-usable (public / blob) URL. */
+  recordingUrl?: string;
+  /**
+   * When set, the player fetches the recording through the backend proxy with Bearer auth, builds a blob URL, and uses that everywhere. Needed because raw Twilio recording URLs require HTTP Basic auth that an <audio> tag cannot send.
+   */
+  interactionId?: number;
+  token?: string;
+  apiBase?: string;
   transcript?: string | null;
   duration?: number | null;
 };
+
+const DEFAULT_API_BASE =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_BASE_URL) || "http://localhost:6060";
 
 function parseTranscriptLines(raw: string | null | undefined): TranscriptLine[] {
   if (!raw) return [];
@@ -29,7 +39,7 @@ function parseTranscriptLines(raw: string | null | undefined): TranscriptLine[] 
     });
 }
 
-export default function WaveformPlayer({ recordingUrl, transcript, duration }: Props) {
+export default function WaveformPlayer({ recordingUrl, interactionId, token, apiBase, transcript, duration }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
@@ -41,6 +51,8 @@ export default function WaveformPlayer({ recordingUrl, transcript, duration }: P
   const [loading, setLoading] = useState(true);
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [activeLineIndex, setActiveLineIndex] = useState<number>(-1);
+  const [effectiveUrl, setEffectiveUrl] = useState<string | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
 
   const lines = parseTranscriptLines(transcript);
   const lineCount = lines.length;
@@ -51,14 +63,52 @@ export default function WaveformPlayer({ recordingUrl, transcript, duration }: P
     approxStart: lineCount > 1 ? (i / (lineCount - 1)) * totalDuration : 0,
   }));
 
+  // Resolve the playable URL: either a direct prop, or a blob URL produced by fetching the backend proxy with Bearer auth.
+  useEffect(() => {
+    let cancelled = false;
+    let revoke: string | null = null;
+
+    async function resolveUrl() {
+      if (recordingUrl) {
+        setEffectiveUrl(recordingUrl);
+        return;
+      }
+      if (!interactionId || !token) return;
+      try {
+        setFetchError(null);
+        const base = apiBase ?? DEFAULT_API_BASE;
+        const res = await fetch(`${base}/crm/interactions/${interactionId}/recording`, {
+          headers: { Authorization: `Bearer ${token}` },
+        });
+        if (!res.ok) {
+          setFetchError(res.status === 404 ? "Recording not yet available" : `Failed to load (${res.status})`);
+          return;
+        }
+        const blob = await res.blob();
+        if (cancelled) return;
+        const url = URL.createObjectURL(blob);
+        revoke = url;
+        setEffectiveUrl(url);
+      } catch (e) {
+        if (!cancelled) setFetchError(e instanceof Error ? e.message : "Failed to fetch recording");
+      }
+    }
+
+    resolveUrl();
+    return () => {
+      cancelled = true;
+      if (revoke) URL.revokeObjectURL(revoke);
+    };
+  }, [recordingUrl, interactionId, token, apiBase]);
+
   // Decode audio + build waveform via Web Audio API
   const buildWaveform = useCallback(async () => {
-    if (!recordingUrl) return;
+    if (!effectiveUrl) return;
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
-      const resp = await fetch(recordingUrl);
+      const resp = await fetch(effectiveUrl);
       if (!resp.ok) return;
       const arrayBuf = await resp.arrayBuffer();
       const audioBuf = await ctx.decodeAudioData(arrayBuf);
@@ -80,7 +130,7 @@ export default function WaveformPlayer({ recordingUrl, transcript, duration }: P
     } catch {
 
     }
-  }, [recordingUrl]);
+  }, [effectiveUrl]);
 
   useEffect(() => { buildWaveform(); }, [buildWaveform]);
 
@@ -181,15 +231,20 @@ export default function WaveformPlayer({ recordingUrl, transcript, duration }: P
 
       <div className="p-5 space-y-4">
         {/* Audio element */}
-        <audio
-          ref={audioRef}
-          src={recordingUrl}
-          onLoadedMetadata={handleLoadedMetadata}
-          onTimeUpdate={handleTimeUpdate}
-          onEnded={() => setPlaying(false)}
-          crossOrigin="anonymous"
-          preload="metadata"
-        />
+        {effectiveUrl && (
+          <audio
+            ref={audioRef}
+            src={effectiveUrl}
+            onLoadedMetadata={handleLoadedMetadata}
+            onTimeUpdate={handleTimeUpdate}
+            onEnded={() => setPlaying(false)}
+            preload="metadata"
+          />
+        )}
+
+        {fetchError && (
+          <p className="text-xs text-amber-500 font-medium">{fetchError}</p>
+        )}
 
         {/* Waveform canvas */}
         <div className="relative">

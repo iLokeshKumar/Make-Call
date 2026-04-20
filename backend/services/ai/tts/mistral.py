@@ -46,57 +46,151 @@ class MistralTTS:
 
             async with aiohttp.ClientSession() as session:
                 async with session.post(url, headers=headers, json=payload) as response:
+                    # DIAGNOSTIC: log status + content-type even on success so we
+                    # can verify Mistral is really returning a float32 PCM stream.
+                    logger.info(
+                        "🔍 [MistralTTS] status=%s content-type=%s transfer-encoding=%s",
+                        response.status,
+                        response.headers.get("Content-Type", "<none>"),
+                        response.headers.get("Transfer-Encoding", "<none>"),
+                    )
                     if response.status != 200:
                         error_text = await response.text()
                         logger.error("❌ [MistralTTS] API error %s: %s", response.status, error_text)
                         return
 
-                    # Mistral PCM stream is float32 LE @ 24kHz.
-                    # Convert to int16 -> downsample 24k->8k -> mu-law for Twilio-compatible media.
-                    float_residual = b""
+                    # Mistral TTS streams Server-Sent Events. Each `speech.audio.delta`
+                    # event carries a JSON payload whose `audio` field is base64-encoded
+                    # f32le PCM @ 24kHz. Decode → s16 → downsample to 8k → µ-law for Twilio.
+                    sse_buffer = ""
+                    float_residual = b""   # carries partial float samples across deltas
                     resample_state = None
                     chunk_count = 0
                     in_bytes_total = 0
                     out_bytes_total = 0
-                    first_conversion_logged = False
+                    first_audio_logged = False
+                    # Per-call diagnostics — temporary, remove once the parser is proven.
+                    sse_events_total = 0
+                    sse_event_types_seen: dict = {}
+                    first_event_logged = False
+
+                    async def process_audio_bytes(raw_audio: bytes):
+                        """Convert one block of f32le@24k PCM bytes into µ-law@8k and send."""
+                        nonlocal float_residual, resample_state, chunk_count
+                        nonlocal in_bytes_total, out_bytes_total, first_audio_logged
+
+                        if not raw_audio:
+                            return
+                        float_residual += raw_audio
+                        usable = (len(float_residual) // 4) * 4
+                        if usable == 0:
+                            return
+
+                        float_block = float_residual[:usable]
+                        float_residual = float_residual[usable:]
+                        in_bytes_total += len(float_block)
+
+                        if not first_audio_logged:
+                            head = float_block[:64]
+                            logger.info(
+                                "🔍 [MistralTTS] first_audio_block_len=%d first64_hex=%s",
+                                len(float_block),
+                                head.hex(),
+                            )
+                            first_audio_logged = True
+
+                        pcm_24k_s16 = self._f32le_to_s16le(float_block)
+                        pcm_8k_s16, resample_state = audioop.ratecv(
+                            pcm_24k_s16, 2, 1, 24000, 8000, resample_state
+                        )
+                        mulaw_8k = audioop.lin2ulaw(pcm_8k_s16, 2)
+                        out_bytes_total += len(mulaw_8k)
+                        chunk_count += 1
+                        await communicator.send_media(base64.b64encode(mulaw_8k).decode("utf-8"))
 
                     async for chunk in response.content.iter_chunked(4096):
-                        if chunk:
-                            if not first_byte_time:
-                                first_byte_time = time.time() - start_time
-                                self.last_latency = first_byte_time
-                            float_residual += chunk
-                            usable = (len(float_residual) // 4) * 4
-                            if usable == 0:
+                        if not chunk:
+                            continue
+                        if not first_byte_time:
+                            first_byte_time = time.time() - start_time
+                            self.last_latency = first_byte_time
+
+                        sse_buffer += chunk.decode("utf-8", errors="replace")
+
+                        # SSE events are separated by a blank line (\n\n or \r\n\r\n).
+                        while True:
+                            sep_idx = -1
+                            for sep in ("\n\n", "\r\n\r\n"):
+                                idx = sse_buffer.find(sep)
+                                if idx != -1 and (sep_idx == -1 or idx < sep_idx):
+                                    sep_idx = idx
+                                    sep_len = len(sep)
+                            if sep_idx == -1:
+                                break
+
+                            event_block = sse_buffer[:sep_idx]
+                            sse_buffer = sse_buffer[sep_idx + sep_len:]
+
+                            event_type = None
+                            data_payload = None
+                            for line in event_block.splitlines():
+                                if line.startswith("event:"):
+                                    event_type = line[6:].strip()
+                                elif line.startswith("data:"):
+                                    piece = line[5:].lstrip()
+                                    data_payload = piece if data_payload is None else data_payload + piece
+
+                            sse_events_total += 1
+                            sse_event_types_seen[event_type or "<no-event>"] = (
+                                sse_event_types_seen.get(event_type or "<no-event>", 0) + 1
+                            )
+
+                            # DIAGNOSTIC: dump the full first event so we can see the real shape.
+                            if not first_event_logged:
+                                logger.info(
+                                    "🔍 [MistralTTS] first_event event_type=%r data_len=%d data_head=%r",
+                                    event_type,
+                                    len(data_payload) if data_payload else 0,
+                                    (data_payload or "")[:200],
+                                )
+                                first_event_logged = True
+
+                            if event_type != "speech.audio.delta" or not data_payload:
                                 continue
 
-                            float_block = float_residual[:usable]
-                            float_residual = float_residual[usable:]
-                            in_bytes_total += len(float_block)
-
-                            pcm_24k_s16 = self._f32le_to_s16le(float_block)
-                            pcm_8k_s16, resample_state = audioop.ratecv(
-                                pcm_24k_s16, 2, 1, 24000, 8000, resample_state
-                            )
-                            mulaw_8k = audioop.lin2ulaw(pcm_8k_s16, 2)
-                            out_bytes_total += len(mulaw_8k)
-                            chunk_count += 1
-
-                            if not first_conversion_logged:
-                                logger.debug(
-                                    "[MistralTTS] conversion pipeline active: src=f32le@24k -> s16le@24k -> s16le@8k -> mulaw@8k"
+                            try:
+                                payload = json.loads(data_payload)
+                            except json.JSONDecodeError as e:
+                                logger.warning(
+                                    "⚠️ [MistralTTS] Bad JSON in SSE data: %s | head=%r",
+                                    e, (data_payload or "")[:120],
                                 )
-                                first_conversion_logged = True
+                                continue
 
-                            if chunk_count % 25 == 0:
-                                logger.debug(
-                                    "[MistralTTS] chunks=%d in=%dB float24k out=%dB mulaw8k",
-                                    chunk_count,
-                                    in_bytes_total,
-                                    out_bytes_total,
+                            if isinstance(payload, dict):
+                                audio_b64 = (
+                                    payload.get("audio_data")
+                                    or payload.get("audio")
+                                    or payload.get("delta")
+                                    or payload.get("data")
                                 )
+                            else:
+                                audio_b64 = None
 
-                            await communicator.send_media(base64.b64encode(mulaw_8k).decode("utf-8"))
+                            if not audio_b64:
+                                logger.info(
+                                    "🔍 [MistralTTS] delta event but no audio field; keys=%s",
+                                    list(payload.keys()) if isinstance(payload, dict) else type(payload).__name__,
+                                )
+                                continue
+
+                            try:
+                                raw_audio = base64.b64decode(audio_b64)
+                            except Exception as e:
+                                logger.warning("⚠️ [MistralTTS] Bad base64 in SSE audio: %s", e)
+                                continue
+
+                            await process_audio_bytes(raw_audio)
 
             logger.info(
                 "✅ [MistralTTS] Complete. First byte: %.3fs | chunks=%d | in=%dB float24k | out=%dB mulaw8k",
@@ -105,6 +199,18 @@ class MistralTTS:
                 in_bytes_total,
                 out_bytes_total,
             )
+            logger.info(
+                "🔍 [MistralTTS] SSE summary: total_events=%d types=%s sse_buffer_leftover=%d chars",
+                sse_events_total,
+                sse_event_types_seen,
+                len(sse_buffer),
+            )
+            if sse_events_total == 0 and sse_buffer:
+                # No events got split out, but data arrived. Show what's sitting in the buffer.
+                logger.info(
+                    "🔍 [MistralTTS] sse_buffer head=%r",
+                    sse_buffer[:400],
+                )
         except aiohttp.ClientError as e:
             logger.error("❌ [MistralTTS] HTTP error: %s", e)
         except Exception as e:

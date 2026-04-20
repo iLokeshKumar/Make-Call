@@ -5,6 +5,7 @@ from .deepgram import DeepgramTTS
 from .mimo import MimoTTS
 from .mistral import MistralTTS
 from .smallest import SmallestTTS
+from .groq import GroqTTS
 
 def get_tts_service(provider: str, api_key: str = None, voice_id: str = None, model: str = None):
     """Factory to get the requested TTS service."""
@@ -23,6 +24,8 @@ def get_tts_service(provider: str, api_key: str = None, voice_id: str = None, mo
         return MistralTTS(api_key=api_key, voice_id=voice_id, model=model)
     elif provider == "smallest":
         return SmallestTTS(api_key=api_key, voice_id=voice_id, model=model)
+    elif provider == "groq":
+        return GroqTTS(api_key=api_key, voice_id=voice_id, model=model)
     else:
         # Default fallback
         return CartesiaTTS(api_key=api_key, voice_id=voice_id, model=model)

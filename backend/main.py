@@ -280,6 +280,19 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 + system_prompt
             )
 
+        # Mistral TTS runs a content classifier on every synthesis request that over-triggers on commercial copy (e.g. "hottest models" → 403). Steer the LLM away from the words that trip it. Only needed for mistral TTS.
+        if tts_provider == "mistral":
+            system_prompt += (
+                "\n\n### VOICE-SAFE WORD CHOICE\n"
+                "When describing products, avoid superlatives and slang that a naive "
+                "content filter could misread as adult or aggressive: never use "
+                "'hot', 'hottest', 'sexy', 'steamy', 'juicy', 'fire', 'killer', "
+                "'sick', 'wild', 'crazy'. "
+                "Prefer: 'top-selling', 'popular', 'best-rated', 'most-loved', "
+                "'in-demand', 'trending', 'bestseller', 'flagship', 'standout'. "
+                "This keeps speech synthesis from being blocked mid-call."
+            )
+
         communicator = telephony.get_communicator_for_source(source, websocket)
         transcript_accumulator: list[str] = []
         pipeline = VoicePipeline(

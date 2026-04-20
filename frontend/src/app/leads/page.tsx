@@ -12,7 +12,6 @@ const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060"
 /** Strip system-appended log lines from lead notes before displaying. */
 function cleanNotes(notes: string | null | undefined): string {
     if (!notes) return "";
-    // Remove lines like: "[2026-04-07T12:37:53Z] Post-call nurture. Outcome: follow_up" and: "[2026-04-07T12:37:53Z] Call outcome: qualified, ICP Score: 0.8"
     const cleaned = notes
         .split("\n")
         .filter(line => !/^\[20\d\d-\d\d-\d\dT/.test(line.trim()))

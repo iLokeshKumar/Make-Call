@@ -44,9 +44,6 @@ class SarvamLLM(BaseLLM):
         # Use tool-safe history (avoids orphan tool messages on barge-in)
         final_history = self.get_safe_history(limit=8)
 
-        # Models known to NOT support tool/function calling via Sarvam API.
-        # sarvam-m returns 400 "Tool calling is not supported for this model."
-        # sarvam-105b and sarvam-30b do support tool calling.
         _NO_TOOL_MODELS = {"sarvam-m", "sarvam-2b"}
         supports_tools = self.model not in _NO_TOOL_MODELS
 

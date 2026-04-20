@@ -21,7 +21,7 @@ if not DATABASE_URL:
 
 engine = create_engine(
     DATABASE_URL,
-    echo=True,
+    echo=os.getenv("SQL_ECHO", "0") == "1",
     pool_pre_ping=True,
 )
 

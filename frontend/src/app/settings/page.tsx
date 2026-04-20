@@ -103,7 +103,7 @@ export default function SettingsPage() {
 
     // Per-user AI/preference settings (accessible to all roles)
     const [myAiPrompt, setMyAiPrompt] = useState("");
-    const [myAiVerbosity, setMyAiVerbosity] = useState("2");
+    const [myAiVerbosity, setMyAiVerbosity] = useState("1");
     const [savingMyAi, setSavingMyAi] = useState(false);
     const [myAiSaved, setMyAiSaved] = useState(false);
 
@@ -243,6 +243,8 @@ export default function SettingsPage() {
                         SMALLEST_TTS_MODEL: "",
                         MISTRAL_TTS_MODEL: "",
                         MISTRAL_VOICE_ID: "",
+                        GROQ_API_KEY: "",
+                        GROQ_MODEL: "",
                     };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
@@ -866,6 +868,7 @@ export default function SettingsPage() {
                                         <option value="cartesia">Cartesia</option>
                                         <option value="elevenlabs">ElevenLabs</option>
                                         <option value="smallest">Smallest</option>
+                                        <option value="groq">Groq</option>
                                     </select>
                                 </div>
 
@@ -884,6 +887,7 @@ export default function SettingsPage() {
                                         <option value="openrouter">OpenRouter (Inference)</option>
                                         <option value="cerebras">Cerebras (Inference)</option>
                                         <option value="sarvam">Sarvam (Multilingual)</option>
+                                        <option value="groq">Groq</option>
                                         <option value="mimo">Mimo</option>
                                     </select>
                                 </div>
@@ -903,6 +907,7 @@ export default function SettingsPage() {
                                         <option value="mimo">Mimo</option>
                                         <option value="mistral">Mistral</option>
                                         <option value="smallest">Smallest</option>
+                                        <option value="groq">Groq</option>
                                     </select>
                                 </div>
                             </div>
@@ -1135,9 +1140,9 @@ export default function SettingsPage() {
                                 "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID"],
-                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID", "GROQ_STT_MODEL", "GROQ_VOICE"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL"],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL"],
                                 "Email (SMTP — Outbound)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Email (IMAP — Inbound)": ["IMAP_SERVER", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD"],
                                 "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"]
@@ -1180,10 +1185,8 @@ export default function SettingsPage() {
 
                 {/* Competitors Tab */}
                 {activeTab === "competitors" && hasAdminAccess && (() => {
-                    // Unified row list: union of tracked names (COMPETITOR_NAMES setting)
-                    // and DB rows (competitorSummary). This means:
-                    //  - Adding a name shows it immediately as a row before any call detects it
-                    //  - Competitors detected on calls also appear even if not in the tracked list
+                    // Unified row list: union of tracked names (COMPETITOR_NAMES setting) and DB rows (competitorSummary). This means:
+                    // Adding a name shows it immediately as a row before any call detects it. Competitors detected on calls also appear even if not in the tracked list
                     const parsedNames = competitorNames.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
                     const summaryMap = Object.fromEntries(competitorSummary.map(s => [s.competitor, s]));
                     const allNames = [...new Set([...parsedNames, ...Object.keys(summaryMap)])];

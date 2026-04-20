@@ -1,7 +1,10 @@
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import StreamingResponse
 from sqlmodel import Session, SQLModel, func, select
 
 from auth import get_current_user
+from credentials_service import get_company_credential
 from services.core.auth_service import user_has_any_permission
 from database import get_session
 from models.models import EngagementEvent, Interaction, Lead, User, utc_now
@@ -18,9 +21,29 @@ class InteractionCreate(SQLModel):
     channel: str | None = None
 
 
+class InteractionListItem(SQLModel):
+    """Interaction row with lead_name joined in for the UI."""
+    id: int
+    type: str
+    channel: str | None = None
+    direction: str | None = None
+    status: str | None = None
+    delivery_status: str | None = None
+    content: str | None = None
+    transcript: str | None = None
+    recording_url: str | None = None
+    recording_duration: int | None = None
+    started_at: str | None = None
+    ended_at: str | None = None
+    created_at: str | None = None
+    lead_id: int | None = None
+    lead_name: str | None = None
+
+
 class InteractionListResponse(SQLModel):
-    items: list[Interaction]
+    items: list[InteractionListItem]
     total: int
+    page: int
 
 
 @router.get("/interactions", response_model=InteractionListResponse)
@@ -56,7 +79,107 @@ async def list_interactions(
         .limit(limit)
     ).all()
 
-    return InteractionListResponse(items=interactions, total=total)
+    # One join-less lookup so the UI can show "Outbound to <name>" without the frontend making N extra requests.
+    lead_ids = {i.lead_id for i in interactions if i.lead_id is not None}
+    lead_names: dict[int, str] = {}
+    if lead_ids:
+        lead_rows = session.exec(
+            select(Lead.id, Lead.name).where(
+                Lead.company_id == current_user.company_id,
+                Lead.id.in_(lead_ids),
+            )
+        ).all()
+        lead_names = {row[0]: row[1] for row in lead_rows}
+
+    items = [
+        InteractionListItem(
+            id=i.id,
+            type=i.type,
+            channel=i.channel,
+            direction=i.direction,
+            status=i.status,
+            delivery_status=i.delivery_status,
+            content=i.content,
+            transcript=i.transcript,
+            recording_url=i.recording_url,
+            recording_duration=i.recording_duration,
+            started_at=i.started_at.isoformat() if i.started_at else None,
+            ended_at=i.ended_at.isoformat() if i.ended_at else None,
+            created_at=i.created_at.isoformat() if i.created_at else None,
+            lead_id=i.lead_id,
+            lead_name=lead_names.get(i.lead_id) if i.lead_id else None,
+        )
+        for i in interactions
+    ]
+
+    return InteractionListResponse(items=items, total=total, page=page)
+
+
+@router.get("/interactions/{interaction_id}/recording")
+async def stream_interaction_recording(
+    interaction_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Proxy the Twilio recording so the browser can play it.
+
+    Twilio's recording URLs (https://api.twilio.com/.../Recordings/{sid}.mp3)
+    require HTTP Basic Auth with the account SID and auth token. HTML <audio>
+    tags can't send credentials, so we stream the audio through the backend
+    using the company's stored Twilio creds.
+    """
+    can_read_company = user_has_any_permission(session, current_user.id, {"interaction.read_company"})
+    can_read_own = user_has_any_permission(session, current_user.id, {"interaction.read_own"})
+    if not can_read_company and not can_read_own:
+        raise HTTPException(status_code=403, detail="No permission to view recordings")
+
+    interaction = session.get(Interaction, interaction_id)
+    if not interaction or interaction.company_id != current_user.company_id:
+        raise HTTPException(status_code=404, detail="Interaction not found")
+    if not can_read_company and interaction.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="No permission to view this recording")
+    if not interaction.recording_url:
+        raise HTTPException(status_code=404, detail="No recording on this interaction")
+
+    sid = get_company_credential(session, current_user.company_id, "TWILIO_ACCOUNT_SID")
+    token = get_company_credential(session, current_user.company_id, "TWILIO_AUTH_TOKEN")
+    if not sid or not token:
+        raise HTTPException(status_code=500, detail="Twilio credentials not configured")
+
+    upstream_url = interaction.recording_url
+    client = httpx.AsyncClient(timeout=60.0)
+
+    async def iter_audio():
+        try:
+            async with client.stream("GET", upstream_url, auth=(sid, token)) as resp:
+                if resp.status_code != 200:
+                    # Upstream can 404 if Twilio is still processing the recording.
+                    return
+                async for chunk in resp.aiter_bytes(chunk_size=64 * 1024):
+                    yield chunk
+        finally:
+            await client.aclose()
+
+    # HEAD first so we can surface a proper HTTP status before streaming.
+    head = await client.head(upstream_url, auth=(sid, token))
+    if head.status_code == 404:
+        await client.aclose()
+        raise HTTPException(status_code=404, detail="Recording not yet available (Twilio may still be processing)")
+    if head.status_code != 200:
+        await client.aclose()
+        raise HTTPException(status_code=502, detail=f"Upstream returned {head.status_code}")
+
+    content_length = head.headers.get("content-length")
+    headers = {}
+    if content_length:
+        headers["Content-Length"] = content_length
+
+    return StreamingResponse(
+        iter_audio(),
+        media_type=head.headers.get("content-type", "audio/mpeg"),
+        headers=headers,
+    )
 
 
 @router.post("/interactions", response_model=Interaction)

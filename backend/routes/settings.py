@@ -70,6 +70,11 @@ ALL_INTEGRATION_KEYS = {
     "OPENROUTER_MODEL",
     "CEREBRAS_MODEL",
     "SARVAM_MODEL",
+    "GROQ_STT_MODEL",
+    "GROQ_TTS_MODEL",
+    "GROQ_VOICE",
+    "GROQ_API_KEY",
+    "GROQ_MODEL",
     # Email / SMTP
     "SMTP_SERVER",
     "SMTP_PORT",
@@ -114,6 +119,7 @@ SECRET_INTEGRATION_KEYS = {
     "LUSHA_API_KEY",
     "ZOOMINFO_CLIENT_ID",
     "ZOOMINFO_API_KEY",
+    "GROQ_API_KEY",
 }
 
 PLAIN_INTEGRATION_KEYS = ALL_INTEGRATION_KEYS - SECRET_INTEGRATION_KEYS
@@ -378,4 +384,171 @@ async def debug_settings_cache(
     if include_values:
         response["values"] = {k: _mask_debug_value(k, str(v)) for k, v in items.items()}
 
+    return response
+
+
+@router.get("/debug/groq-capabilities/{company_id}")
+async def debug_groq_capabilities(
+    company_id: int,
+    run_probe: bool = Query(default=False, description="Run live Groq API probes for chat/stt/tts"),
+    current_user: User = Depends(PermissionChecker("settings.read_company")),
+    session: Session = Depends(get_session),
+):
+    """
+    Debug endpoint for Groq readiness + optional live probes.
+    """
+    if company_id != current_user.company_id:
+        raise HTTPException(status_code=403, detail="You can only inspect your own company capabilities")
+
+    from credentials_service import get_company_setting_value
+
+    groq_api_key = get_company_setting_value(session, company_id, "GROQ_API_KEY")
+    chat_model = (
+        get_company_setting_value(session, company_id, "GROQ_MODEL")
+        or "llama-3.1-8b-instant"
+    )
+    stt_model = (
+        get_company_setting_value(session, company_id, "GROQ_STT_MODEL")
+        or "whisper-large-v3-turbo"
+    )
+    tts_model = (
+        get_company_setting_value(session, company_id, "GROQ_TTS_MODEL")
+        or "canopylabs/orpheus-v1-english"
+    )
+    tts_voice = (
+        get_company_setting_value(session, company_id, "GROQ_VOICE")
+        or "troy"
+    )
+
+    sdk_info: dict = {"available": False}
+    try:
+        import groq as _groq
+        from groq import Groq as _Groq
+        sdk_info = {
+            "available": True,
+            "version": getattr(_groq, "__version__", "unknown"),
+            "has_groq_client": hasattr(_groq, "Groq"),
+            "has_async_client": hasattr(_groq, "AsyncGroq"),
+        }
+        if groq_api_key:
+            c = _Groq(api_key=groq_api_key)
+            sdk_info["has_chat_completions"] = hasattr(c.chat, "completions") and hasattr(c.chat.completions, "create")
+            sdk_info["has_audio_transcriptions"] = hasattr(c, "audio") and hasattr(c.audio, "transcriptions")
+            sdk_info["has_audio_speech"] = hasattr(c, "audio") and hasattr(c.audio, "speech")
+    except Exception as exc:
+        sdk_info = {"available": False, "error": str(exc)}
+
+    response: dict = {
+        "company_id": company_id,
+        "configured": {
+            "groq_api_key_present": bool(groq_api_key),
+            "groq_api_key_masked": _mask_debug_value("GROQ_API_KEY", groq_api_key or ""),
+            "chat_model": chat_model,
+            "stt_model": stt_model,
+            "tts_model": tts_model,
+            "tts_voice": tts_voice,
+        },
+        "sdk": sdk_info,
+        "probe_run": run_probe,
+    }
+
+    if not run_probe:
+        return response
+
+    probes: dict = {
+        "chat": {"ok": False, "error": None},
+        "tts": {"ok": False, "error": None},
+        "stt": {"ok": False, "error": None},
+    }
+
+    if not groq_api_key:
+        probes["chat"]["error"] = "GROQ_API_KEY not configured"
+        probes["tts"]["error"] = "GROQ_API_KEY not configured"
+        probes["stt"]["error"] = "GROQ_API_KEY not configured"
+        response["probes"] = probes
+        return response
+
+    try:
+        import asyncio
+        import io
+        import wave
+        from groq import Groq
+
+        client = Groq(api_key=groq_api_key)
+
+        # Chat probe
+        try:
+            def _chat_probe():
+                return client.chat.completions.create(
+                    model=chat_model,
+                    messages=[
+                        {"role": "system", "content": "You are a concise assistant."},
+                        {"role": "user", "content": "Reply with exactly OK"},
+                    ],
+                    max_completion_tokens=16,
+                    temperature=0,
+                )
+
+            chat_resp = await asyncio.to_thread(_chat_probe)
+            msg = ""
+            if getattr(chat_resp, "choices", None):
+                first = chat_resp.choices[0]
+                msg = getattr(getattr(first, "message", None), "content", "") or ""
+            probes["chat"]["ok"] = bool(msg.strip())
+            probes["chat"]["sample"] = msg.strip()[:80]
+        except Exception as exc:
+            probes["chat"]["error"] = str(exc)
+
+        # TTS probe (small payload)
+        try:
+            def _tts_probe():
+                return client.audio.speech.create(
+                    model=tts_model,
+                    voice=tts_voice,
+                    input="Hello from Rio.",
+                    response_format="mulaw",
+                    sample_rate=8000,
+                )
+
+            tts_resp = await asyncio.to_thread(_tts_probe)
+            tts_bytes = await asyncio.to_thread(tts_resp.read)
+            probes["tts"]["ok"] = bool(tts_bytes)
+            probes["tts"]["bytes"] = len(tts_bytes or b"")
+        except Exception as exc:
+            probes["tts"]["error"] = str(exc)
+
+        # STT probe (0.5s silence wav)
+        try:
+            wav_buf = io.BytesIO()
+            with wave.open(wav_buf, "wb") as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(b"\x00\x00" * 8000)
+
+            file_obj = ("silence.wav", wav_buf.getvalue())
+
+            def _stt_probe():
+                return client.audio.transcriptions.create(
+                    model=stt_model,
+                    file=file_obj,
+                    response_format="verbose_json",
+                    language="en",
+                )
+
+            stt_resp = await asyncio.to_thread(_stt_probe)
+            transcript = getattr(stt_resp, "text", None)
+            if transcript is None and isinstance(stt_resp, dict):
+                transcript = stt_resp.get("text")
+            probes["stt"]["ok"] = transcript is not None
+            probes["stt"]["sample"] = (transcript or "")[:80]
+        except Exception as exc:
+            probes["stt"]["error"] = str(exc)
+
+    except Exception as exc:
+        probes["chat"]["error"] = probes["chat"]["error"] or f"Probe init error: {exc}"
+        probes["tts"]["error"] = probes["tts"]["error"] or f"Probe init error: {exc}"
+        probes["stt"]["error"] = probes["stt"]["error"] or f"Probe init error: {exc}"
+
+    response["probes"] = probes
     return response

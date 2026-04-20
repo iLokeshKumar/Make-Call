@@ -6,6 +6,7 @@ from .cerebras import CerebrasLLM
 from .openrouter import OpenRouterLLM
 from .mimo import MimoLLM
 from .sarvam import SarvamLLM
+from .groq import GroqLLM
 
 def get_llm_service(provider: str, system_prompt: str, api_key: str = None, model: str = None):
     """Factory to get the requested LLM service."""
@@ -26,6 +27,8 @@ def get_llm_service(provider: str, system_prompt: str, api_key: str = None, mode
         return MimoLLM(system_prompt, api_key=api_key, model=model)
     elif provider == "sarvam":
         return SarvamLLM(system_prompt, api_key=api_key, model=model)
+    elif provider == "groq":
+        return GroqLLM(system_prompt, api_key=api_key, model=model)
     else:
         # Default fallback
         return MistralLLM(system_prompt, api_key=api_key, model=model)
