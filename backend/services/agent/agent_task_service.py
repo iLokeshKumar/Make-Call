@@ -21,15 +21,12 @@ from models.models import AgentTask, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Approval-required action types by default.
-# Companies can override via AGENT_APPROVAL_ACTIONS setting (comma-separated list).
+# Approval-required action types by default. Companies can override via AGENT_APPROVAL_ACTIONS setting (comma-separated list).
 _DEFAULT_APPROVAL_REQUIRED: set[str] = {
     "send_email",
     "send_quote",
     "send_whatsapp_bulk",
-    # Week 7.3 — closer agent escalates to a human when it can't drive a deal
-    # to close_won on its own. The handoff task carries the negotiation
-    # summary; a human reviewer sees it in /agents/approvals.
+    # closer agent escalates to a human when it can't drive a deal to close_won on its own. The handoff task carries the negotiation summary; a human reviewer sees it in /agents/approvals.
     "handoff",
 }
 
@@ -130,8 +127,7 @@ def create_agent_task(
         updated_by=actor_user_id,
     )
     session.add(task)
-    # Queue a NOTIFY in the same transaction so the worker wakes immediately
-    # on commit. No-op on sqlite (tests). Fire-and-forget on any error.
+    # Queue a NOTIFY in the same transaction so the worker wakes immediately on commit. No-op on sqlite (tests). Fire-and-forget on any error.
     try:
         from services.notify_listener import notify as _notify_worker
         _notify_worker(session, company_id)
@@ -243,7 +239,7 @@ def run_agent_tasks(
     for task in tasks:
         results["processed"] += 1
 
-        # Gate: task needs approval but hasn't been approved yet
+        # task needs approval but hasn't been approved yet
         if task.requires_approval and task.status == "pending":
             try:
                 from services.agent.agent_approval_service import create_approval
@@ -264,9 +260,7 @@ def run_agent_tasks(
                 logger.warning("[AgentTask] Could not create approval for task %s: %s", task.id, exc)
             continue
 
-        # Execute — set request_id_var to the task's trace_id so logs +
-        # any sub-tasks created inside the executor inherit it.  Falls back
-        # to "task:{id}" if no trace was carried.
+        # Execute — set request_id_var to the task's trace_id so logs + any sub-tasks created inside the executor inherit it.  Falls back to "task:{id}" if no trace was carried.
         from utils.logger import request_id_var
         trace = task.trace_id or f"task:{task.id}"
         token = request_id_var.set(trace)
@@ -288,9 +282,7 @@ def run_agent_tasks(
             )
             try:
                 asyncio.get_running_loop()
-                # Worker invoked from a FastAPI route — hand the coro to a
-                # fresh-loop thread, carrying ContextVars (request_id_var)
-                # across the boundary so trace_id propagation survives.
+                # Worker invoked from a FastAPI route — hand the coro to a fresh-loop thread, carrying ContextVars (request_id_var) across the boundary so trace_id propagation survives.
                 ctx = contextvars.copy_context()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
                     output = pool.submit(ctx.run, asyncio.run, coro).result()

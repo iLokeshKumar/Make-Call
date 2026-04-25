@@ -114,8 +114,7 @@ async def list_pending_approvals(
     expire_stale(session=session, company_id=current_user.company_id)
     items = get_pending(session=session, company_id=current_user.company_id, skip=skip, limit=limit)
 
-    # Enrich each approval with a presenter-rendered view. The presenter is
-    # pure + defensive — never raises — so this is safe inline.
+    # Enrich each approval with a presenter-rendered view. The presenter is pure + defensive — never raises — so this is safe inline.
     task_type_for = {
         it["task_id"]: (it.get("task") or {}).get("task_type") or it.get("action_type")
         for it in items

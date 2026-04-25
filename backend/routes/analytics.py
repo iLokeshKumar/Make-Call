@@ -66,8 +66,7 @@ async def get_latency_analytics(
         cutoff_start = cutoff
         cutoff_end = datetime.now(timezone.utc) + timedelta(days=1)
 
-    # Per-engine aggregates (turn-level rows). p95 via Postgres percentile_cont;
-    # actionable for provider-pick decisions in /settings (see docs/VOICE_TUNING.md).
+    # Per-engine aggregates (turn-level rows). p95 via Postgres percentile_cont; actionable for provider-pick decisions in /settings (see docs/VOICE_TUNING.md).
     scope_filter = "AND user_id = :user_id" if scope != "all" else ""
     engine_rows = session.execute(
         text(f"""
@@ -235,10 +234,7 @@ async def get_latency_analytics(
     total_turns = sum(e["rows"] for e in engines)
     total_calls = len(set(r.interaction_id for r in interaction_rows))
 
-    # CSAT-by-LLM-provider — joins customer-source Feedback rows for each
-    # interaction back to the engine that handled it.  Lets the user see
-    # not just "which provider is fastest" but "which provider customers
-    # actually rated highest".  Tenant-scoped by company_id.
+    # CSAT-by-LLM-provider — joins customer-source Feedback rows for each interaction back to the engine that handled it.  Lets the user see not just "which provider is fastest" but "which provider customers actually rated highest".  Tenant-scoped by company_id.
     csat_rows = session.execute(
         text("""
             SELECT

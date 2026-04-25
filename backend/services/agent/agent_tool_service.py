@@ -52,7 +52,6 @@ def _find_existing_appointment(
         return None
 
     if not products:
-        # book_meeting (no product context) — return the nearest upcoming
         return appts[0]
 
     for appt in appts:
@@ -350,7 +349,6 @@ async def book_meeting(
     session.commit()
     session.refresh(appointment)
 
-    # Advance ISM stage to "engaged" — they agreed to a meeting
     try:
         from services.call.outcome_service import advance_ism_stage
         if advance_ism_stage(lead, "engaged"):

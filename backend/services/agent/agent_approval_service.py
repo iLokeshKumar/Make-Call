@@ -41,7 +41,6 @@ def create_approval(
     actor_user_id: int | None = None,
 ) -> AgentApproval:
     """Create an approval request linked to an agent task."""
-    # Idempotent: don't create a duplicate if one already exists for this task
     existing = session.exec(
         select(AgentApproval).where(
             AgentApproval.task_id == task_id,
