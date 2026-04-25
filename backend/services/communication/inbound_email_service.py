@@ -180,6 +180,28 @@ def ingest_email_webhook_event(
     session.refresh(interaction)
 
     intent = classify_reply_intent(subject or body)
+    # LLM-backed classification elevates rule-"neutral" replies into the roadmap
+    # 5-intent set {interested, objection, unsubscribe, question, noise}.
+    try:
+        from agents.reply_classifier import classify_reply_sync as _classify_reply_sync
+        classification = _classify_reply_sync(session, company_id, subject or body, "email", lead.id)
+    except Exception as _cls_exc:  # noqa: BLE001
+        classification = {"intent": "noise", "source": "error", "confidence": 0.0, "error": str(_cls_exc)}
+
+    if classification.get("intent") == "unsubscribe" and intent != "opt_out":
+        try:
+            unsubscribe_lead(
+                session=session,
+                company_id=company_id,
+                actor_user_id=lead.owner_user_id,
+                lead_id=lead.id,
+                channel="email",
+                reason="llm_reply_classifier",
+            )
+            intent = "opt_out"
+        except Exception:  # noqa: BLE001
+            pass
+
     lead_update_result = _update_lead_for_email_reply(
         session=session, lead=lead, actor_user_id=lead.owner_user_id, body=body, intent=intent,
     )
@@ -221,6 +243,7 @@ def ingest_email_webhook_event(
         "company_id": company_id,
         "lead_id": lead.id,
         "intent": intent,
+        "classification": classification,
         "call_task_id": lead_update_result["call_task_id"],
         **({k: v for k, v in quote_result.items() if k != "status"}),
         **({"quote_request_status": quote_result["status"]} if quote_result.get("status") else {}),

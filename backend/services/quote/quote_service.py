@@ -246,7 +246,7 @@ def mark_quote_status(
     target_ism = _QUOTE_STATUS_ISM_STAGE.get(status)
     if target_ism and quote.lead_id:
         try:
-            from call.outcome_service import advance_ism_stage
+            from services.call.outcome_service import advance_ism_stage
             lead = session.get(Lead, quote.lead_id)
             if lead and lead.company_id == company_id:
                 if advance_ism_stage(lead, target_ism):
@@ -259,7 +259,7 @@ def mark_quote_status(
 
     if status == "accepted" and quote.lead_id:
         try:
-            from feedback.auto_csat_service import maybe_send_auto_csat
+            from services.feedback.auto_csat_service import maybe_send_auto_csat
             maybe_send_auto_csat(
                 session=session,
                 company_id=company_id,

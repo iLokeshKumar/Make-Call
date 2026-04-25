@@ -28,6 +28,8 @@ from routes import accounts, coach, competitors, interactions, lead_import, lead
 from routes import knowledge
 from routes import agents as agent_routes
 from routes import agent_tasks as agent_tasks_routes
+from routes import metrics as metrics_routes
+from routes import ism_rules as ism_rules_routes
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
@@ -55,6 +57,12 @@ class _RequestContextMiddleware(BaseHTTPMiddleware):
             request_id_var.reset(token)
         duration_ms = int((time.monotonic() - start) * 1000)
         response.headers["X-Request-ID"] = req_id
+        # SLO #1 (API availability) feed.  In-process counter; OPTIONS skipped.
+        try:
+            from services.observability import record_response as _rec
+            _rec(request.method, response.status_code)
+        except Exception:  # noqa: BLE001
+            pass
         # Skip noisy health-check / static paths from the summary log
         if not request.url.path.startswith("/uploads"):
             logger.info(
@@ -100,17 +108,62 @@ class _RLSMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _extract_company_id(request: Request) -> int | None:
-        auth = request.headers.get("Authorization", "")
-        if not auth.startswith("Bearer "):
+        # Cookie first (httpOnly session), then bearer header (legacy + bots).
+        from auth import SESSION_COOKIE_NAME
+        token = request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
+            auth = request.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth[7:]
+        if not token:
             return None
         try:
             import jwt as _jwt
             from auth import SECRET_KEY, ALGORITHM
-            payload = _jwt.decode(auth[7:], SECRET_KEY, algorithms=[ALGORITHM])
+            payload = _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
             cid = payload.get("company_id")
             return int(cid) if cid else None
         except Exception:
             return None
+
+
+class _CSRFMiddleware(BaseHTTPMiddleware):
+    """Double-submit-cookie CSRF protection for cookie-authenticated requests.
+
+    The hard work is in `auth.verify_csrf_invariants` so the decision is pure
+    and unit-testable. This middleware is just a dispatcher that returns the
+    403 response when the invariants fail.
+
+    Layering (in the pure function):
+      1. Safe methods (GET/HEAD/OPTIONS) pass — no state change possible.
+      2. Paths in CSRF_BYPASS_PREFIXES pass (login, public token routes, webhooks).
+      3. No session cookie = bearer-only client = CSRF N/A (attacker can't set
+         Authorization header any more than X-CSRF-Token).
+      4. Otherwise: require header to match cookie via `secrets.compare_digest`.
+    """
+
+    async def dispatch(self, request: Request, call_next):
+        from csrf import (
+            CSRF_COOKIE_NAME,
+            CSRF_HEADER_NAME,
+            SESSION_COOKIE_NAME,
+            verify_csrf_invariants,
+        )
+
+        ok, reason = verify_csrf_invariants(
+            method=request.method,
+            path=request.url.path,
+            session_cookie=request.cookies.get(SESSION_COOKIE_NAME),
+            csrf_cookie=request.cookies.get(CSRF_COOKIE_NAME),
+            csrf_header=(
+                request.headers.get(CSRF_HEADER_NAME)
+                or request.headers.get(CSRF_HEADER_NAME.lower())
+            ),
+        )
+        if not ok:
+            from starlette.responses import JSONResponse
+            return JSONResponse(status_code=403, content={"detail": reason})
+        return await call_next(request)
 
 
 def get_company_setting_value(session: Session, company_id: int, key: str) -> str | None:
@@ -237,7 +290,12 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             "ask for brief verbal feedback: "
             "'Before we wrap up — on a scale of 1 to 5, how would you rate your experience speaking with me today?' "
             "Wait for their response, thank them warmly, and then close the call naturally. "
-            "If they skip or don't give a number, don't push — simply say goodbye."
+            "If they skip or don't give a number, don't push — simply say goodbye.\n\n"
+            "AMBIGUOUS RATING HANDLING: If the customer gives two numbers ('one or five'), "
+            "a range ('three to four'), or anything not a single integer, do NOT assume a value. "
+            "Politely ask them to pick one: 'Just to make sure I got it right — would that be a 1 or a 5?' "
+            "If they still don't give a single number, do not apologize or react as if you got a low score; "
+            "thank them and close the call. Their qualitative words alone are valuable."
         )
 
         stt_provider = (
@@ -379,7 +437,6 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 except Exception as exc:
                     logger.warning("Could not update CallTask %s: %s", call_task_id, exc)
 
-            # Publish "ended" — call has disconnected, outcome captured
             try:
                 if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and target_user:
                     _ct_end = session.get(CallTask, int(call_task_id))
@@ -477,10 +534,26 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="Multi-Tenant CRM API", lifespan=lifespan)
 _process_start_time: float = time.time()
 app.add_middleware(_RLSMiddleware)
+app.add_middleware(_CSRFMiddleware)
 app.add_middleware(_RequestContextMiddleware)
+
+
+def _parse_allowed_origins() -> list[str]:
+    """ALLOWED_ORIGINS is a comma-separated allowlist.
+
+    Browsers refuse to send credentials (cookies) to a wildcard origin, so we
+    must enumerate the exact origins that are allowed to call the API.
+    Default: localhost:3006 (frontend dev server) so local dev still works
+    out of the box.
+    """
+    raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:3006")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["http://localhost:3006"]
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_parse_allowed_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -510,6 +583,10 @@ app.include_router(feedback.router)
 app.include_router(knowledge.router)
 app.include_router(agent_routes.router)
 app.include_router(agent_tasks_routes.router, prefix="/crm")
+app.include_router(metrics_routes.router)
+app.include_router(ism_rules_routes.router, prefix="/crm")
+from routes import agent_analytics as agent_analytics_routes
+app.include_router(agent_analytics_routes.router, prefix="/crm")
 
 # MCP server — mount SSE transport at /mcp (optional, degrades gracefully)
 try:
@@ -581,6 +658,26 @@ async def health_check():
     if wh.get("last_cycle_status") == "partial_failure":
         # partial_failure is a warning, not hard degraded — leave status as healthy
         pass
+
+    # Mistral rate-limit signal — sliding 15-min counter, in-process.
+    # Surfaces drained free-tier buckets without going degraded (yet).
+    try:
+        from services.observability import get_rate_limit_hits_last_15min
+        result["mistral_429_last_15min"] = get_rate_limit_hits_last_15min()
+    except Exception as exc:  # noqa: BLE001
+        result["mistral_429_last_15min"] = f"error:{exc}"
+
+    # Chroma RAG heartbeat — best-effort.  In-process; ms latency.
+    try:
+        from services.rag.collections import get_or_create_collection  # noqa: F401
+        # Lightweight: list collections via the in-process client.
+        import chromadb
+        chroma_client = chromadb.PersistentClient(path="./knowledge_base")
+        chroma_client.list_collections()
+        result["chroma_ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        result["chroma_ok"] = False
+        result["chroma_error"] = str(exc)[:120]
 
     # Process uptime
     uptime = round(time.time() - _process_start_time) if _process_start_time else None

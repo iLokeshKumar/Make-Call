@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Award, Brain, Loader2, RefreshCw, TrendingUp, Zap } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type CoachScore = {
@@ -23,7 +24,6 @@ type CoachScore = {
 
 type Props = {
   interactionId: number;
-  token: string;
   onSessionTimeout?: () => void;
 };
 
@@ -60,7 +60,7 @@ function overallColor(score: number | null | undefined): string {
   return "text-red-600 dark:text-red-400";
 }
 
-export default function SalesCoachPanel({ interactionId, token, onSessionTimeout }: Props) {
+export default function SalesCoachPanel({ interactionId, onSessionTimeout }: Props) {
   const [score, setScore] = useState<CoachScore | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -72,8 +72,7 @@ export default function SalesCoachPanel({ interactionId, token, onSessionTimeout
       if (!quiet) setLoading(true);
       else setRefreshing(true);
       try {
-        const res = await fetch(`${API_BASE}/crm/coach/scores/${interactionId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${API_BASE}/crm/coach/scores/${interactionId}`, {
         });
         if (res.status === 401) { onSessionTimeout?.(); return; }
         if (!res.ok) return;
@@ -88,7 +87,7 @@ export default function SalesCoachPanel({ interactionId, token, onSessionTimeout
         setRefreshing(false);
       }
     },
-    [interactionId, token, onSessionTimeout]
+    [interactionId, onSessionTimeout]
   );
 
   useEffect(() => {

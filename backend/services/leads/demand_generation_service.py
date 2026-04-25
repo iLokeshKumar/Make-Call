@@ -409,6 +409,28 @@ def trigger_new_lead_outreach(session: Session, company_id: int, actor_user_id: 
         result["reason"] = "AUTO_TRIGGER_NEW_LEADS disabled"
         return result
 
+    # Week 7 — three-agent split. Enqueue a researcher task that will handle
+    # deeper enrichment, LeadRequirement persistence, and either qualify +
+    # hand off to the outreacher, or disqualify the lead. Idempotent by
+    # lead_id so repeated create_lead calls don't flood the queue.
+    try:
+        from services.agent.agent_task_service import create_agent_task
+        create_agent_task(
+            session=session,
+            company_id=company_id,
+            task_type="enrich_lead",
+            assigned_agent="researcher",
+            input_json={"lead_id": lead_id},
+            lead_id=lead_id,
+            idempotency_key=f"researcher:{lead_id}",
+            actor_user_id=actor_user_id,
+        )
+        result["researcher_task_enqueued"] = True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DemandGen] researcher enqueue failed: %s", exc)
+        result["researcher_task_enqueued"] = False
+        result["researcher_enqueue_error"] = str(exc)
+
     if strategy["schedule_call"]:
         from datetime import timedelta
 

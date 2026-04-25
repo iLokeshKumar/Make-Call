@@ -66,41 +66,51 @@ async def get_latency_analytics(
         cutoff_start = cutoff
         cutoff_end = datetime.now(timezone.utc) + timedelta(days=1)
 
-    # Per-engine aggregates (turn-level rows)
-    engine_query = (
-        select(
-            LatencyLog.engine,
-            func.count(LatencyLog.id).label("rows"),
-            func.avg(LatencyLog.stt_ms).label("stt_avg"),
-            func.avg(LatencyLog.llm_ms).label("llm_avg"),
-            func.avg(LatencyLog.tts_ms).label("tts_avg"),
-            func.avg(LatencyLog.total_ms).label("total_avg"),
-            func.min(LatencyLog.total_ms).label("total_min"),
-            func.max(LatencyLog.total_ms).label("total_max"),
-        )
-        .where(LatencyLog.created_at >= cutoff_start)
-        .where(LatencyLog.created_at < cutoff_end)
-        .where(LatencyLog.engine.is_not(None))
-        .where(LatencyLog.company_id == current_user.company_id)
-    )
-
-    if scope != "all":
-        engine_query = engine_query.where(LatencyLog.user_id == current_user.id)
-
-    engine_query = engine_query.group_by(LatencyLog.engine).order_by(func.avg(LatencyLog.total_ms))
-
-    engine_rows = session.exec(engine_query).all()
+    # Per-engine aggregates (turn-level rows). p95 via Postgres percentile_cont;
+    # actionable for provider-pick decisions in /settings (see docs/VOICE_TUNING.md).
+    scope_filter = "AND user_id = :user_id" if scope != "all" else ""
+    engine_rows = session.execute(
+        text(f"""
+            SELECT
+                engine,
+                COUNT(id) AS rows,
+                AVG(stt_ms) AS stt_avg,
+                AVG(llm_ms) AS llm_avg,
+                AVG(tts_ms) AS tts_avg,
+                AVG(total_ms) AS total_avg,
+                MIN(total_ms) AS total_min,
+                MAX(total_ms) AS total_max,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY total_ms) AS total_p95,
+                percentile_cont(0.95) WITHIN GROUP (ORDER BY llm_ms)   AS llm_p95
+            FROM latencylog
+            WHERE created_at >= :cutoff_start
+              AND created_at <  :cutoff_end
+              AND engine IS NOT NULL
+              AND company_id = :company_id
+              {scope_filter}
+            GROUP BY engine
+            ORDER BY AVG(total_ms)
+        """),
+        {
+            "cutoff_start": cutoff_start,
+            "cutoff_end": cutoff_end,
+            "company_id": current_user.company_id,
+            **({"user_id": current_user.id} if scope != "all" else {}),
+        },
+    ).all()
 
     engines = [
         {
-            "engine": r.engine,
-            "rows": r.rows,
-            "stt_avg": round(r.stt_avg or 0, 1),
-            "llm_avg": round(r.llm_avg or 0, 1),
-            "tts_avg": round(r.tts_avg or 0, 1),
-            "total_avg": round(r.total_avg or 0, 1),
-            "total_min": round(r.total_min or 0, 1),
-            "total_max": round(r.total_max or 0, 1),
+            "engine": r[0],
+            "rows": r[1],
+            "stt_avg": round(float(r[2] or 0), 1),
+            "llm_avg": round(float(r[3] or 0), 1),
+            "tts_avg": round(float(r[4] or 0), 1),
+            "total_avg": round(float(r[5] or 0), 1),
+            "total_min": round(float(r[6] or 0), 1),
+            "total_max": round(float(r[7] or 0), 1),
+            "total_p95": round(float(r[8] or 0), 1),
+            "llm_p95":   round(float(r[9] or 0), 1),
         }
         for r in engine_rows
     ]
@@ -225,6 +235,36 @@ async def get_latency_analytics(
     total_turns = sum(e["rows"] for e in engines)
     total_calls = len(set(r.interaction_id for r in interaction_rows))
 
+    # CSAT-by-LLM-provider — joins customer-source Feedback rows for each
+    # interaction back to the engine that handled it.  Lets the user see
+    # not just "which provider is fastest" but "which provider customers
+    # actually rated highest".  Tenant-scoped by company_id.
+    csat_rows = session.execute(
+        text("""
+            SELECT
+                ll.llm_provider                AS provider,
+                ROUND(AVG(fb.rating)::numeric, 2) AS csat_avg,
+                COUNT(DISTINCT fb.id)          AS csat_count
+            FROM feedback fb
+            JOIN latencylog ll
+              ON ll.interaction_id = fb.interaction_id
+            WHERE fb.company_id = :company_id
+              AND fb.source = 'customer'
+              AND fb.feedback_type = 'csat'
+              AND fb.rating IS NOT NULL
+              AND fb.created_at >= :cutoff_start
+              AND fb.created_at <  :cutoff_end
+              AND ll.llm_provider IS NOT NULL
+            GROUP BY ll.llm_provider
+            ORDER BY csat_avg DESC NULLS LAST
+        """),
+        {"cutoff_start": cutoff_start, "cutoff_end": cutoff_end, "company_id": current_user.company_id},
+    ).all()
+    csat_by_provider = [
+        {"provider": r[0], "csat_avg": float(r[1] or 0), "csat_count": int(r[2] or 0)}
+        for r in csat_rows
+    ]
+
     return {
         "engines": engines,
         "interactions": interactions,
@@ -232,6 +272,7 @@ async def get_latency_analytics(
         "llm_models": llm_models,
         "tts_models": tts_models,
         "trend": trend,
+        "csat_by_provider": csat_by_provider,
         "meta": {
             "days": days,
             "total_turns": total_turns,

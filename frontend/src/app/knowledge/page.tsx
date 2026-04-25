@@ -4,10 +4,10 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BookOpen, Search, Plus, Trash2, RotateCcw, X, Loader2,
   Database, FileText, Shield, Users, Lightbulb, Cpu, Mic,
-  ChevronDown, ChevronUp, Sparkles, Send,
-} from "lucide-react";
+  ChevronDown, ChevronUp, Sparkles, Send } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 // Types
@@ -44,8 +44,7 @@ const COLLECTION_CONFIG: Record<string, { label: string; icon: React.ElementType
   playbooks:   { label: "Playbooks",   icon: BookOpen,   color: "blue",   desc: "Sales scripts & discovery frameworks" },
   coaching:    { label: "Coaching",    icon: Lightbulb,  color: "amber",  desc: "Coaching tips & best practices" },
   sops:        { label: "SOPs",        icon: Cpu,        color: "green",  desc: "Standard operating procedures" },
-  transcripts: { label: "Transcripts", icon: Mic,        color: "slate",  desc: "Auto-indexed past call transcripts" },
-};
+  transcripts: { label: "Transcripts", icon: Mic,        color: "slate",  desc: "Auto-indexed past call transcripts" } };
 
 const ALL_COLLECTIONS = Object.keys(COLLECTION_CONFIG);
 
@@ -56,8 +55,7 @@ const colorClasses: Record<string, string> = {
   blue:   "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300 border-blue-200 dark:border-blue-500/20",
   amber:  "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300 border-amber-200 dark:border-amber-500/20",
   green:  "bg-green-100 text-green-700 dark:bg-green-500/10 dark:text-green-300 border-green-200 dark:border-green-500/20",
-  slate:  "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 border-slate-200 dark:border-white/10",
-};
+  slate:  "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300 border-slate-200 dark:border-white/10" };
 
 function CollectionBadge({ collection }: { collection: string }) {
   const cfg = COLLECTION_CONFIG[collection];
@@ -74,7 +72,7 @@ function CollectionBadge({ collection }: { collection: string }) {
 
 
 export default function KnowledgePage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
 
   const [searchQuery, setSearchQuery] = useState("");
@@ -108,12 +106,11 @@ export default function KnowledgePage() {
   // Fetch documents
 
   const fetchDocs = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setDocsLoading(true);
     try {
       const col = filterCollection !== "all" ? `?collection=${filterCollection}&active_only=false` : "?active_only=false";
-      const res = await fetch(`${API_BASE}/crm/knowledge/documents${col}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/knowledge/documents${col}`, {
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Failed to load documents");
@@ -123,20 +120,19 @@ export default function KnowledgePage() {
     } finally {
       setDocsLoading(false);
     }
-  }, [token, sessionTimeout, filterCollection]);
+  }, [user, sessionTimeout, filterCollection]);
 
   useEffect(() => { fetchDocs(); }, [fetchDocs]);
 
   // Semantic search (debounced 400 ms)
 
   const runSearch = useCallback(async (q: string, col: string) => {
-    if (!q.trim() || !token) { setSearchResults([]); return; }
+    if (!q.trim() ) { setSearchResults([]); return; }
     setSearching(true);
     setSearchError("");
     try {
       const params = new URLSearchParams({ q, collection: col, n: "8" });
-      const res = await fetch(`${API_BASE}/crm/knowledge/search?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/knowledge/search?${params}`, {
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Search failed");
@@ -147,7 +143,7 @@ export default function KnowledgePage() {
     } finally {
       setSearching(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
     if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
@@ -160,7 +156,7 @@ export default function KnowledgePage() {
 
   async function handleAdd(e: React.FormEvent) {
     e.preventDefault();
-    if (!token || !addForm.title.trim() || !addForm.content.trim()) return;
+    if (!user || !addForm.title.trim() || !addForm.content.trim()) return;
     setAdding(true);
     setAddError("");
     try {
@@ -168,16 +164,14 @@ export default function KnowledgePage() {
         .split(",")
         .map((t) => t.trim())
         .filter(Boolean);
-      const res = await fetch(`${API_BASE}/crm/knowledge/documents`, {
+      const res = await apiFetch(`${API_BASE}/crm/knowledge/documents`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           collection: addForm.collection,
           title: addForm.title.trim(),
           content: addForm.content.trim(),
-          tags: tags.length ? tags : null,
-        }),
-      });
+          tags: tags.length ? tags : null }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
         const payload = await res.json();
@@ -196,11 +190,10 @@ export default function KnowledgePage() {
   // Delete document
 
   async function handleDelete(id: number) {
-    if (!token || !window.confirm("Remove this document from the knowledge base?")) return;
+    if (!user || !window.confirm("Remove this document from the knowledge base?")) return;
     try {
-      const res = await fetch(`${API_BASE}/crm/knowledge/documents/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/knowledge/documents/${id}`, {
+        method: "DELETE"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       setDocs((prev) => prev.filter((d) => d.id !== id));
@@ -212,13 +205,12 @@ export default function KnowledgePage() {
   // Reindex
 
   async function handleReindex() {
-    if (!token) return;
+    if (!user) return;
     setReindexing(true);
     setReindexMsg("");
     try {
-      const res = await fetch(`${API_BASE}/crm/knowledge/reindex`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/knowledge/reindex`, {
+        method: "POST"
       });
       if (!res.ok) throw new Error("Reindex failed");
       const data = await res.json();
@@ -235,15 +227,14 @@ export default function KnowledgePage() {
 
   async function handleAsk(e: React.FormEvent) {
     e.preventDefault();
-    if (!token || !askQuery.trim()) return;
+    if (!user || !askQuery.trim()) return;
     setAskLoading(true);
     setAskResult(null);
     try {
-      const res = await fetch(`${API_BASE}/crm/agents/ask`, {
+      const res = await apiFetch(`${API_BASE}/crm/agents/ask`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ query: askQuery }),
-      });
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query: askQuery }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Ask failed");
       setAskResult(await res.json());

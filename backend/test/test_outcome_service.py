@@ -80,8 +80,32 @@ class TestNormalizeWithTranscript:
     def test_answered_status_also_triggers_detection(self):
         assert normalize_call_outcome("answered", "send me a proposal") == OUTCOME_INTERESTED
 
-    def test_in_progress_status_also_triggers_detection(self):
-        assert normalize_call_outcome("in_progress", "not now") == OUTCOME_NOT_INTERESTED
+    def test_in_progress_status_triggers_classification(self):
+        # Single weak negative ("not now") alone no longer trips NOT_INTERESTED
+        # — per the Apr-2026 bugfix, it falls through to follow-up.  The old
+        # behaviour was too aggressive and would mark real prospects closed_lost.
+        assert normalize_call_outcome("in_progress", "not now") == OUTCOME_FOLLOW_UP
+
+    # New behaviour checks
+
+    def test_single_weak_negative_does_not_close_lost(self):
+        # Historic aggressive behaviour: "busy" alone → NOT_INTERESTED.  Now
+        # a single weak signal falls through to follow-up.
+        assert normalize_call_outcome("completed", "busy this week") == OUTCOME_FOLLOW_UP
+
+    def test_two_weak_negatives_still_close_lost(self):
+        # Two weak signals combined still read as disinterest.
+        result = normalize_call_outcome("completed", "not now, too expensive")
+        assert result == OUTCOME_NOT_INTERESTED
+
+    def test_bare_no_inside_other_word_does_not_trigger(self):
+        # "number" contains "no" — must not match.  Word-boundary regex fix.
+        assert normalize_call_outcome("completed", "let me check my number and send later") != OUTCOME_NOT_INTERESTED
+
+    def test_strong_rejection_single_hit_closes_lost(self):
+        assert normalize_call_outcome("completed", "not interested") == OUTCOME_NOT_INTERESTED
+        assert normalize_call_outcome("completed", "please unsubscribe me") == OUTCOME_NOT_INTERESTED
+        assert normalize_call_outcome("completed", "don't call again") == OUTCOME_NOT_INTERESTED
 
 
 # classify_outcome_from_transcript

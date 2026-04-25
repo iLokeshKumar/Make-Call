@@ -1,11 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
 import os
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+
+def _run_coro_sync(coro):
+    """
+    Run an async coroutine from sync context.
+
+    Works whether or not an event loop is already running in the current thread.
+    When a loop is running (e.g. the worker was invoked from a FastAPI route),
+    we hand the coroutine off to a one-shot worker thread with its own fresh
+    loop. ContextVars (request_id_var, trace_id) are copied across the thread
+    boundary so logging + tracing remain coherent.
+    """
+    import contextvars
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    ctx = contextvars.copy_context()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(ctx.run, asyncio.run, coro).result()
 
 from sqlalchemy import func, text
 from sqlmodel import Session, select
@@ -20,6 +42,215 @@ from services.agent.agent_task_service import run_agent_tasks
 from services.agent.agent_approval_service import expire_stale as expire_stale_approvals
 
 logger = logging.getLogger(__name__)
+
+
+# Closer silence-scan throttle.  Maps company_id → monotonic timestamp of the
+# last scan.  Scanning is cheap (one SELECT) but re-running every worker cycle
+# would generate duplicate (idempotent) AgentTasks per-company so we cap at
+# 15 minutes.  Module-level so each process retains its own throttle across
+# worker cycles.
+_CLOSER_SCAN_COOLDOWN_SECONDS = 15 * 60
+_closer_scan_last_at: dict[int, float] = {}
+
+
+def _enqueue_closer_tasks_for_silent_quotes(
+    session: Session,
+    company_id: int,
+    actor_user_id: int,
+) -> dict[str, Any]:
+    """Scan quotes silent ≥ 3 days + enqueue closer_followup AgentTasks.
+
+    A quote is considered silent if:
+      * `sent_at` is set and is at least 3 days old
+      * `status` is in {sent, opened, negotiation}
+      * there is no inbound Interaction after `sent_at`
+      * the Lead is not in a terminal ism_stage (closed_won / closed_lost /
+        nurture_pause) and is not soft-deleted
+
+    Idempotency key `closer:{quote_id}:{silence_days}` ensures re-scans on the
+    same day dedupe; the next day the silence_days bucket advances and a fresh
+    task is allowed.
+    """
+    from models.models import Lead, Quote, Interaction
+    from services.agent.agent_task_service import create_agent_task
+
+    now = utc_now()
+    threshold = now - timedelta(days=3)
+
+    active_statuses = ("sent", "opened", "negotiation")
+    terminal_stages = ("closed_won", "closed_lost", "nurture_pause")
+
+    quotes = session.exec(
+        select(Quote).where(
+            Quote.company_id == company_id,
+            Quote.deleted_at.is_(None),
+            Quote.sent_at.is_not(None),
+            Quote.sent_at <= threshold,
+            Quote.status.in_(active_statuses),
+        ).order_by(Quote.sent_at.asc()).limit(50)
+    ).all()
+
+    enqueued = 0
+    skipped: list[str] = []
+
+    for quote in quotes:
+        lead = session.exec(
+            select(Lead).where(
+                Lead.id == quote.lead_id,
+                Lead.company_id == company_id,
+                Lead.deleted_at.is_(None),
+            )
+        ).first()
+        if lead is None:
+            skipped.append(f"quote={quote.id}:lead_missing")
+            continue
+        if (lead.ism_stage or "") in terminal_stages:
+            skipped.append(f"quote={quote.id}:lead_stage_{lead.ism_stage}")
+            continue
+
+        last_inbound = session.exec(
+            select(Interaction).where(
+                Interaction.company_id == company_id,
+                Interaction.lead_id == lead.id,
+                Interaction.direction == "inbound",
+                Interaction.started_at > quote.sent_at,
+            ).order_by(Interaction.started_at.desc()).limit(1)
+        ).first()
+        if last_inbound is not None:
+            skipped.append(f"quote={quote.id}:has_inbound")
+            continue
+
+        sent_at_utc = quote.sent_at
+        if sent_at_utc.tzinfo is None:
+            sent_at_utc = sent_at_utc.replace(tzinfo=timezone.utc)
+        silence_days = max((now - sent_at_utc).days, 3)
+
+        try:
+            create_agent_task(
+                session=session,
+                company_id=company_id,
+                task_type="closer_followup",
+                assigned_agent="closer",
+                input_json={
+                    "lead_id": lead.id,
+                    "quote_id": quote.id,
+                    "silence_days": silence_days,
+                },
+                lead_id=lead.id,
+                idempotency_key=f"closer:{quote.id}:{silence_days}",
+                actor_user_id=actor_user_id,
+            )
+            enqueued += 1
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[closer_scan] enqueue failed for quote=%s: %s", quote.id, exc)
+            skipped.append(f"quote={quote.id}:enqueue_error")
+
+    return {"enqueued": enqueued, "scanned": len(quotes), "skipped": skipped}
+
+
+def _maybe_enqueue_closer_tasks_for_company(
+    session: Session,
+    company_id: int,
+    actor_user_id: int,
+) -> dict[str, Any]:
+    """Throttled wrapper — skip if we scanned this company < 15 min ago."""
+    last = _closer_scan_last_at.get(company_id)
+    mono = time.monotonic()
+    if last is not None and (mono - last) < _CLOSER_SCAN_COOLDOWN_SECONDS:
+        return {"skipped": "throttled_15min"}
+
+    result = _enqueue_closer_tasks_for_silent_quotes(
+        session=session,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+    )
+    _closer_scan_last_at[company_id] = mono
+    return result
+
+
+def _reset_closer_scan_throttle_for_tests() -> None:
+    """Test hook — clear the per-company throttle state."""
+    _closer_scan_last_at.clear()
+
+
+# SLO evaluation cadence + per-SLO dedupe.
+# Outer dict: company_id → last evaluation monotonic time (15-min cap).
+# Inner dict: (company_id, slo_id) → last alert monotonic time (60-min dedupe).
+_SLO_EVAL_COOLDOWN_SECONDS = 15 * 60
+_SLO_ALERT_DEDUPE_SECONDS = 60 * 60
+_slo_eval_last_at: dict[int, float] = {}
+_slo_alert_last_at: dict[tuple[int, str], float] = {}
+
+
+def _slo_alerts_enabled() -> bool:
+    """Soft-launch gate.  Returns False until SLO_ALERTS_ENABLED_AT passes.
+
+    Day-one rollout will breach voice p95 immediately (current state >800ms).
+    Set SLO_ALERTS_ENABLED_AT to an ISO timestamp 24h in the future so the
+    user can tune SLOs against real data without alert noise.
+    """
+    raw = os.getenv("SLO_ALERTS_ENABLED_AT", "").strip()
+    if not raw:
+        return True  # default: alerts on
+    try:
+        threshold = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if threshold.tzinfo is None:
+            threshold = threshold.replace(tzinfo=timezone.utc)
+        return utc_now() >= threshold
+    except Exception:  # noqa: BLE001
+        # Bad ISO → fail-safe enable so a typo doesn't permanently silence alerts.
+        return True
+
+
+def _maybe_evaluate_slos_and_alert(
+    session: Session,
+    company_id: int,
+) -> dict[str, Any]:
+    """Throttled wrapper — skip if last eval < 15 min ago for this company."""
+    now_mono = time.monotonic()
+    last = _slo_eval_last_at.get(company_id)
+    if last is not None and (now_mono - last) < _SLO_EVAL_COOLDOWN_SECONDS:
+        return {"skipped": "throttled_15min"}
+
+    if not _slo_alerts_enabled():
+        _slo_eval_last_at[company_id] = now_mono
+        return {"skipped": "soft_launch_window", "alerts_enabled_at": os.getenv("SLO_ALERTS_ENABLED_AT")}
+
+    try:
+        from services.observability.slo import evaluate_all
+        from services.alerts import notify_breach_sync
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[slo] eval import failed: %s", exc)
+        return {"error": str(exc)}
+
+    breaches: list[str] = []
+    for slo in evaluate_all(session, company_id):
+        if slo["status"] != "breach":
+            continue
+        key = (company_id, slo["id"])
+        last_alert = _slo_alert_last_at.get(key)
+        if last_alert is not None and (now_mono - last_alert) < _SLO_ALERT_DEDUPE_SECONDS:
+            continue
+        try:
+            notify_breach_sync(
+                slo_id=slo["id"],
+                actual=slo.get("actual"),
+                target=slo.get("target"),
+                severity="high",
+            )
+            _slo_alert_last_at[key] = now_mono
+            breaches.append(slo["id"])
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[slo] alert dispatch failed for %s: %s", slo["id"], exc)
+
+    _slo_eval_last_at[company_id] = now_mono
+    return {"breaches_alerted": breaches}
+
+
+def _reset_slo_throttles_for_tests() -> None:
+    _slo_eval_last_at.clear()
+    _slo_alert_last_at.clear()
+
 
 # Module-level health state (single source of truth)
 
@@ -268,6 +499,37 @@ def run_worker_cycle(
                 })
                 metric["ism_results"] = {"error": str(ism_err)}
 
+            # Closer — enqueue follow-up tasks for silent quotes.  Throttled
+            # per-company so we only scan every 15 minutes even if the worker
+            # cycle fires more often.
+            try:
+                metric["closer_enqueued"] = _maybe_enqueue_closer_tasks_for_company(
+                    session=session,
+                    company_id=target_company_id,
+                    actor_user_id=actor_user_id,
+                )
+            except Exception as closer_err:  # noqa: BLE001
+                logger.exception("closer scan failed", extra={
+                    "event": "closer_scan_error",
+                    "company_id": target_company_id,
+                    "worker_name": "automation_worker",
+                })
+                metric["closer_enqueued"] = {"error": str(closer_err)}
+
+            # SLO evaluation + breach alerting — throttled to 15min per company.
+            try:
+                metric["slo_eval"] = _maybe_evaluate_slos_and_alert(
+                    session=session,
+                    company_id=target_company_id,
+                )
+            except Exception as slo_err:  # noqa: BLE001
+                logger.exception("slo eval failed", extra={
+                    "event": "slo_eval_error",
+                    "company_id": target_company_id,
+                    "worker_name": "automation_worker",
+                })
+                metric["slo_eval"] = {"error": str(slo_err)}
+
             # Email outbox - isolated and retriable
             try:
                 metric["email_outbox_results"] = process_outbox_batch(
@@ -405,29 +667,89 @@ def run_worker_cycle(
     return results
 
 
+def _safe_run_cycle(
+    trigger: str,
+    company_id: int | None,
+    dial_limit_per_company: int,
+) -> None:
+    """Run one cycle in a fresh session. Exceptions are logged, never raised
+    (the supervisor's outer try/except would restart the whole worker, which
+    is overkill for a transient per-cycle failure).
+    """
+    try:
+        with Session(engine) as session:
+            run_worker_cycle(
+                session=session,
+                company_id=company_id,
+                dial_limit_per_company=dial_limit_per_company,
+            )
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[worker] cycle failed",
+            extra={"trigger": trigger, "company_id": company_id},
+        )
+
+
 def run_worker_forever(
     poll_interval_seconds: int = 60,
     company_id: int | None = None,
     dial_limit_per_company: int = 20,
 ) -> None:
-    """Run worker cycles indefinitely, sleeping *poll_interval_seconds* between them.
+    """Run worker cycles indefinitely.
 
-    This function itself is intentionally simple – crash recovery / exponential
-    back-off is handled by the supervisor loop in run_automation_worker.py.
+    Event-driven mode (Postgres, default): the worker LISTENs on
+    `agent_task_ready`. On wake with payloads, runs a TARGETED cycle for
+    each notified company. On tick (timeout), runs a full multi-company
+    cycle as safety net. First pass after startup runs a full cycle so
+    any work queued before the worker booted is picked up immediately.
+
+    Polling mode (sqlite / `WORKER_LISTEN_NOTIFY=0`): wake is just a timer;
+    every wake runs a full cycle.
+
+    --company-id restricts the worker to one tenant. In that mode, NOTIFYs
+    for other companies are ignored (the advisory lock would skip them
+    anyway, but we filter early to avoid the wasted session + log noise).
     """
-    while True:
-        try:
-            with Session(engine) as session:
-                run_worker_cycle(
-                    session=session,
-                    company_id=company_id,
-                    dial_limit_per_company=dial_limit_per_company,
-                )
-        except Exception:  # noqa: BLE001
-            logger.exception("[worker] run_worker_forever: unexpected error in cycle")
+    from services.notify_listener import is_postgres, listen_connection, wait_for_notify
 
-        logger.debug("[worker] sleeping %ds before next cycle", poll_interval_seconds)
-        time.sleep(poll_interval_seconds)
+    use_listen = is_postgres(engine) and os.getenv("WORKER_LISTEN_NOTIFY", "1") == "1"
+
+    with listen_connection(engine) as listen_conn:
+        if use_listen and listen_conn is not None:
+            logger.info(
+                "[worker] event-driven mode: per-company NOTIFY + %ds full-cycle fallback",
+                poll_interval_seconds,
+            )
+        else:
+            logger.info("[worker] polling mode: %ds tick → full cycle", poll_interval_seconds)
+
+        # Initial full cycle so startup picks up pre-existing queued work
+        # without waiting for the first tick.
+        _safe_run_cycle("startup", company_id, dial_limit_per_company)
+
+        while True:
+            payloads = wait_for_notify(listen_conn, poll_interval_seconds)
+
+            if not payloads:
+                # Timeout — run the full multi-company cycle as safety net.
+                _safe_run_cycle("tick", company_id, dial_limit_per_company)
+                continue
+
+            # Targeted cycles for each notified company. Set semantics: if the
+            # same company NOTIFYs 50 times between wakes, we run one cycle.
+            for raw in sorted(payloads):
+                try:
+                    notified_cid = int(raw)
+                except (TypeError, ValueError):
+                    logger.warning("[worker] invalid NOTIFY payload: %r", raw)
+                    continue
+
+                # Respect --company-id single-tenant filter
+                if company_id is not None and notified_cid != company_id:
+                    continue
+
+                logger.debug("[worker] targeted cycle for company=%s (NOTIFY)", notified_cid)
+                _safe_run_cycle("notify", notified_cid, dial_limit_per_company)
 
 
 # Internal helpers
@@ -653,11 +975,23 @@ def _execute_post_call_job(session: Session, job: BackgroundJob) -> dict:
     if not interaction.transcript:
         return {"status": "skipped", "reason": "no_transcript", "interaction_id": interaction_id}
 
+    # Skip LLM pipeline for dead leads. No point burning tokens on soft-deleted
+    # leads or ones already in a terminal ISM stage (closed_won/closed_lost).
+    from models.models import Lead
+    _SKIP_ISM_STAGES = {"closed_won", "closed_lost"}
+    lead = session.get(Lead, lead_id)
+    if lead is None:
+        return {"status": "skipped", "reason": "lead_not_found", "lead_id": lead_id}
+    if lead.deleted_at is not None:
+        return {"status": "skipped", "reason": "lead_deleted", "lead_id": lead_id}
+    if (lead.ism_stage or "") in _SKIP_ISM_STAGES:
+        return {"status": "skipped", "reason": f"ism_stage_{lead.ism_stage}", "lead_id": lead_id}
+
     # Local imports keep circular-dependency surface small and avoid loading
     # LLM/ML modules in the worker unless an actual job needs them.
     from credentials_service import get_company_setting_value
-    from ai.llm import get_llm_service
-    from call.post_call_service import extract_and_save_requirements
+    from services.ai.llm import get_llm_service
+    from services.call.post_call_service import extract_and_save_requirements
     from services.next_action_service import dispatch_next_action
 
     mistral_api_key = get_company_setting_value(session, job.company_id, "MISTRAL_API_KEY")
@@ -667,9 +1001,11 @@ def _execute_post_call_job(session: Session, job: BackgroundJob) -> dict:
         api_key=mistral_api_key,
     )
 
-    # extract_and_save_requirements is async; worker runs in a plain sync
-    # process so we bridge with asyncio.run() (creates a fresh event loop).
-    saved = asyncio.run(
+    # extract_and_save_requirements is async. The worker may be invoked from a
+    # sync entry point (standalone worker process) or from within a running
+    # FastAPI event loop (e.g. POST /automation/run-cycle). _run_coro_sync
+    # picks the right execution strategy for both.
+    saved = _run_coro_sync(
         extract_and_save_requirements(
             session=session,
             llm_service=llm_service,
@@ -699,9 +1035,24 @@ def _execute_post_call_job(session: Session, job: BackgroundJob) -> dict:
     }
 
 
+def _execute_noop_smoke_job(session: Session, job: BackgroundJob) -> dict:
+    """Trivial executor for the horizontal-scale smoke test.
+
+    Sleeps briefly so wall-clock contention between workers is measurable,
+    then returns. Registered only when ALLOW_NOOP_SMOKE_JOBS=1 to keep
+    production from accidentally enqueuing it.
+    """
+    delay_ms = int((job.payload or {}).get("delay_ms", 50))
+    time.sleep(max(0, min(delay_ms, 1000)) / 1000.0)
+    return {"status": "noop", "worker_pid": os.getpid()}
+
+
 _JOB_EXECUTORS = {
     "post_call_workflow": _execute_post_call_job,
 }
+
+if os.getenv("ALLOW_NOOP_SMOKE_JOBS") == "1":
+    _JOB_EXECUTORS["noop_smoke"] = _execute_noop_smoke_job
 
 
 def run_pending_jobs(
@@ -732,6 +1083,23 @@ def run_pending_jobs(
             BackgroundJob.attempts < BackgroundJob.max_attempts,
         ).order_by(BackgroundJob.created_at.asc()).limit(limit)
     ).all()
+
+    # Cap LLM-heavy job types per cycle. Each post_call_workflow fires 5
+    # sequential Mistral calls at ~1.2s each. Running more than 3 of those
+    # back-to-back hammers the free-tier rate limit. Remaining jobs stay
+    # pending and are picked up by the next worker cycle.
+    _PER_CYCLE_CAPS = {"post_call_workflow": 3}
+    if jobs:
+        kept: list[BackgroundJob] = []
+        counts: dict[str, int] = {}
+        for j in jobs:
+            cap = _PER_CYCLE_CAPS.get(j.job_type)
+            if cap is not None:
+                if counts.get(j.job_type, 0) >= cap:
+                    continue
+                counts[j.job_type] = counts.get(j.job_type, 0) + 1
+            kept.append(j)
+        jobs = kept
 
     results: list[dict] = []
     for job in jobs:

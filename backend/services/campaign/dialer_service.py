@@ -17,7 +17,12 @@ from models.models import CallTask, Company, Interaction, Lead, OptOut, User, ut
 from services.call.outbound_call_service import create_call_task, get_call_task_or_404, start_call_task
 from utils.phone import normalize_phone
 from utils.url_utils import normalize_base_url
-from utils.timezone_utils import detect_timezone, get_company_timezone_from_login_history, is_within_business_hours
+from utils.timezone_utils import (
+    business_hours_config_for_company,
+    detect_timezone,
+    get_company_timezone_from_login_history,
+    is_within_business_hours,
+)
 from services.leads.opt_out_service import is_lead_opted_out
 from services.core.usage_service import check_and_increment
 from services.core.feature_flag_service import require_feature
@@ -40,15 +45,20 @@ def is_lead_callable(session: Session, company_id: int, lead_id: int) -> tuple[b
     if (lead.status or "").lower() in {"closed_won", "closed_lost", "do_not_call"}:
         return False, "lead_closed"
 
-    # Timezone / business-hours check: block calls outside 09:00–20:00 local time
-    # Priority: lead.timezone → lead location → company login_history geo → env default
     tz_str = lead.timezone
     if not tz_str:
         tz_str = detect_timezone(lead.city, lead.state, lead.country)
         if tz_str == os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata"):
-            # Lead had no location data — try company's login_history for a real timezone
+
             tz_str = get_company_timezone_from_login_history(session, company_id) or tz_str
-    if not is_within_business_hours(tz_str):
+    bh = business_hours_config_for_company(session, company_id)
+    if not is_within_business_hours(
+        tz_str,
+        start_hour=bh["start"],
+        end_hour=bh["end"],
+        sunday_blocked=bh["sunday_blocked"],
+        disabled=bh["disabled"],
+    ):
         return False, f"outside_business_hours:{tz_str}"
 
     return True, None
@@ -207,7 +217,7 @@ def initiate_outbound_call(
             import asyncio
             asyncio.create_task(_run_precall())
         except Exception:
-            pass  # enrichment is best-effort; don't block the call
+            pass
 
     lead = None
     if lead_id:
@@ -275,7 +285,7 @@ def initiate_outbound_call(
         f"{callback_base}/twilio/recording-callback"
         f"?interaction_id={interaction.id}"
     )
-    # Feature + quota gates — checked just before the billable action fires
+
     require_feature(session, company_id, "outbound_calls")
     check_and_increment(session, company_id, "calls_made")
 
@@ -293,9 +303,6 @@ def initiate_outbound_call(
             recording_status_callback_method="POST",
         )
     except TwilioRestException as exc:
-        # 20003 = auth failed (wrong credentials or trial account balance exhausted)
-        # 20005 = account suspended
-        # 21211/21214/21604/21210 = invalid or unreachable phone number
         if exc.code in (20003, 20005):
             raise HTTPException(
                 status_code=402,
@@ -404,8 +411,7 @@ def run_batch_dialer(
     actor_user_id: int,
     limit: int = 20,
 ) -> list[dict]:
-    # Per-minute rate limit — read from company settings (DIALER_CALLS_PER_MINUTE).
-    # Default: 10 calls/min → one call every 6 s.  Set to 0 to disable throttling.
+    # Per-minute rate limit — read from company settings (DIALER_CALLS_PER_MINUTE). Default: 10 calls/min → one call every 6 s.  Set to 0 to disable throttling.
     cpm_raw = get_company_setting_value(session, company_id, "DIALER_CALLS_PER_MINUTE")
     try:
         calls_per_minute = max(0, int(cpm_raw or 10))

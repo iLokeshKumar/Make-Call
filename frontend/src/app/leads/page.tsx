@@ -7,6 +7,7 @@ import { ArrowUpRight, Download, Loader2, Mail, Phone, Plus, Search, Sparkles } 
 import { useAuth } from "@/context/AuthContext";
 import ImportLeadsModal from "@/components/leads/ImportLeadsModal";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 /** Strip system-appended log lines from lead notes before displaying. */
@@ -43,8 +44,7 @@ const emptyLead = {
   name: "",
   normalized_phone: "",
   email: "",
-  notes: "",
-};
+  notes: "" };
 
 function humanize(value?: string | null) {
   if (!value) return "None";
@@ -78,7 +78,7 @@ function parseScoreReasons(raw?: { reasons?: string[]; priority?: string } | str
 }
 
 export default function LeadsPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -90,15 +90,14 @@ export default function LeadsPage() {
   const [showImport, setShowImport] = useState(false);
 
   const fetchLeads = useCallback(async () => {
-    if (!token) {
+    if (!user) {
       setLoading(false);
       return;
     }
 
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/crm/leads?page=1&limit=100`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=100`, {
       });
 
       if (res.status === 401) {
@@ -118,7 +117,7 @@ export default function LeadsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
     fetchLeads();
@@ -139,20 +138,17 @@ export default function LeadsPage() {
 
   async function handleCreateLead(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!token || !form.name || !form.normalized_phone) return;
+    if (!user || !form.name || !form.normalized_phone) return;
 
     setSaving(true);
     setMessage(null);
 
     try {
-      const res = await fetch(`${API_BASE}/crm/leads`, {
+      const res = await apiFetch(`${API_BASE}/crm/leads`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(form),
-      });
+          "Content-Type": "application/json" },
+        body: JSON.stringify(form) });
 
       if (res.status === 401) {
         sessionTimeout();
@@ -182,16 +178,14 @@ export default function LeadsPage() {
     "no-answer":  "No answer",
     busy:         "Line busy",
     failed:       "Call failed",
-    canceled:     "Call canceled",
-  };
+    canceled:     "Call canceled" };
   const TERMINAL_STATUSES = new Set(["completed", "no-answer", "busy", "failed", "canceled"]);
 
   useEffect(() => {
-    if (!callInteractionId || !token) return;
+    if (!callInteractionId ) return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
         });
         if (!res.ok) return;
         const data = await res.json();
@@ -209,19 +203,18 @@ export default function LeadsPage() {
       } catch {  }
     }, 2000);
     return () => clearInterval(interval);
-  }, [callInteractionId, token]);
+  }, [callInteractionId, user]);
 
   async function handleCall(lead: Lead) {
-    if (!token) return;
+    if (!user) return;
     setCallInteractionId(null);
     setCallStatus(null);
 
     try {
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_BASE}/make-call?to=${encodeURIComponent(lead.normalized_phone)}&lead_id=${lead.id}`,
         {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
+          method: "POST"
         }
       );
 
@@ -241,9 +234,8 @@ export default function LeadsPage() {
 
   return (
     <div className="space-y-6 pb-8">
-      {showImport && token && (
+      {showImport && user && (
         <ImportLeadsModal
-          token={token}
           onClose={() => setShowImport(false)}
           onImported={() => { fetchLeads(); setShowImport(false); }}
         />

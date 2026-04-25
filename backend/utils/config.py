@@ -68,7 +68,7 @@ def get_openrouter_api_key() -> str | None:
     return get_credential("OPENROUTER_API_KEY")
 
 
-# Speech — STT
+# STT
 def get_deepgram_api_key() -> str | None:
     return get_credential("DEEPGRAM_API_KEY")
 
@@ -79,7 +79,7 @@ def get_sarvam_api_key() -> str | None:
     return get_credential("SARVAM_API_KEY")
 
 
-# Speech — TTS
+# TTS
 def get_cartesia_api_key() -> str | None:
     return get_credential("CARTESIA_API_KEY")
 

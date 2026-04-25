@@ -11,14 +11,7 @@ _TRACING_ENABLED: bool = False
 
 
 def configure_tracing() -> bool:
-    """
-    Activate LangSmith tracing if LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY is set.
 
-    Sets the three required env vars that LangChain reads automatically:
-      LANGCHAIN_TRACING_V2, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT
-
-    Returns True if tracing was successfully enabled.
-    """
     global _TRACING_ENABLED
 
     api_key = os.getenv("LANGCHAIN_API_KEY", "").strip()

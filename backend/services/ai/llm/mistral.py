@@ -1,9 +1,17 @@
 import json
 import logging
 import asyncio
+
 from mistralai.client import Mistral
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
+
+# Provider-agnostic counters live in services.observability so /health and
+# tests can read them without dragging the full LLM SDK chain.
+from services.observability import (
+    record_rate_limit_hit as _record_rate_limit_hit,
+    get_rate_limit_hits_last_15min,  # noqa: F401  (re-exported for back-compat)
+)
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +28,11 @@ class MistralLLM(BaseLLM):
         self.client = Mistral(api_key=self.api_key) if self.api_key else None
 
     async def stream(self, tools: Optional[List[Dict[str, Any]]] = None) -> AsyncGenerator[Dict[str, Any], None]:
-        max_retries = 3
+        max_retries = 4
+        # Exponential backoff ladder: 2s, 8s, 30s. Free tier = 1 req/sec, so a
+        # short retry hits the same limited window. Long ladder = better odds
+        # the bucket refilled by the time we retry.
+        backoff_seconds = [0, 2, 8, 30]
         for attempt in range(max_retries):
             try:
                 accumulated_text = ""
@@ -81,11 +93,13 @@ class MistralLLM(BaseLLM):
                 return # Success, exit loop
 
             except Exception as e:
-                logger.error(f"❌ [MistralLLM] Stream Error: {e}")
-                if "429" in str(e) and attempt < max_retries - 1:
-                    wait = 2 ** attempt # 1,2,4 seconds
+                is_rate_limit = "429" in str(e)
+                if is_rate_limit:
+                    _record_rate_limit_hit()
+                if is_rate_limit and attempt < max_retries - 1:
+                    wait = backoff_seconds[attempt + 1]
                     logger.warning(f"⚠️ [MistralLLM] Rate limited. Waiting {wait}s before retry {attempt+1}...")
-                    await asyncio.sleep(wait) # Wait 1 second before retry
+                    await asyncio.sleep(wait)
                     continue
                 logger.error(f"❌ [MistralLLM] Stream Error: {e}")
                 yield {"type": "error", "content": str(e)}

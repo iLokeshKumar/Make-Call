@@ -5,6 +5,7 @@ import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, Phon
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const themeOptions = [
     { value: "light", label: "Light", icon: Sun },
     { value: "dark", label: "Dark", icon: Moon },
@@ -21,13 +22,15 @@ const COMPANY_SETTING_KEYS = {
     ttsProvider: ["TTS_PROVIDER", "tts_provider"],
     telephonyEngine: ["TELEPHONY_ENGINE", "telephony_engine"],
     aiVerbosity: ["AI_VERBOSITY", "ai_verbosity"],
-} as const;
+    bizHoursStart: ["BUSINESS_HOURS_START", "business_hours_start"],
+    bizHoursEnd: ["BUSINESS_HOURS_END", "business_hours_end"],
+    bizSundayBlocked: ["BUSINESS_SUNDAY_BLOCKED", "business_sunday_blocked"],
+    bizHoursDisabled: ["DISABLE_BUSINESS_HOURS_GUARD", "disable_business_hours_guard"] } as const;
 
 const INTEGRATION_KEY_ALIASES: Record<string, string> = {
     PHONE_NUMBER_FROM: "TWILIO_PHONE_NUMBER",
     WHATSAPP_NUMBER_FROM: "WHATSAPP_NUMBER",
-    SMTP_SERVER: "SMTP_HOST",
-};
+    SMTP_SERVER: "SMTP_HOST" };
 
 function readSettingValue(
     settings: Record<string, string>,
@@ -47,8 +50,7 @@ function normalizeIntegrationValues(keysData: Record<string, string>) {
             keysData.SARVAM_STT_MODEL ||
             keysData.SMALLEST_STT_MODEL ||
             "",
-        SARVAM_VOICE_ID: keysData.SARVAM_VOICE_ID || keysData.SMALLEST_VOICE_ID || "",
-    };
+        SARVAM_VOICE_ID: keysData.SARVAM_VOICE_ID || keysData.SMALLEST_VOICE_ID || "" };
 }
 
 function isMaskedValue(value: string) {
@@ -67,14 +69,21 @@ type RoleOption = {
 
 export default function SettingsPage() {
     const { theme, setTheme } = useTheme();
-    const { user, token, sessionTimeout } = useAuth();
+    const { user, sessionTimeout } = useAuth();
     const [systemInstruction, setSystemInstruction] = useState("");
     const [sttProvider, setSttProvider] = useState("deepgram");
     const [llmProvider, setLlmProvider] = useState("mistral");
     const [ttsProvider, setTtsProvider] = useState("cartesia");
     const [telephonyEngine, setTelephonyEngine] = useState("twilio");
     const [aiVerbosity, setAiVerbosity] = useState("1");
-    
+
+    // Call-window (business hours) controls — per-company, persisted as
+    // CompanySetting rows.  Dialer reads these to gate is_lead_callable.
+    const [bizHoursStart, setBizHoursStart] = useState("9");
+    const [bizHoursEnd, setBizHoursEnd] = useState("22");
+    const [bizSundayBlocked, setBizSundayBlocked] = useState("1");
+    const [bizHoursDisabled, setBizHoursDisabled] = useState("0");
+
     // API Keys State
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     
@@ -110,8 +119,7 @@ export default function SettingsPage() {
     // Per-user email settings (accessible to all roles)
     const [myEmail, setMyEmail] = useState<Record<string, string>>({
         SMTP_HOST: "", SMTP_PORT: "", SMTP_SECURITY: "ssl", SMTP_USERNAME: "", SMTP_PASSWORD: "", SMTP_FROM_EMAIL: "",
-        IMAP_SERVER: "", IMAP_PORT: "", IMAP_SECURITY: "ssl", IMAP_USERNAME: "", IMAP_PASSWORD: "",
-    });
+        IMAP_SERVER: "", IMAP_PORT: "", IMAP_SECURITY: "ssl", IMAP_USERNAME: "", IMAP_PASSWORD: "" });
     const [savingMyEmail, setSavingMyEmail] = useState(false);
     const [myEmailSaved, setMyEmailSaved] = useState(false);
     const [syncingInbox, setSyncingInbox] = useState(false);
@@ -119,24 +127,20 @@ export default function SettingsPage() {
 
     useEffect(() => {
         const fetchSettingsAndKeys = async () => {
-            if (!token) {
+            if (!user) {
                 setLoading(false);
                 return;
             }
 
             try {
                 const [settingsRes, keysRes, myEmailRes, myAiRes] = await Promise.all([
-                    fetch(`${CRM_BASE}/company-settings`, {
-                        headers: { "Authorization": `Bearer ${token}` }
+                    apiFetch(`${CRM_BASE}/company-settings`, {
                     }),
-                    fetch(`${CRM_BASE}/company-integrations`, {
-                        headers: { "Authorization": `Bearer ${token}` }
+                    apiFetch(`${CRM_BASE}/company-integrations`, {
                     }),
-                    fetch(`${CRM_BASE}/me/email-settings`, {
-                        headers: { "Authorization": `Bearer ${token}` }
+                    apiFetch(`${CRM_BASE}/me/email-settings`, {
                     }),
-                    fetch(`${CRM_BASE}/me/settings`, {
-                        headers: { "Authorization": `Bearer ${token}` }
+                    apiFetch(`${CRM_BASE}/me/settings`, {
                     }),
                 ]);
 
@@ -153,14 +157,17 @@ export default function SettingsPage() {
                     setTtsProvider(readSettingValue(data, COMPANY_SETTING_KEYS.ttsProvider, "cartesia"));
                     setTelephonyEngine(readSettingValue(data, COMPANY_SETTING_KEYS.telephonyEngine, "twilio"));
                     setAiVerbosity(readSettingValue(data, COMPANY_SETTING_KEYS.aiVerbosity, "2"));
+                    setBizHoursStart(readSettingValue(data, COMPANY_SETTING_KEYS.bizHoursStart, "9"));
+                    setBizHoursEnd(readSettingValue(data, COMPANY_SETTING_KEYS.bizHoursEnd, "22"));
+                    setBizSundayBlocked(readSettingValue(data, COMPANY_SETTING_KEYS.bizSundayBlocked, "1"));
+                    setBizHoursDisabled(readSettingValue(data, COMPANY_SETTING_KEYS.bizHoursDisabled, "0"));
                     if (data.COMPETITOR_NAMES) setCompetitorNames(data.COMPETITOR_NAMES);
                 }
 
                 // Load competitor summary (mentions + counter-scripts)
                 if (hasAdminAccess) {
                     try {
-                        const summaryRes = await fetch(`${CRM_BASE}/competitors/summary`, {
-                            headers: { "Authorization": `Bearer ${token}` }
+                        const summaryRes = await apiFetch(`${CRM_BASE}/competitors/summary`, {
                         });
                         if (summaryRes.ok) {
                             const summary = await summaryRes.json() as Array<{ competitor: string; count: number; counter_script?: string }>;
@@ -244,8 +251,7 @@ export default function SettingsPage() {
                         MISTRAL_TTS_MODEL: "",
                         MISTRAL_VOICE_ID: "",
                         GROQ_API_KEY: "",
-                        GROQ_MODEL: "",
-                    };
+                        GROQ_MODEL: "" };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
             } catch (error) {
@@ -256,18 +262,16 @@ export default function SettingsPage() {
         };
 
         fetchSettingsAndKeys();
-    }, [token, sessionTimeout]);
+    }, [user, sessionTimeout]);
 
     useEffect(() => {
-        if (!token || !hasAdminAccess) return;
+        if (!user || !hasAdminAccess) return;
         const controller = new AbortController();
 
         const fetchRoles = async () => {
             try {
-                const res = await fetch(`${API_BASE}/admin/roles`, {
-                    headers: { Authorization: `Bearer ${token}` },
-                    signal: controller.signal,
-                });
+                const res = await apiFetch(`${API_BASE}/admin/roles`, {
+                    signal: controller.signal });
                 if (res.status === 401) { sessionTimeout(); return; }
                 if (!res.ok) {
                     console.warn("Failed to load roles", res.status);
@@ -288,7 +292,7 @@ export default function SettingsPage() {
 
         fetchRoles();
         return () => controller.abort();
-    }, [token, hasAdminAccess, inviteRoleId]);
+    }, [user, hasAdminAccess, inviteRoleId]);
 
 
     const handleSave = async () => {
@@ -305,8 +309,11 @@ export default function SettingsPage() {
                     { key: "TTS_PROVIDER", value: ttsProvider, is_secret: false },
                     { key: "TELEPHONY_ENGINE", value: telephonyEngine, is_secret: false },
                     { key: "AI_VERBOSITY", value: aiVerbosity, is_secret: false },
-                ],
-            };
+                    { key: "BUSINESS_HOURS_START", value: bizHoursStart, is_secret: false },
+                    { key: "BUSINESS_HOURS_END", value: bizHoursEnd, is_secret: false },
+                    { key: "BUSINESS_SUNDAY_BLOCKED", value: bizSundayBlocked, is_secret: false },
+                    { key: "DISABLE_BUSINESS_HOURS_GUARD", value: bizHoursDisabled, is_secret: false },
+                ] };
 
               const normalizedIntegrationValues = Object.entries(apiKeys).reduce<Record<string, string>>((acc, [rawKey, rawValue]) => {
                   const normalizedKey = INTEGRATION_KEY_ALIASES[rawKey] ?? rawKey;
@@ -328,28 +335,20 @@ export default function SettingsPage() {
                       .map(([key, value]) => ({
                           key,
                           value: value.trim(),
-                          is_secret: isSecretIntegrationKey(key),
-                      }))
-                      .filter((item) => item.value && !isMaskedValue(item.value)),
-              };
+                          is_secret: isSecretIntegrationKey(key) }))
+                      .filter((item) => item.value && !isMaskedValue(item.value)) };
 
             const [res, keysRes] = await Promise.all([
-                fetch(`${CRM_BASE}/company-settings`, {
+                apiFetch(`${CRM_BASE}/company-settings`, {
                     method: "PATCH",
                     headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${token}`
-                    },
-                    body: JSON.stringify(settingsPayload),
-                }),
-                fetch(`${CRM_BASE}/company-integrations`, {
+                        "Content-Type": "application/json" },
+                    body: JSON.stringify(settingsPayload) }),
+                apiFetch(`${CRM_BASE}/company-integrations`, {
                     method: "PATCH",
                     headers: {
-                        "Content-Type": "application/json",
-                        "Authorization": `Bearer ${token}`
-                    },
-                    body: JSON.stringify(integrationPayload),
-                }),
+                        "Content-Type": "application/json" },
+                    body: JSON.stringify(integrationPayload) }),
             ]);
 
             if (res.status === 401 || keysRes.status === 401) {
@@ -384,18 +383,14 @@ export default function SettingsPage() {
         setIsInviting(true);
         setInviteMessage(null);
         try {
-            const res = await fetch(`${API_BASE}/auth/invites`, {
+            const res = await apiFetch(`${API_BASE}/auth/invites`, {
                 method: "POST",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
+                    "Content-Type": "application/json" },
                 body: JSON.stringify({
                     email: inviteEmail.trim(),
                     role_id: roleId,
-                    expires_in_hours: inviteExpiresHours,
-                }),
-            });
+                    expires_in_hours: inviteExpiresHours }) });
 
             if (res.status === 401) { sessionTimeout(); return; }
             const data = await res.json();
@@ -421,14 +416,13 @@ export default function SettingsPage() {
     };
 
     const saveMyAiSettings = async () => {
-        if (!token) return;
+        if (!user) return;
         setSavingMyAi(true);
         try {
-            await fetch(`${CRM_BASE}/me/settings`, {
+            await apiFetch(`${CRM_BASE}/me/settings`, {
                 method: "PUT",
-                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                body: JSON.stringify({ SYSTEM_PROMPT: myAiPrompt, AI_VERBOSITY: myAiVerbosity }),
-            });
+                headers: {"Content-Type": "application/json" },
+                body: JSON.stringify({ SYSTEM_PROMPT: myAiPrompt, AI_VERBOSITY: myAiVerbosity }) });
             setMyAiSaved(true);
             setTimeout(() => setMyAiSaved(false), 3000);
         } catch (e) {
@@ -443,14 +437,13 @@ export default function SettingsPage() {
     };
 
     const saveMyEmailSettings = async () => {
-        if (!token) return;
+        if (!user) return;
         setSavingMyEmail(true);
         try {
-            await fetch(`${CRM_BASE}/me/email-settings`, {
+            await apiFetch(`${CRM_BASE}/me/email-settings`, {
                 method: "PUT",
-                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                body: JSON.stringify(myEmail),
-            });
+                headers: {"Content-Type": "application/json" },
+                body: JSON.stringify(myEmail) });
             setMyEmailSaved(true);
             setTimeout(() => setMyEmailSaved(false), 3000);
         } catch (e) {
@@ -461,14 +454,13 @@ export default function SettingsPage() {
     };
 
     const saveCompetitorNames = async (overrideValue?: string) => {
-        if (!token) return;
+        if (!user) return;
         setSavingCompetitors(true);
         try {
-            await fetch(`${CRM_BASE}/company-settings`, {
+            await apiFetch(`${CRM_BASE}/company-settings`, {
                 method: "PATCH",
-                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                body: JSON.stringify({ items: [{ key: "COMPETITOR_NAMES", value: overrideValue ?? competitorNames, is_secret: false }] }),
-            });
+                headers: {"Content-Type": "application/json" },
+                body: JSON.stringify({ items: [{ key: "COMPETITOR_NAMES", value: overrideValue ?? competitorNames, is_secret: false }] }) });
             setCompetitorSaved(true);
             setTimeout(() => setCompetitorSaved(false), 3000);
         } catch (e) {
@@ -479,16 +471,15 @@ export default function SettingsPage() {
     };
 
     const saveCounterScript = async (competitor: string) => {
-        if (!token) return;
+        if (!user) return;
         setSavingScript(competitor);
         try {
-            await fetch(`${CRM_BASE}/competitors/counter-script`, {
+            await apiFetch(`${CRM_BASE}/competitors/counter-script`, {
                 method: "POST",
-                headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
-                body: JSON.stringify({ competitor_name: competitor, counter_script: counterScripts[competitor] || "" }),
-            });
+                headers: {"Content-Type": "application/json" },
+                body: JSON.stringify({ competitor_name: competitor, counter_script: counterScripts[competitor] || "" }) });
             // Refresh summary so textarea falls back to the saved DB value
-            const res = await fetch(`${CRM_BASE}/competitors/summary`, { headers: { "Authorization": `Bearer ${token}` } });
+            const res = await apiFetch(`${CRM_BASE}/competitors/summary`, { });
             if (res.ok) setCompetitorSummary(await res.json());
             // Clear the local edit — no longer "unsaved"
             setCounterScripts(prev => {
@@ -519,13 +510,12 @@ export default function SettingsPage() {
     };
 
     const triggerInboxSync = async () => {
-        if (!token) return;
+        if (!user) return;
         setSyncingInbox(true);
         setSyncResult(null);
         try {
-            const res = await fetch(`${CRM_BASE}/email/sync`, {
-                method: "POST",
-                headers: { "Authorization": `Bearer ${token}` },
+            const res = await apiFetch(`${CRM_BASE}/email/sync`, {
+                method: "POST"
             });
             const data = await res.json();
             setSyncResult(`Synced — ${data.emails_ingested ?? 0} new email(s) ingested`);
@@ -833,6 +823,61 @@ export default function SettingsPage() {
                                     <p className="text-xs text-slate-500">India Optimized PCM</p>
                                 </div>
                             </button>
+                        </div>
+                    </div>
+                )}
+
+                {/* Business hours — controls is_lead_callable guard */}
+                {hasAdminAccess && (
+                    <div className="mt-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 p-6">
+                        <div className="mb-4">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-white">Call Window (Business Hours)</h3>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                Dialer refuses to place calls outside this window in the lead&apos;s local timezone.
+                                Applies to manual &quot;Call now&quot; + campaign dialer + ISM outreach.
+                            </p>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Start hour (0-23)</label>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    max={23}
+                                    value={bizHoursStart}
+                                    onChange={(e) => setBizHoursStart(e.target.value)}
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">End hour (0-23, exclusive)</label>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    max={23}
+                                    value={bizHoursEnd}
+                                    onChange={(e) => setBizHoursEnd(e.target.value)}
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                            </div>
+                            <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={bizSundayBlocked === "1"}
+                                    onChange={(e) => setBizSundayBlocked(e.target.checked ? "1" : "0")}
+                                    className="h-4 w-4 rounded border-slate-300"
+                                />
+                                Block Sundays
+                            </label>
+                            <label className="flex items-center gap-2 text-sm text-slate-700 dark:text-slate-300 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={bizHoursDisabled === "1"}
+                                    onChange={(e) => setBizHoursDisabled(e.target.checked ? "1" : "0")}
+                                    className="h-4 w-4 rounded border-slate-300"
+                                />
+                                Disable the guard entirely (dev use only)
+                            </label>
                         </div>
                     </div>
                 )}
@@ -1193,8 +1238,7 @@ export default function SettingsPage() {
                     const rows = allNames.map(name => ({
                         competitor: name,
                         count: summaryMap[name]?.count ?? 0,
-                        inTrackedList: parsedNames.includes(name),
-                    }));
+                        inTrackedList: parsedNames.includes(name) }));
 
                     return (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">

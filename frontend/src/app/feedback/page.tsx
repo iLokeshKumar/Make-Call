@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type FeedbackItem = {
@@ -64,16 +65,14 @@ const TYPE_LABELS: Record<string, string> = {
   csat: "CSAT",
   general: "General",
   bug_report: "Bug Report",
-  feature_request: "Feature Request",
-};
+  feature_request: "Feature Request" };
 
 const TYPE_COLORS: Record<string, string> = {
   call_review: "bg-blue-500/15 text-blue-400",
   csat: "bg-violet-500/15 text-violet-400",
   general: "bg-slate-500/15 text-slate-400",
   bug_report: "bg-red-500/15 text-red-400",
-  feature_request: "bg-amber-500/15 text-amber-400",
-};
+  feature_request: "bg-amber-500/15 text-amber-400" };
 
 const DISPOSITION_COLORS: Record<string, string> = {
   interested: "text-emerald-400",
@@ -81,28 +80,24 @@ const DISPOSITION_COLORS: Record<string, string> = {
   callback: "text-blue-400",
   voicemail: "text-slate-400",
   no_answer: "text-slate-400",
-  do_not_call: "text-red-500",
-};
+  do_not_call: "text-red-500" };
 
 const STATUS_COLORS: Record<string, string> = {
   submitted: "bg-emerald-500/15 text-emerald-400",
   pending: "bg-amber-500/15 text-amber-400",
-  expired: "bg-red-500/15 text-red-400",
-};
+  expired: "bg-red-500/15 text-red-400" };
 
 const CLOSE_LOOP_COLORS: Record<string, string> = {
   open: "bg-red-500/15 text-red-400",
   in_progress: "bg-amber-500/15 text-amber-400",
   resolved: "bg-emerald-500/15 text-emerald-400",
-  none: "",
-};
+  none: "" };
 
 const CLOSE_LOOP_LABELS: Record<string, string> = {
   open: "Loop Open",
   in_progress: "In Progress",
   resolved: "Resolved",
-  none: "",
-};
+  none: "" };
 
 function Stars({ rating, size = 4 }: { rating: number | null; size?: number }) {
   if (!rating) return <span className="text-slate-600 text-xs">-</span>;
@@ -121,9 +116,7 @@ function fmtDate(s: string | null) {
 }
 
 function Distribution({
-  title,
-  distribution,
-}: {
+  title, distribution }: {
   title: string;
   distribution: Record<string, number>;
 }) {
@@ -156,23 +149,19 @@ function Distribution({
 }
 
 function LeadSearchSelect({
-  token,
-  value,
-  onChange,
-  required = false,
-}: {
-  token: string;
+  value, onChange, required = false }: {
   value: LeadOption | null;
   onChange: (lead: LeadOption | null) => void;
   required?: boolean;
 }) {
+  const { user } = useAuth();
   const [query, setQuery] = useState("");
   const [items, setItems] = useState<LeadOption[]>([]);
   const [loading, setLoading] = useState(false);
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     const q = query.trim();
     if (q.length < 2) {
       setItems([]);
@@ -182,8 +171,7 @@ function LeadSearchSelect({
       setLoading(true);
       try {
         const params = new URLSearchParams({ page: "1", limit: "8", search: q });
-        const res = await fetch(`${API_BASE}/crm/leads?${params}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${API_BASE}/crm/leads?${params}`, {
         });
         if (res.ok) {
           const data = await res.json();
@@ -195,7 +183,7 @@ function LeadSearchSelect({
       }
     }, 250);
     return () => clearTimeout(t);
-  }, [query, token]);
+  }, [query, user]);
 
   return (
     <div className="space-y-1">
@@ -259,7 +247,7 @@ function LeadSearchSelect({
   );
 }
 
-function SendCsatModal({ token, onClose, onSent }: { token: string; onClose: () => void; onSent: () => void }) {
+function SendCsatModal({ onClose, onSent }: { onClose: () => void; onSent: () => void }) {
   const [selectedLead, setSelectedLead] = useState<LeadOption | null>(null);
   const [hours, setHours] = useState("72");
   const [sending, setSending] = useState(false);
@@ -273,11 +261,10 @@ function SendCsatModal({ token, onClose, onSent }: { token: string; onClose: () 
     setSending(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/feedback/csat/send`, {
+      const res = await apiFetch(`${API_BASE}/feedback/csat/send`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ lead_id: selectedLead.id, expires_hours: Number(hours) || 72 }),
-      });
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ lead_id: selectedLead.id, expires_hours: Number(hours) || 72 }) });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.detail || "Failed to queue CSAT");
@@ -303,7 +290,7 @@ function SendCsatModal({ token, onClose, onSent }: { token: string; onClose: () 
           </button>
         </div>
         <p className="text-sm text-slate-500">A CSAT email will be queued and retried in background until sent.</p>
-        <LeadSearchSelect token={token} value={selectedLead} onChange={setSelectedLead} required />
+        <LeadSearchSelect value={selectedLead} onChange={setSelectedLead} required />
         <div className="space-y-1">
           <label className="text-xs font-semibold uppercase text-slate-500">Expires in (hours)</label>
           <select
@@ -335,15 +322,14 @@ function SendCsatModal({ token, onClose, onSent }: { token: string; onClose: () 
   );
 }
 
-function AddFeedbackModal({ token, onClose, onAdded }: { token: string; onClose: () => void; onAdded: () => void }) {
+function AddFeedbackModal({ onClose, onAdded }: { onClose: () => void; onAdded: () => void }) {
   const [selectedLead, setSelectedLead] = useState<LeadOption | null>(null);
   const [form, setForm] = useState({
     interaction_id: "",
     feedback_type: "call_review",
     rating: "0",
     comment: "",
-    disposition: "",
-  });
+    disposition: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const set = (k: string) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>) =>
@@ -359,13 +345,11 @@ function AddFeedbackModal({ token, onClose, onAdded }: { token: string; onClose:
         disposition: form.disposition || null,
         rating: form.rating && Number(form.rating) > 0 ? Number(form.rating) : null,
         lead_id: selectedLead ? selectedLead.id : null,
-        interaction_id: form.interaction_id ? Number(form.interaction_id) : null,
-      };
-      const res = await fetch(`${API_BASE}/feedback`, {
+        interaction_id: form.interaction_id ? Number(form.interaction_id) : null };
+      const res = await apiFetch(`${API_BASE}/feedback`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(body),
-      });
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body) });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Failed");
       onAdded();
       onClose();
@@ -392,7 +376,7 @@ function AddFeedbackModal({ token, onClose, onAdded }: { token: string; onClose:
         </div>
 
         <div className="space-y-3">
-          <LeadSearchSelect token={token} value={selectedLead} onChange={setSelectedLead} />
+          <LeadSearchSelect value={selectedLead} onChange={setSelectedLead} />
           <div className="grid grid-cols-2 gap-3">
             <div className="space-y-1">
               <label className="text-xs font-semibold uppercase text-slate-500">Type</label>
@@ -457,12 +441,7 @@ function AddFeedbackModal({ token, onClose, onAdded }: { token: string; onClose:
 }
 
 function CloseLoopEditor({
-  token,
-  feedback,
-  users,
-  onSaved,
-}: {
-  token: string;
+  feedback, users, onSaved }: {
   feedback: FeedbackItem;
   users: CompanyUser[];
   onSaved: () => void;
@@ -477,16 +456,14 @@ function CloseLoopEditor({
     setSaving(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/feedback/${feedback.id}/close-loop`, {
+      const res = await apiFetch(`${API_BASE}/feedback/${feedback.id}/close-loop`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           assignee_user_id: assigneeUserId ? Number(assigneeUserId) : null,
           close_loop_status: closeLoopStatus,
           status_note: statusNote || null,
-          create_follow_up_task: createFollowUpTask,
-        }),
-      });
+          create_follow_up_task: createFollowUpTask }) });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.detail || "Failed to update close-loop");
@@ -582,11 +559,10 @@ const TAB_TYPE: Record<Tab, string | undefined> = {
   CSAT: "csat",
   General: "general",
   "Bug Reports": "bug_report",
-  "Feature Requests": "feature_request",
-};
+  "Feature Requests": "feature_request" };
 
 export default function FeedbackPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const router = useRouter();
 
   const [tab, setTab] = useState<Tab>("All");
@@ -602,12 +578,11 @@ export default function FeedbackPage() {
   const [users, setUsers] = useState<CompanyUser[]>([]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     let cancelled = false;
     void (async () => {
-      const res = await fetch(`${API_BASE}/feedback/summary`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      });
+      const res = await apiFetch(`${API_BASE}/feedback/summary`, {
+        headers: {"Content-Type": "application/json" } });
       if (res.status === 401) {
         sessionTimeout();
         return;
@@ -619,14 +594,13 @@ export default function FeedbackPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     let cancelled = false;
     void (async () => {
-      const res = await fetch(`${API_BASE}/admin/users`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/admin/users`, {
       });
       if (res.status === 401) {
         sessionTimeout();
@@ -639,19 +613,18 @@ export default function FeedbackPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
-    if (!token) return;
+    if (!user) return;
     let cancelled = false;
     void (async () => {
       setLoading(true);
       const type = TAB_TYPE[tab];
       const params = new URLSearchParams({ page: String(page), limit: "15" });
       if (type) params.set("feedback_type", type);
-      const res = await fetch(`${API_BASE}/feedback?${params}`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      });
+      const res = await apiFetch(`${API_BASE}/feedback?${params}`, {
+        headers: {"Content-Type": "application/json" } });
       if (res.status === 401) {
         sessionTimeout();
         return;
@@ -666,22 +639,20 @@ export default function FeedbackPage() {
     return () => {
       cancelled = true;
     };
-  }, [token, tab, page, sessionTimeout]);
+  }, [user, tab, page, sessionTimeout]);
 
   async function refreshData(targetPage: number = page) {
-    if (!token) return;
+    if (!user) return;
 
     const [summaryRes, itemsRes] = await Promise.all([
-      fetch(`${API_BASE}/feedback/summary`, {
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-      }),
+      apiFetch(`${API_BASE}/feedback/summary`, {
+        headers: {"Content-Type": "application/json" } }),
       (async () => {
         const type = TAB_TYPE[tab];
         const params = new URLSearchParams({ page: String(targetPage), limit: "15" });
         if (type) params.set("feedback_type", type);
-        return fetch(`${API_BASE}/feedback?${params}`, {
-          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        });
+        return apiFetch(`${API_BASE}/feedback?${params}`, {
+          headers: {"Content-Type": "application/json" } });
       })(),
     ]);
 
@@ -700,10 +671,9 @@ export default function FeedbackPage() {
   async function handleDelete(id: number) {
     if (!confirm("Delete this feedback?")) return;
     setDeleting(id);
-    const res = await fetch(`${API_BASE}/feedback/${id}`, {
+    const res = await apiFetch(`${API_BASE}/feedback/${id}`, {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    });
+      headers: {"Content-Type": "application/json" } });
     if (res.ok) {
       await refreshData(page);
     }
@@ -744,16 +714,14 @@ export default function FeedbackPage() {
               label: "Internal Avg",
               value: summary.internal_avg_rating ? `${summary.internal_avg_rating.toFixed(1)} / 5` : "-",
               icon: Star,
-              color: "#f59e0b",
-            },
+              color: "#f59e0b" },
             { label: "CSAT Sent", value: summary.csat_sent.toLocaleString(), icon: Send, color: "#60a5fa" },
             { label: "CSAT Response", value: `${summary.csat_response_rate.toFixed(0)}%`, icon: CheckCircle, color: "#34d399" },
             {
               label: "CSAT Avg",
               value: summary.csat_avg_rating ? `${summary.csat_avg_rating.toFixed(1)} / 5` : "-",
               icon: Star,
-              color: "#22c55e",
-            },
+              color: "#22c55e" },
           ].map(({ label, value, icon: Icon, color }) => (
             <div key={label} className="glass rounded-2xl border border-white/10 p-5" style={{ borderLeftColor: color, borderLeftWidth: 3 }}>
               <div className="flex items-start justify-between">
@@ -920,7 +888,7 @@ export default function FeedbackPage() {
                               ((fb.feedback_type === "csat" || fb.feedback_type === "call_review") && (fb.rating ?? 5) <= 3) ||
                               (fb.close_loop_status && fb.close_loop_status !== "none" && fb.close_loop_status !== "resolved")
                             ) && (
-                              <CloseLoopEditor token={token || ""} feedback={fb} users={users} onSaved={() => { void refreshData(page); }} />
+                              <CloseLoopEditor feedback={fb} users={users} onSaved={() => { void refreshData(page); }} />
                             )}
                           </div>
                         </td>
@@ -963,9 +931,8 @@ export default function FeedbackPage() {
         )}
       </div>
 
-      {showCsatModal && token && (
+      {showCsatModal && user && (
         <SendCsatModal
-          token={token}
           onClose={() => setShowCsatModal(false)}
           onSent={() => {
             setPage(1);
@@ -973,9 +940,8 @@ export default function FeedbackPage() {
           }}
         />
       )}
-      {showAddModal && token && (
+      {showAddModal && user && (
         <AddFeedbackModal
-          token={token}
           onClose={() => setShowAddModal(false)}
           onAdded={() => {
             setPage(1);

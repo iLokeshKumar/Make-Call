@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { apiFetch } from "@/utils/apiFetch";
 import {
   CheckCircle2,
   ChevronDown,
@@ -11,8 +12,7 @@ import {
   Search,
   ShieldCheck,
   XCircle,
-  Zap,
-} from "lucide-react";
+  Zap } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
@@ -37,7 +37,6 @@ type Trace = {
 
 type Props = {
   leadId: number;
-  token: string;
   onSessionTimeout?: () => void;
 };
 
@@ -45,8 +44,7 @@ const STEP_ICONS: Record<string, React.ElementType> = {
   db: Database,
   apollo: Search,
   lusha: Zap,
-  validation: ShieldCheck,
-};
+  validation: ShieldCheck };
 
 function statusColor(status: string) {
   switch (status) {
@@ -84,12 +82,11 @@ function statusLabel(status: string): string {
     empty: "Empty",
     available: "Available",
     not_configured: "Not configured",
-    passed: "Passed",
-  };
+    passed: "Passed" };
   return map[status] || status;
 }
 
-export default function EnrichmentTrace({ leadId, token, onSessionTimeout }: Props) {
+export default function EnrichmentTrace({ leadId, onSessionTimeout }: Props) {
   const [trace, setTrace] = useState<Trace | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -100,8 +97,7 @@ export default function EnrichmentTrace({ leadId, token, onSessionTimeout }: Pro
       if (!quiet) setLoading(true);
       else setRefreshing(true);
       try {
-        const res = await fetch(`${API_BASE}/crm/leads/${leadId}/enrichment-trace`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/enrichment-trace`, {
         });
         if (res.status === 401) { onSessionTimeout?.(); return; }
         if (!res.ok) return;
@@ -111,7 +107,7 @@ export default function EnrichmentTrace({ leadId, token, onSessionTimeout }: Pro
         setRefreshing(false);
       }
     },
-    [leadId, token, onSessionTimeout]
+    [leadId, onSessionTimeout]
   );
 
   useEffect(() => { fetchTrace(); }, [fetchTrace]);

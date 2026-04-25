@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch } from "@/utils/apiFetch";
 import {
   CheckCheck,
   ChevronDown,
@@ -14,8 +15,7 @@ import {
   RefreshCw,
   Reply,
   Send,
-  X,
-} from "lucide-react";
+  X } from "lucide-react";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
@@ -45,7 +45,6 @@ type EmailMessage = {
 
 type Props = {
   leadId: number;
-  token: string;
   leadEmail?: string | null;
   onSessionTimeout?: () => void;
 };
@@ -58,8 +57,7 @@ function fmt(ts: string | null) {
   if (!ts) return "";
   return new Date(ts).toLocaleString(undefined, {
     month: "short", day: "numeric",
-    hour: "2-digit", minute: "2-digit",
-  });
+    hour: "2-digit", minute: "2-digit" });
 }
 
 function relTime(ts: string | null) {
@@ -115,8 +113,7 @@ function DeliveryDot({ status }: { status: string | null }) {
     delivered: { color: "text-emerald-500 dark:text-emerald-400", label: "Delivered", Icon: CheckCheck },
     failed:    { color: "text-red-500",                    label: "Failed",    Icon: CheckCheck },
     pending:   { color: "text-amber-500",                  label: "Pending",   Icon: CheckCheck },
-    received:  { color: "text-blue-500",                   label: "Received",  Icon: Mail },
-  };
+    received:  { color: "text-blue-500",                   label: "Received",  Icon: Mail } };
   const s = map[status ?? ""] ?? map.sent;
   return (
     <span className={`inline-flex items-center gap-0.5 text-xs font-medium ${s.color}`} title={s.label}>
@@ -127,8 +124,7 @@ function DeliveryDot({ status }: { status: string | null }) {
 }
 
 function EmailCard({
-  msg,
-  onRemove,
+  msg, onRemove
 }: {
   msg: EmailMessage;
   onRemove?: (id: number) => void;
@@ -263,7 +259,7 @@ function EmailCard({
   );
 }
 
-export default function EmailThread({ leadId, token, leadEmail, onSessionTimeout }: Props) {
+export default function EmailThread({ leadId, leadEmail, onSessionTimeout }: Props) {
   const [emails, setEmails] = useState<EmailMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -281,8 +277,7 @@ export default function EmailThread({ leadId, token, leadEmail, onSessionTimeout
   const fetchThread = useCallback(async (silent = false) => {
     if (!silent) setLoading(true); else setRefreshing(true);
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/email`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/email`, {
       });
       if (res.status === 401) { onSessionTimeout?.(); return; }
       if (!res.ok) throw new Error("Failed to load email thread");
@@ -295,7 +290,7 @@ export default function EmailThread({ leadId, token, leadEmail, onSessionTimeout
       setLoading(false);
       setRefreshing(false);
     }
-  }, [leadId, token, onSessionTimeout]);
+  }, [leadId, onSessionTimeout]);
 
   // Initial load
   useEffect(() => { fetchThread(false); }, [fetchThread]);
@@ -329,11 +324,10 @@ export default function EmailThread({ leadId, token, leadEmail, onSessionTimeout
     setSending(true); setError(null);
     isComposingRef.current = false; // done composing
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/email/send`, {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/email/send`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ subject: subject.trim(), body: body.trim() }),
-      });
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ subject: subject.trim(), body: body.trim() }) });
       if (res.status === 401) { onSessionTimeout?.(); return; }
       if (!res.ok) {
         const d = await res.json();
@@ -348,9 +342,8 @@ export default function EmailThread({ leadId, token, leadEmail, onSessionTimeout
 
   const handleRemove = useCallback(async (interactionId: number) => {
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/email/${interactionId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/email/${interactionId}`, {
+        method: "DELETE"
       });
       if (res.status === 401) { onSessionTimeout?.(); return; }
       // Optimistically remove from local state immediately
@@ -358,7 +351,7 @@ export default function EmailThread({ leadId, token, leadEmail, onSessionTimeout
     } catch {
       // ignore — thread will re-sync on next refresh
     }
-  }, [leadId, token, onSessionTimeout]);
+  }, [leadId, onSessionTimeout]);
 
   const outbound = emails.filter((e) => e.direction !== "inbound");
   const inbound  = emails.filter((e) => e.direction === "inbound");

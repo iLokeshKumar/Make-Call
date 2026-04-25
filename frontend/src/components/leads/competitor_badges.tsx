@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { AlertTriangle, Loader2, ShieldAlert } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type Mention = {
@@ -15,19 +16,17 @@ type Mention = {
 
 type Props = {
   leadId: number;
-  token: string;
   onSessionTimeout?: () => void;
 };
 
-export default function CompetitorBadges({ leadId, token, onSessionTimeout }: Props) {
+export default function CompetitorBadges({ leadId, onSessionTimeout }: Props) {
   const [mentions, setMentions] = useState<Mention[]>([]);
   const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<number | null>(null);
 
   const fetchMentions = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/competitors`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/competitors`, {
       });
       if (res.status === 401) { onSessionTimeout?.(); return; }
       if (!res.ok) return;
@@ -36,7 +35,7 @@ export default function CompetitorBadges({ leadId, token, onSessionTimeout }: Pr
     } finally {
       setLoading(false);
     }
-  }, [leadId, token, onSessionTimeout]);
+  }, [leadId, onSessionTimeout]);
 
   useEffect(() => { fetchMentions(); }, [fetchMentions]);
 

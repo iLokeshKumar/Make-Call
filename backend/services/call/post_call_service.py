@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 
@@ -29,7 +30,8 @@ Return ONLY valid JSON with these keys:
 "city": string or null,
 "state": string or null,
 "country": string or null,
-"verbal_rating": integer or null
+"verbal_rating": integer or null,
+"verbal_comment": string or null
 }
 
 Rules:
@@ -39,7 +41,8 @@ Rules:
 "unqualified", "qualified", "proposal", "follow_up", "not_interested"
 - next_action should be one of:
 "send_quote", "send_brochure", "schedule_demo", "follow_up_call", "follow_up_email", "close_lost", "none"
-- verbal_rating: if the customer gave a 1-5 rating during the call (e.g. "I'd say a 4"), extract the integer. Otherwise null.
+- verbal_rating: if the customer gave an UNAMBIGUOUS 1-5 rating during the call (e.g. "I'd say a 4"), extract the integer. If they gave two numbers ("one or five"), ranges, or refused — return null and put the raw phrase into verbal_comment instead.
+- verbal_comment: any qualitative feedback the customer gave about the call experience itself ("good", "needs improvement", "loved it", "you were rude", or the raw ambiguous rating phrase). Otherwise null. NOT product/business comments — only feedback ABOUT the call/agent.
 - Do not include markdown.
 - Do not include explanation text.
 """
@@ -125,39 +128,67 @@ async def extract_and_save_requirements(
             data=payload,
         )
 
-        # Save verbal rating as internal feedback if the customer gave one on the call
+        # Save verbal feedback (rating and/or qualitative comment) if the customer
+        # gave any during the call.  Save ONE row per (interaction, customer-source)
+        # to prevent duplicates when post_call retries.
         verbal_rating = structured.get("verbal_rating")
         try:
             verbal_rating = int(verbal_rating) if verbal_rating is not None else None
         except (ValueError, TypeError):
             verbal_rating = None
-        if verbal_rating and 1 <= verbal_rating <= 5:
+        if verbal_rating is not None and not (1 <= verbal_rating <= 5):
+            verbal_rating = None
+
+        verbal_comment_raw = structured.get("verbal_comment")
+        verbal_comment = (str(verbal_comment_raw).strip() or None) if verbal_comment_raw else None
+
+        if verbal_rating is not None or verbal_comment:
             try:
                 from models.models import Feedback, utc_now
-                fb = Feedback(
-                    company_id=company_id,
-                    lead_id=lead_id,
-                    interaction_id=interaction_id,
-                    submitted_by_user_id=actor_user_id,
-                    feedback_type="csat",
-                    source="customer",
-                    rating=verbal_rating,
-                    comment="Verbal rating given on call",
-                    status="submitted",
-                    responded_at=utc_now(),
-                    created_by=actor_user_id,
-                    updated_by=actor_user_id,
-                )
-                session.add(fb)
+                from sqlmodel import select as _select
+                existing = session.exec(
+                    _select(Feedback).where(
+                        Feedback.company_id == company_id,
+                        Feedback.interaction_id == interaction_id,
+                        Feedback.source == "customer",
+                        Feedback.feedback_type == "csat",
+                    ).limit(1)
+                ).first()
+                comment_text = verbal_comment or "Verbal rating given on call"
+                if existing:
+                    existing.rating = verbal_rating if verbal_rating is not None else existing.rating
+                    existing.comment = comment_text
+                    existing.status = "submitted"
+                    existing.responded_at = utc_now()
+                    existing.updated_by = actor_user_id
+                    session.add(existing)
+                else:
+                    session.add(Feedback(
+                        company_id=company_id,
+                        lead_id=lead_id,
+                        interaction_id=interaction_id,
+                        submitted_by_user_id=actor_user_id,
+                        feedback_type="csat",
+                        source="customer",
+                        rating=verbal_rating,
+                        comment=comment_text,
+                        status="submitted",
+                        responded_at=utc_now(),
+                        created_by=actor_user_id,
+                        updated_by=actor_user_id,
+                    ))
                 session.commit()
-                logger.info("[PostCall] Verbal rating=%s saved as feedback for lead %s", verbal_rating, lead_id)
+                logger.info(
+                    "[PostCall] Verbal feedback saved for lead %s (rating=%s, comment=%s)",
+                    lead_id, verbal_rating, (verbal_comment or '')[:40],
+                )
             except Exception as fb_exc:
                 logger.warning("[PostCall] Failed to save verbal feedback: %s", fb_exc)
 
         # Auto-generate and send quote if AI detected "send_quote" intent
         if structured.get("next_action") == "send_quote":
             try:
-                from quote.voice_quote_service import auto_generate_and_send_quote
+                from services.quote.voice_quote_service import auto_generate_and_send_quote
                 vq_result = await auto_generate_and_send_quote(
                     session=session,
                     company_id=company_id,
@@ -170,11 +201,17 @@ async def extract_and_save_requirements(
             except Exception as vq_exc:
                 logger.warning("[PostCall] Voice quote dispatch failed: %s", vq_exc)
 
+        # Throttle between LLM calls — free-tier Mistral caps at ~1 req/sec.
+        # Without this delay the worker fires 5 back-to-back calls per
+        # post-call job and burns through the quota in seconds.
+        _THROTTLE_SECONDS = 1.2
+
+        await asyncio.sleep(_THROTTLE_SECONDS)
         # Fire-and-forget objection extraction using the same LLM service
         # (the LLM message history is already reset by the new prompt above,
         # so we re-instantiate a lightweight version via the same instance)
         try:
-            from ai.llm import get_llm_service
+            from services.ai.llm import get_llm_service
             objection_llm = get_llm_service(
                 llm_service.provider.lower() if hasattr(llm_service, "provider") else "mistral",
                 "You extract sales objections from transcripts.",
@@ -192,10 +229,11 @@ async def extract_and_save_requirements(
         except Exception as obj_exc:
             logger.warning("Objection extraction failed: %s", obj_exc)
 
+        await asyncio.sleep(_THROTTLE_SECONDS)
         # AI Sales Coach — score the AI's performance and optionally auto-tune the system prompt
         try:
-            from ai.llm import get_llm_service
-            from call.call_coach_service import score_call_and_coach
+            from services.ai.llm import get_llm_service
+            from services.call.call_coach_service import score_call_and_coach
             coach_llm = get_llm_service(
                 llm_service.provider.lower() if hasattr(llm_service, "provider") else "mistral",
                 "You are an expert B2B sales coach.",
@@ -242,9 +280,10 @@ async def extract_and_save_requirements(
             except Exception as ew_exc:
                 logger.warning("[PostCall] EmailWriter dispatch failed: %s", ew_exc)
 
+        await asyncio.sleep(_THROTTLE_SECONDS)
         # Post-call competitor mention extraction (LLM, more accurate than real-time keywords)
         try:
-            from ai.llm import get_llm_service
+            from services.ai.llm import get_llm_service
             from services.competitor_service import extract_and_save_competitor_mentions
             comp_llm = get_llm_service(
                 llm_service.provider.lower() if hasattr(llm_service, "provider") else "mistral",
@@ -263,15 +302,17 @@ async def extract_and_save_requirements(
         except Exception as comp_exc:
             logger.warning("Competitor extraction failed: %s", comp_exc)
 
-        # CSAT feedback email — send after any engaged/positive call
+        # CSAT feedback request — only fires when the customer did NOT give
+        # verbal feedback during the call.  Channel="auto" prefers WhatsApp
+        # (better CTR in IN), email fallback.  See auto_csat_service.
         try:
-            from feedback.auto_csat_service import maybe_send_auto_csat, POSITIVE_OUTCOMES
+            from services.feedback.auto_csat_service import maybe_send_auto_csat
             qual = structured.get("qualification_status") or ""
-            # Map extraction qualification_status → normalized_outcome used by CSAT gate
             csat_outcome = (
                 "answered_interested" if qual in ("qualified", "proposal")
                 else "answered_callback_requested" if qual == "follow_up"
-                else ""
+                else "answered_not_interested" if qual == "not_interested"
+                else "answered_general"
             )
             maybe_send_auto_csat(
                 session=session,
@@ -281,6 +322,7 @@ async def extract_and_save_requirements(
                 interaction_id=interaction_id,
                 trigger="call",
                 normalized_outcome=csat_outcome,
+                channel="auto",
             )
         except Exception as csat_exc:
             logger.warning("[PostCall] CSAT dispatch failed: %s", csat_exc)
@@ -288,7 +330,6 @@ async def extract_and_save_requirements(
         # Orchestrator post-call workflow: save summary → ISM advance → follow-up
         try:
             from agents.orchestrator import run_post_call
-            import asyncio
             from models.models import Lead as _Lead
 
             lead_obj = session.get(_Lead, lead_id)

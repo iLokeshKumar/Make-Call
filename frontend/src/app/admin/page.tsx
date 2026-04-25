@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Loader2, Shield, ShieldCheck, UserCheck, UserX, Plus, X, Check, Edit2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type AdminUser = {
@@ -61,16 +62,9 @@ function Toast({ message, onClose }: { message: string; onClose: () => void }) {
 }
 
 function UsersTab({
-  users,
-  roles,
-  token,
-  sessionTimeout,
-  onRefresh,
-  onToast,
-}: {
+  users, roles, sessionTimeout, onRefresh, onToast }: {
   users: AdminUser[];
   roles: AdminRole[];
-  token: string | null;
   sessionTimeout: () => void;
   onRefresh: () => void;
   onToast: (msg: string) => void;
@@ -78,7 +72,7 @@ function UsersTab({
   const [assignRoleMap, setAssignRoleMap] = useState<Record<number, string>>({});
   const [loadingMap, setLoadingMap] = useState<Record<string, boolean>>({});
 
-  const authHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const authHeaders = {"Content-Type": "application/json" };
 
   const setLoading = (key: string, val: boolean) =>
     setLoadingMap((prev) => ({ ...prev, [key]: val }));
@@ -87,11 +81,9 @@ function UsersTab({
     const key = `status-${user.id}`;
     setLoading(key, true);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${user.id}/status`, {
+      const res = await apiFetch(`${API_BASE}/admin/users/${user.id}/status`, {
         method: "PATCH",
-        headers: authHeaders,
-        body: JSON.stringify({ is_active: !user.is_active }),
-      });
+        body: JSON.stringify({ is_active: !user.is_active }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) { onToast(`User ${user.is_active ? "deactivated" : "activated"} successfully`); onRefresh(); }
     } finally { setLoading(key, false); }
@@ -103,11 +95,9 @@ function UsersTab({
     const key = `assign-${user.id}`;
     setLoading(key, true);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${user.id}/roles`, {
+      const res = await apiFetch(`${API_BASE}/admin/users/${user.id}/roles`, {
         method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ role_id: roleId }),
-      });
+        body: JSON.stringify({ role_id: roleId }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) {
         onToast("Role assigned");
@@ -123,10 +113,8 @@ function UsersTab({
     const key = `remove-${user.id}-${role.id}`;
     setLoading(key, true);
     try {
-      const res = await fetch(`${API_BASE}/admin/users/${user.id}/roles/${role.id}`, {
-        method: "DELETE",
-        headers: authHeaders,
-      });
+      const res = await apiFetch(`${API_BASE}/admin/users/${user.id}/roles/${role.id}`, {
+        method: "DELETE" });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) { onToast("Role removed"); onRefresh(); }
     } finally { setLoading(key, false); }
@@ -259,16 +247,9 @@ function UsersTab({
 
 /* Roles Tab */
 function RolesTab({
-  roles,
-  permissions,
-  token,
-  sessionTimeout,
-  onRefresh,
-  onToast,
-}: {
+  roles, permissions, sessionTimeout, onRefresh, onToast }: {
   roles: AdminRole[];
   permissions: Permission[];
-  token: string | null;
   sessionTimeout: () => void;
   onRefresh: () => void;
   onToast: (msg: string) => void;
@@ -278,7 +259,7 @@ function RolesTab({
   const [form, setForm] = useState<RoleFormState>(emptyRoleForm);
   const [saving, setSaving] = useState(false);
 
-  const authHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const authHeaders = {"Content-Type": "application/json" };
 
   const openNew = () => {
     setEditingRole(null);
@@ -303,8 +284,7 @@ function RolesTab({
       ...prev,
       permission_keys: prev.permission_keys.includes(key)
         ? prev.permission_keys.filter((k) => k !== key)
-        : [...prev.permission_keys, key],
-    }));
+        : [...prev.permission_keys, key] }));
   };
 
   const saveRole = async () => {
@@ -314,19 +294,14 @@ function RolesTab({
       const body = {
         name: form.name.trim(),
         description: form.description.trim() || undefined,
-        permission_keys: form.permission_keys,
-      };
+        permission_keys: form.permission_keys };
       const res = editingRole
-        ? await fetch(`${API_BASE}/admin/roles/${editingRole.id}`, {
+        ? await apiFetch(`${API_BASE}/admin/roles/${editingRole.id}`, {
             method: "PUT",
-            headers: authHeaders,
-            body: JSON.stringify(body),
-          })
-        : await fetch(`${API_BASE}/admin/roles`, {
+            body: JSON.stringify(body) })
+        : await apiFetch(`${API_BASE}/admin/roles`, {
             method: "POST",
-            headers: authHeaders,
-            body: JSON.stringify(body),
-          });
+            body: JSON.stringify(body) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) {
         onToast(editingRole ? "Role updated" : "Role created");
@@ -529,7 +504,7 @@ function PermissionsTab({ permissions }: { permissions: Permission[] }) {
 
 /* Page */
 export default function AdminPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const [activeTab, setActiveTab] = useState<"Users" | "Roles" | "Permissions">("Users");
   const [users, setUsers] = useState<AdminUser[]>([]);
   const [roles, setRoles] = useState<AdminRole[]>([]);
@@ -537,16 +512,15 @@ export default function AdminPage() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<string | null>(null);
 
-  const authHeaders = { Authorization: `Bearer ${token}` };
 
   const fetchAll = useCallback(async () => {
-    if (!token) { setLoading(false); return; }
+    if (!user) { setLoading(false); return; }
     setLoading(true);
     try {
       const [uRes, rRes, pRes] = await Promise.all([
-        fetch(`${API_BASE}/admin/users`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/roles`, { headers: authHeaders }),
-        fetch(`${API_BASE}/admin/permissions`, { headers: authHeaders }),
+        apiFetch(`${API_BASE}/admin/users`),
+        apiFetch(`${API_BASE}/admin/roles`),
+        apiFetch(`${API_BASE}/admin/permissions`),
       ]);
       if (uRes.status === 401 || rRes.status === 401 || pRes.status === 401) {
         sessionTimeout();
@@ -556,7 +530,7 @@ export default function AdminPage() {
       if (rRes.ok) setRoles(await rRes.json());
       if (pRes.ok) setPermissions(await pRes.json());
     } finally { setLoading(false); }
-  }, [token]);
+  }, [user]);
 
   useEffect(() => { fetchAll(); }, [fetchAll]);
 
@@ -604,7 +578,6 @@ export default function AdminPage() {
             <UsersTab
               users={users}
               roles={roles}
-              token={token}
               sessionTimeout={sessionTimeout}
               onRefresh={fetchAll}
               onToast={setToast}
@@ -614,7 +587,6 @@ export default function AdminPage() {
             <RolesTab
               roles={roles}
               permissions={permissions}
-              token={token}
               sessionTimeout={sessionTimeout}
               onRefresh={fetchAll}
               onToast={setToast}

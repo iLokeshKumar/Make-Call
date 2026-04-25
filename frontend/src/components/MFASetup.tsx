@@ -4,8 +4,9 @@ import React, { useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import { Shield, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 export default function MFASetup() {
-    const { user, token, refreshUser } = useAuth();
+    const { user, refreshUser } = useAuth();
     const [setupData, setSetupData] = useState<{ secret: string; qr_code: string } | null>(null);
     const [mfaCode, setMfaCode] = useState("");
     const [error, setError] = useState("");
@@ -19,9 +20,8 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await fetch("http://localhost:6060/auth/mfa/setup", {
-                method: "POST",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch("http://localhost:6060/auth/mfa/setup", {
+                method: "POST"
             });
             if (res.ok) {
                 const data = await res.json();
@@ -41,14 +41,11 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await fetch("http://localhost:6060/auth/mfa/enable", {
+            const res = await apiFetch("http://localhost:6060/auth/mfa/enable", {
                 method: "POST",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({ token: mfaCode }),
-            });
+                    "Content-Type": "application/json" },
+                body: JSON.stringify({ token: mfaCode }) });
             if (res.ok) {
                 setSuccess(true);
                 await refreshUser(); // Refresh user context to show MFA as enabled
@@ -67,9 +64,8 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await fetch("http://localhost:6060/auth/mfa/request-disable", {
-                method: "POST",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch("http://localhost:6060/auth/mfa/request-disable", {
+                method: "POST"
             });
             if (res.ok) {
                 setDisabling(true);
@@ -88,14 +84,11 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await fetch("http://localhost:6060/auth/mfa/disable", {
+            const res = await apiFetch("http://localhost:6060/auth/mfa/disable", {
                 method: "POST",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify({ token: disableOtp }),
-            });
+                    "Content-Type": "application/json" },
+                body: JSON.stringify({ token: disableOtp }) });
             if (res.ok) {
                 setDisabling(false);
                 setSuccess(true);

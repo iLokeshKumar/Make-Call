@@ -170,15 +170,14 @@ async def stream_interaction_recording(
         await client.aclose()
         raise HTTPException(status_code=502, detail=f"Upstream returned {head.status_code}")
 
-    content_length = head.headers.get("content-length")
-    headers = {}
-    if content_length:
-        headers["Content-Length"] = content_length
-
+    # Intentionally NOT setting Content-Length.  Twilio's HEAD vs GET length
+    # can differ (CDN re-encoding) and Starlette's BaseHTTPMiddleware wraps
+    # streaming bodies in a way that double-counts bytes — both produce
+    # `RuntimeError: Response content longer than Content-Length` mid-stream.
+    # Browsers play MP3 fine over chunked transfer encoding.
     return StreamingResponse(
         iter_audio(),
         media_type=head.headers.get("content-type", "audio/mpeg"),
-        headers=headers,
     )
 
 

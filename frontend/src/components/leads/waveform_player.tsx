@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, Pause, Play, Volume2 } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 type TranscriptLine = {
   speaker: "AI" | "User" | string;
   text: string;
@@ -39,7 +40,7 @@ function parseTranscriptLines(raw: string | null | undefined): TranscriptLine[] 
     });
 }
 
-export default function WaveformPlayer({ recordingUrl, interactionId, token, apiBase, transcript, duration }: Props) {
+export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, transcript, duration }: Props) {
   const audioRef = useRef<HTMLAudioElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animFrameRef = useRef<number>(0);
@@ -60,8 +61,7 @@ export default function WaveformPlayer({ recordingUrl, interactionId, token, api
   // Annotate lines with approximate timestamps (uniformly distributed over call duration)
   const annotatedLines = lines.map((l, i) => ({
     ...l,
-    approxStart: lineCount > 1 ? (i / (lineCount - 1)) * totalDuration : 0,
-  }));
+    approxStart: lineCount > 1 ? (i / (lineCount - 1)) * totalDuration : 0 }));
 
   // Resolve the playable URL: either a direct prop, or a blob URL produced by fetching the backend proxy with Bearer auth.
   useEffect(() => {
@@ -73,12 +73,11 @@ export default function WaveformPlayer({ recordingUrl, interactionId, token, api
         setEffectiveUrl(recordingUrl);
         return;
       }
-      if (!interactionId || !token) return;
+      if (!interactionId ) return;
       try {
         setFetchError(null);
         const base = apiBase ?? DEFAULT_API_BASE;
-        const res = await fetch(`${base}/crm/interactions/${interactionId}/recording`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${base}/crm/interactions/${interactionId}/recording`, {
         });
         if (!res.ok) {
           setFetchError(res.status === 404 ? "Recording not yet available" : `Failed to load (${res.status})`);
@@ -99,7 +98,7 @@ export default function WaveformPlayer({ recordingUrl, interactionId, token, api
       cancelled = true;
       if (revoke) URL.revokeObjectURL(revoke);
     };
-  }, [recordingUrl, interactionId, token, apiBase]);
+  }, [recordingUrl, interactionId, apiBase]);
 
   // Decode audio + build waveform via Web Audio API
   const buildWaveform = useCallback(async () => {
@@ -108,7 +107,7 @@ export default function WaveformPlayer({ recordingUrl, interactionId, token, api
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
-      const resp = await fetch(effectiveUrl);
+      const resp = await apiFetch(effectiveUrl);
       if (!resp.ok) return;
       const arrayBuf = await resp.arrayBuffer();
       const audioBuf = await ctx.decodeAudioData(arrayBuf);

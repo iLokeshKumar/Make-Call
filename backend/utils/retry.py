@@ -150,7 +150,6 @@ def get_breaker(name: str, failure_threshold: int = 5, recovery_timeout: float =
     return _breakers[name]
 
 
-# with_fallback — combines retry with circuit breaker
 
 async def with_fallback(
     primary: Callable[[], Awaitable[Any]],

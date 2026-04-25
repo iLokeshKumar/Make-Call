@@ -20,9 +20,9 @@ from typing import Optional
 from sqlmodel import Session, select
 
 from models.models import Lead, Product, QuoteCreate, QuoteItemCreate, utc_now
-from quote.quote_service import create_quote
-from quote.quote_pdf_service import generate_quote_pdf
-from communication.communication_service import send_quote_to_lead
+from services.quote.quote_service import create_quote
+from services.quote.quote_pdf_service import generate_quote_pdf
+from services.communication.communication_service import send_quote_to_lead
 from credentials_service import get_company_credential
 
 logger = logging.getLogger(__name__)

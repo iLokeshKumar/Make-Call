@@ -71,3 +71,22 @@ multi-tenant_plan.md
 overall_architecture.md
 .gstack/
 Claude.md
+
+# Test/cache
+.pytest_cache/
+**/.pytest_cache/
+
+# QA/local work folders
+.qa/
+backend/.qa/
+frontend/.qa/
+
+# Local plugin/work dirs
+caveman/
+
+# Generated app data
+backend/uploads/
+backend/quotes/*.pdf
+
+# Windows
+desktop.ini

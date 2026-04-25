@@ -22,13 +22,14 @@ Design principles
 from __future__ import annotations
 
 import logging
-from datetime import timedelta
-from typing import Literal
+import re
+from datetime import timedelta, timezone
+from typing import Literal, Optional
 
 from sqlmodel import Session, select
 
-from models.models import CallTask, Campaign, CampaignRecipient, Lead, utc_now
-from services.communication.communication_service import get_company_setting_value, send_email_to_lead
+from models.models import CallTask, Campaign, CampaignRecipient, Lead, LeadRequirement, utc_now
+from services.communication.communication_service import get_company_setting_value
 from services.message_render_service import render_template_by_id
 from services.next_action_service import dispatch_next_action, handle_inbound_quote_request
 from services.call.outbound_call_service import create_call_task
@@ -116,6 +117,10 @@ def _is_channel_in_cooldown(session: Session, company_id: int, lead_id: int, cha
     last = _channel_last_attempt_at(session, company_id, lead_id, channel)
     if last is None:
         return False
+    # Postgres stores tz-aware datetimes; SQLite tests may return naive ones.
+    # Normalize to UTC-aware so the comparison works in both environments.
+    if last.tzinfo is None:
+        last = last.replace(tzinfo=timezone.utc)
     cooldown_hours = _CHANNEL_COOLDOWN_HOURS.get(channel, 24)
     return utc_now() < last + timedelta(hours=cooldown_hours)
 
@@ -136,6 +141,139 @@ def _lead_has_channel(lead: Lead, channel: str) -> bool:
     return False
 
 
+# Requirement-driven channel selection (2.1)
+#
+# When a LeadRequirement row is present, its budget + timeline can override the
+# stage-based default:
+#   * high-ticket  → prefer `call` (personal touch on expensive deals)
+#   * urgent       → prefer `whatsapp` (fastest medium)
+#   * both         → prefer `call` first, `whatsapp` second
+#   * otherwise    → fall through to _STAGE_CHANNEL_PREFERENCE (unchanged)
+#
+# The parsers below are DELIBERATELY CONSERVATIVE — unparseable input returns
+# False (no override). False negatives are safer than false positives here:
+# the cost of "picked the wrong channel" is an email when a call was better,
+# not a compliance violation.
+
+_HIGH_TICKET_USD_THRESHOLD: float = 10_000.0
+
+# Heuristic INR→USD conversion. Not intended to be precise; crossing the
+# threshold by 10% either way is fine since the threshold itself is arbitrary.
+_INR_TO_USD_ROUGH: float = 80.0
+
+_BUDGET_SUFFIX_MULTIPLIERS: dict[str, float] = {
+    "k": 1_000,  "thousand": 1_000,
+    "m": 1_000_000, "mil": 1_000_000, "million": 1_000_000,
+    "l": 100_000, "lac": 100_000, "lakh": 100_000,        # INR
+    "cr": 10_000_000, "crore": 10_000_000,                # INR
+}
+
+_INR_MARKERS: tuple[str, ...] = (
+    "₹", "inr", "rs ", "rs.", "rupee", "lakh", "lac", "crore",
+)
+
+# Timeline keywords that suggest "act this week or sooner"
+_URGENT_TIMELINE_KEYWORDS: frozenset[str] = frozenset({
+    "immediate", "urgent", "asap", "rush", "rushing",
+    "today", "tomorrow", "tonight", "right now",
+    "this week", "next 7 days", "next week",
+})
+
+
+def _budget_is_high_ticket(requirement: LeadRequirement) -> bool:
+    """Return True if the requirement's budget looks ≥ ~$10k (or INR equivalent).
+
+    Priority: explicit `structured_data["budget_max_usd"]` (number) wins.
+    Fallback: heuristic regex scan of the free-text `budget_range` field.
+    """
+    sd = getattr(requirement, "structured_data", None) or {}
+    try:
+        explicit = sd.get("budget_max_usd")
+        if explicit is not None:
+            return float(explicit) >= _HIGH_TICKET_USD_THRESHOLD
+    except (TypeError, ValueError):
+        pass
+
+    text = (getattr(requirement, "budget_range", "") or "").lower().strip()
+    if not text:
+        return False
+
+    # Grab all "<number>[<suffix>]" pairs and take the max.
+    max_native = 0.0
+    for match in re.finditer(r"(\d+(?:[.,]\d+)?)\s*([a-z]*)", text):
+        num_str, suffix = match.group(1), match.group(2)
+        try:
+            num = float(num_str.replace(",", ""))
+        except ValueError:
+            continue
+        mult = _BUDGET_SUFFIX_MULTIPLIERS.get(suffix, 1.0)
+        max_native = max(max_native, num * mult)
+
+    if max_native == 0:
+        return False
+
+    # Treat as INR if any INR-indicator is in the text.
+    is_inr = any(marker in text for marker in _INR_MARKERS)
+    if is_inr:
+        max_native = max_native / _INR_TO_USD_ROUGH
+
+    return max_native >= _HIGH_TICKET_USD_THRESHOLD
+
+
+def _timeline_is_urgent(requirement: LeadRequirement) -> bool:
+    """Return True if timeline text suggests action within ~1 week.
+
+    Explicit `structured_data["urgency"]` in {"urgent", "immediate", "rush"}
+    wins. Fallback: keyword scan of `timeline` text.
+    """
+    sd = getattr(requirement, "structured_data", None) or {}
+    urgency = sd.get("urgency")
+    if isinstance(urgency, str) and urgency.lower() in {"urgent", "immediate", "rush"}:
+        return True
+
+    text = (getattr(requirement, "timeline", "") or "").lower().strip()
+    if not text:
+        return False
+
+    return any(kw in text for kw in _URGENT_TIMELINE_KEYWORDS)
+
+
+def _requirement_preferred_channels(
+    session: Session,
+    company_id: int,
+    lead_id: int,
+) -> list[str] | None:
+    """Read the latest LeadRequirement and return channel preference, or None.
+
+    None means "no override — use the stage default."
+    """
+    req = session.exec(
+        select(LeadRequirement)
+        .where(
+            LeadRequirement.company_id == company_id,
+            LeadRequirement.lead_id == lead_id,
+        )
+        # Tiebreak by id in case two rows share a created_at (fast test inserts,
+        # batch extraction writes). Without this, order is SQL-dialect-dependent.
+        .order_by(LeadRequirement.created_at.desc(), LeadRequirement.id.desc())
+    ).first()
+    if not req:
+        return None
+
+    is_high_ticket = _budget_is_high_ticket(req)
+    is_urgent = _timeline_is_urgent(req)
+
+    if is_high_ticket:
+        # Personal touch first. Email last because high-ticket deals rarely
+        # close over email.
+        return ["call", "whatsapp", "email"]
+    if is_urgent:
+        # Fastest-response channel first. Call second because phone tag wastes
+        # the urgency signal.
+        return ["whatsapp", "call", "email"]
+    return None
+
+
 def _pick_channel(
     session: Session,
     company_id: int,
@@ -145,8 +283,15 @@ def _pick_channel(
     """
     Return the best available channel for this (lead, stage) combination,
     or None if every option is blocked.
+
+    Requirement-driven overrides (budget, timeline) take priority over the
+    stage default. Guards (opt-out, cooldown, exhaustion, missing contact)
+    still apply — a requirement can't force us to break an opt-out.
     """
-    preference = _STAGE_CHANNEL_PREFERENCE.get(stage, ["call", "whatsapp", "email"])
+    preference = _requirement_preferred_channels(session, company_id, lead.id)
+    if preference is None:
+        preference = _STAGE_CHANNEL_PREFERENCE.get(stage, ["call", "whatsapp", "email"])
+
     for channel in preference:
         if not _lead_has_channel(lead, channel):
             continue
@@ -183,6 +328,17 @@ def _dispatch_call(
     return {"channel": "call", "action": "queued_call_task", "call_task_id": task.id}
 
 
+def _ism_trigger(stage: str, attempt_count: int) -> str:
+    """Build a stable-per-attempt trigger string for idempotency keys.
+
+    Including `attempt_count` means: same stage + same template rendering +
+    same attempt number all dedupe (worker retries harmlessly). Each NEW
+    attempt gets a different key so re-dispatch after cooldown creates
+    a fresh task.
+    """
+    return f"ism_stage:{stage}:attempt:{attempt_count}"
+
+
 def _dispatch_whatsapp(
     session: Session,
     company_id: int,
@@ -190,7 +346,14 @@ def _dispatch_whatsapp(
     lead: Lead,
     stage: str,
 ) -> dict:
-    from services.communication.communication_service import send_whatsapp_to_lead
+    """Enqueue a WhatsApp send through the AgentTask queue.
+
+    The actual send happens later when the worker claims the task and the
+    send-agent executor calls communication_service.send_whatsapp_to_lead.
+    If USE_AGENT_TASK_QUEUE=0, dispatch falls back to synchronous direct
+    send (legacy pre-Week-2 behavior).
+    """
+    from services.agent.dispatch_service import enqueue_send_whatsapp
 
     template_setting = f"ISM_WHATSAPP_TEMPLATE_{stage.upper()}"
     template_id_str = get_company_setting_value(session, company_id, template_setting)
@@ -211,14 +374,16 @@ def _dispatch_whatsapp(
     if not message:
         message = _default_message(lead, stage, "whatsapp")
 
-    result = send_whatsapp_to_lead(
+    attempts = _channel_attempt_count(session, company_id, lead.id, "whatsapp")
+    outcome = enqueue_send_whatsapp(
         session=session,
         company_id=company_id,
         actor_user_id=actor_user_id,
         lead_id=lead.id,
         body=message,
+        trigger=_ism_trigger(stage, attempts),
     )
-    return {"channel": "whatsapp", "action": "sent_whatsapp", "result": result}
+    return _normalize_dispatch_outcome("whatsapp", outcome)
 
 
 def _dispatch_email(
@@ -228,6 +393,9 @@ def _dispatch_email(
     lead: Lead,
     stage: str,
 ) -> dict:
+    """Enqueue an email send through the AgentTask queue. See _dispatch_whatsapp."""
+    from services.agent.dispatch_service import enqueue_send_email
+
     template_setting = f"ISM_EMAIL_TEMPLATE_{stage.upper()}"
     template_id_str = get_company_setting_value(session, company_id, template_setting)
     subject: str | None = None
@@ -250,15 +418,34 @@ def _dispatch_email(
         subject = subject or _default_subject(lead, stage)
         body = _default_message(lead, stage, "email")
 
-    result = send_email_to_lead(
+    attempts = _channel_attempt_count(session, company_id, lead.id, "email")
+    outcome = enqueue_send_email(
         session=session,
         company_id=company_id,
         actor_user_id=actor_user_id,
         lead_id=lead.id,
         subject=subject or _default_subject(lead, stage),
         body=body,
+        trigger=_ism_trigger(stage, attempts),
     )
-    return {"channel": "email", "action": "sent_email", "result": result}
+    return _normalize_dispatch_outcome("email", outcome)
+
+
+def _normalize_dispatch_outcome(channel: str, outcome) -> dict:
+    """Turn whatever enqueue_send_* returned into the stable ISM result shape.
+
+    Queue path → outcome is an AgentTask (has .id, .status).
+    Queue-off (feature flag) → outcome is the old send result dict or a Task
+    depending on underlying service. Handle both.
+    """
+    if hasattr(outcome, "id") and hasattr(outcome, "status"):
+        return {
+            "channel": channel,
+            "action": f"queued_send_{channel}",
+            "agent_task_id": outcome.id,
+            "status": outcome.status,
+        }
+    return {"channel": channel, "action": f"sent_{channel}", "result": outcome}
 
 
 # Default (used when no template is configured)
@@ -312,9 +499,14 @@ def _update_lead_after_dispatch(
     channel: str,
     stage: str,
 ) -> None:
-    """Stamp outreach metadata back onto the lead row."""
+    """Stamp outreach metadata back onto the lead row.
+
+    Note: the pre-Week-3 code here also set `lead.last_outreach_channel`, but
+    that field was never defined on the Lead model — Pydantic would have
+    raised. Removed. If per-channel last-attempt is needed later, add the
+    field to Lead via Alembic migration and re-introduce the write.
+    """
     lead.last_outreach_at = utc_now()
-    lead.last_outreach_channel = channel
     lead.next_action = _next_action_for_stage(stage)
     due_hours = _CHANNEL_COOLDOWN_HOURS.get(channel, 24)
     lead.next_action_due_at = utc_now() + timedelta(hours=due_hours)
@@ -340,6 +532,88 @@ def _next_action_for_stage(stage: str) -> str:
 ISMResult = dict
 
 
+_VALID_DISPATCH_CHANNELS: frozenset[str] = frozenset({"call", "whatsapp", "email"})
+
+
+def _execute_rule_action(
+    session: Session,
+    company_id: int,
+    actor_user_id: int,
+    lead: Lead,
+    stage: str,
+    rule,
+) -> tuple[bool, Optional[str], Optional[str]]:
+    """Execute a matched IsmRule's action.
+
+    Returns (handled, forced_channel, skip_reason):
+      - handled=True: the rule fully handled this cycle; caller should return
+        immediately with the rule metadata appended to the result dict.
+        skip_reason (if non-None) indicates why no dispatch happened.
+      - handled=False: the rule requested a channel override only; the caller
+        should continue with forced_channel as if _pick_channel returned it.
+      - handled=False, forced_channel=None: rule action was 'skip' or
+        unrecognized — caller falls through to normal _pick_channel.
+    """
+    from agents.ism_rules_engine import parse_action
+    verb, arg = parse_action(rule.then_action)
+
+    if verb == "advance_to":
+        if not arg or arg not in ISM_STAGE_ORDER:
+            logger.warning("[ism_rules] rule %s has invalid advance_to:%r — falling through", rule.id, arg)
+            return (False, None, None)
+        lead.ism_stage = arg
+        lead.updated_at = utc_now()
+        lead.updated_by = actor_user_id
+        session.add(lead); session.commit()
+        return (True, None, "rule_advanced_stage")
+
+    if verb == "dispatch":
+        if arg in _VALID_DISPATCH_CHANNELS:
+            # Override the channel choice — caller continues with this channel
+            return (False, arg, None)
+        # dispatch:send_quote, dispatch:send_email, etc. Not yet supported
+        # here (needs template/content) — fall through to default picker so
+        # the rule doesn't silently do nothing.
+        logger.debug("[ism_rules] rule %s dispatch:%s not directly supported, falling through", rule.id, arg)
+        return (False, None, None)
+
+    if verb == "handoff_to_human":
+        # Create an approval-required task the operator will see in the inbox.
+        # No executor is registered for task_type='handoff' so it stays in
+        # `awaiting_approval` until an operator approves/rejects.
+        try:
+            from services.agent.agent_task_service import create_agent_task
+            import hashlib
+            # One handoff per (lead, stage) — dedupe if ISM re-tries
+            key = hashlib.sha256(f"handoff:{lead.id}:{stage}:{rule.id}".encode()).hexdigest()[:40]
+            create_agent_task(
+                session=session,
+                company_id=company_id,
+                lead_id=lead.id,
+                task_type="handoff",
+                assigned_agent="webhook_sink",   # no-op executor; task completes on approve
+                input_json={
+                    "task_type": "handoff",
+                    "reason": rule.name,
+                    "rule_id": rule.id,
+                    "stage": stage,
+                    "summary": f"Handoff lead {lead.id} at stage '{stage}' — rule: {rule.name}",
+                },
+                idempotency_key=f"handoff:{lead.id}:{key}",
+                requires_approval=True,
+                actor_user_id=actor_user_id,
+            )
+        except Exception as exc:
+            logger.warning("[ism_rules] failed to create handoff task for lead %s: %s", lead.id, exc)
+        return (True, None, "rule_handoff_to_human")
+
+    if verb == "skip":
+        return (True, None, "rule_action_skip")
+
+    logger.warning("[ism_rules] rule %s has unknown action verb %r — falling through", rule.id, verb)
+    return (False, None, None)
+
+
 def run_ism_cycle(
     session: Session,
     company_id: int,
@@ -359,6 +633,8 @@ def run_ism_cycle(
             "call_task_id": 17,          # if channel == "call"
             "skipped": False,
             "skip_reason": None,
+            "rule_id": 5,                # if a rule fired (Week 3.3)
+            "rule_name": "vip_budget",   # if a rule fired
         }
     """
     lead = session.exec(
@@ -383,8 +659,37 @@ def run_ism_cycle(
         if utc_now() < lead.last_outreach_at + timedelta(hours=min_cooldown):
             return {"lead_id": lead_id, "stage": stage, "skipped": True, "skip_reason": "global_cooldown"}
 
-    # Pick best available channel.
-    channel = _pick_channel(session, company_id, lead, stage)
+    # Rules engine (Week 3.3) — data-driven overrides.
+    forced_channel: Optional[str] = None
+    matched_rule = None
+    try:
+        from agents.ism_rules_engine import evaluate_rules
+        matched_rule = evaluate_rules(session, company_id, lead)
+    except Exception as exc:
+        logger.warning("[ism_rules] evaluation failed for lead=%s: %s", lead_id, exc)
+
+    if matched_rule is not None:
+        handled, forced_channel, skip_reason = _execute_rule_action(
+            session, company_id, actor_user_id, lead, stage, matched_rule,
+        )
+        if handled:
+            return {
+                "lead_id": lead_id,
+                "stage": stage,
+                "skipped": True,
+                "skip_reason": skip_reason,
+                "rule_id": matched_rule.id,
+                "rule_name": matched_rule.name,
+            }
+
+    # Pick best available channel (rule-forced if matched).
+    if forced_channel is not None and _lead_has_channel(lead, forced_channel) \
+       and not is_lead_opted_out(session, company_id, lead.id, forced_channel) \
+       and not _is_channel_exhausted(session, company_id, lead.id, forced_channel) \
+       and not _is_channel_in_cooldown(session, company_id, lead.id, forced_channel):
+        channel = forced_channel
+    else:
+        channel = _pick_channel(session, company_id, lead, stage)
     if channel is None:
         # All channels blocked → advance stage so we don't spin forever, then give up.
         new_stage = _advance_stage(lead, actor_user_id, session)
@@ -474,6 +779,7 @@ def run_ism_for_company(
     leads = session.exec(
         select(Lead).where(
             Lead.company_id == company_id,
+            Lead.deleted_at.is_(None),
             Lead.ism_stage.notin_(list(_TERMINAL_STAGES)),  # type: ignore[arg-type]
         ).where(
             (Lead.last_outreach_at == None) | (Lead.last_outreach_at <= cutoff)  # noqa: E711

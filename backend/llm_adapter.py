@@ -170,31 +170,3 @@ def get_openai_tools() -> list:
 def get_llama_tools() -> list:
     """Convert MCP tools to LLaMA format (if supported)"""
     return []
-
-# DEMO USAGE EXAMPLES
-
-"""
-# Switch to Qwen
-from llm_adapter import LLMProvider, LLMClient
-
-llm = LLMClient(
-    provider=LLMProvider.QWEN,
-    api_key="your-qwen-key"
-)
-
-# Get tools for the provider
-tools = LLMClient.get_tools_for_provider(LLMProvider.QWEN)
-
-# Use in voice pipeline or agents
-response = llm.client.chat.complete(...)
-
-
-# Switch to Claude
-llm = LLMClient(provider=LLMProvider.CLAUDE)
-tools = LLMClient.get_tools_for_provider(LLMProvider.CLAUDE)
-
-
-# Switch to OpenAI
-llm = LLMClient(provider=LLMProvider.OPENAI)
-tools = LLMClient.get_tools_for_provider(LLMProvider.OPENAI)
-"""

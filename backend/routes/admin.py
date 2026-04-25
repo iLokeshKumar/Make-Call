@@ -334,6 +334,26 @@ async def update_user_status(
     return {"message": "User status updated"}
 
 
+# ── SLO status — Week 8.2 ─────────────────────────────────────────────────────
+
+@router.get("/slo-status")
+async def slo_status(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("user.read")),
+):
+    """Return current SLO state for the caller's company.
+
+    See `docs/SLOs.md` for the four SLOs + computation queries.
+    Frontend `/admin/slo-status` polls this every 60s.
+    """
+    from datetime import datetime, timezone
+    from services.observability.slo import evaluate_all
+    return {
+        "slos": evaluate_all(session, current_user.company_id),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
 # ── Automation Worker health ──────────────────────────────────────────────────
 
 @router.get("/worker/health")

@@ -25,6 +25,16 @@ class BaseLLM(ABC):
     def add_user_message(self, content: str):
         self.messages.append({"role": "user", "content": content})
 
+    def add_system_message(self, content: str):
+        """Append a one-shot system note to the history (in addition to the
+        initial system prompt).  Used by the voice pipeline to inject
+        mid-turn interruption context so the next turn acknowledges
+        being cut off instead of starting cold.
+        """
+        if not content:
+            return
+        self.messages.append({"role": "system", "content": content})
+
     def add_assistant_message(self, content: str, tool_calls: Optional[List] = None, reasoning_details: Optional[str] = None):
         if not content and not tool_calls:
             logger.warning("⚠️ [BaseLLM] Attempted to add an empty assistant message (no content and no tools). Skipping.")

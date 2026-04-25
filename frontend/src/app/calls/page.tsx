@@ -6,6 +6,7 @@ import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare, Mail,
 import clsx from "clsx";
 import Pagination from "@/components/Pagination";
 
+import { apiFetch } from "@/utils/apiFetch";
 interface Interaction {
     id: number;
     type: string;
@@ -33,7 +34,7 @@ interface DialerResult {
 
 export default function CallsPage() {
     const [calls, setCalls] = useState<Interaction[]>([]);
-    const { token, sessionTimeout } = useAuth();
+    const { user, sessionTimeout } = useAuth();
     const [loading, setLoading] = useState(true);
     const [expandedCall, setExpandedCall] = useState<number | null>(null);
     const [error, setError] = useState<string | null>(null);
@@ -56,8 +57,7 @@ export default function CallsPage() {
     const fetchCalls = useCallback(async (page: number = 1) => {
         setLoading(true);
         try {
-            const res = await fetch(`${CRM_BASE}/interactions?page=${page}&limit=${itemsPerPage}`, {
-                headers: { "Authorization": `Bearer ${token}` }
+            const res = await apiFetch(`${CRM_BASE}/interactions?page=${page}&limit=${itemsPerPage}`, {
             });
             if (res.status === 401) {
                 sessionTimeout();
@@ -76,21 +76,20 @@ export default function CallsPage() {
         } finally {
             setLoading(false);
         }
-    }, [token, itemsPerPage, sessionTimeout]);
+    }, [user, itemsPerPage, sessionTimeout]);
 
     useEffect(() => {
         fetchCalls(currentPage);
     }, [fetchCalls, currentPage]);
 
     async function handleRunBatch() {
-        if (!token) return;
+        if (!user) return;
         setDialerRunning(true);
         setDialerResult(null);
         setDialerError(null);
         try {
-            const res = await fetch(`${API_BASE}/call-tasks/run-batch?limit=${dialLimit}`, {
-                method: "POST",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch(`${API_BASE}/call-tasks/run-batch?limit=${dialLimit}`, {
+                method: "POST"
             });
             if (res.status === 401) { sessionTimeout(); return; }
             if (!res.ok) throw new Error((await res.json()).detail || `Server ${res.status}`);
@@ -129,8 +128,7 @@ export default function CallsPage() {
         call_summary: "Call Summary",
         whatsapp: "WhatsApp Message",
         email: "Email",
-        sms: "SMS",
-    };
+        sms: "SMS" };
 
     const getInteractionTitle = (call: Interaction) => {
         if (call.type === "call") {

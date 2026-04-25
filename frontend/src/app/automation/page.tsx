@@ -10,10 +10,10 @@ import {
   Pause,
   Play,
   RefreshCw,
-  XCircle,
-} from "lucide-react";
+  XCircle } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 // Types
@@ -83,10 +83,7 @@ function formatIsmResults(results?: unknown): string {
 // Sub-components
 
 function StatCard({
-  label,
-  value,
-  accent,
-}: {
+  label, value, accent }: {
   label: string;
   value: React.ReactNode;
   accent?: "red" | "amber" | "emerald";
@@ -94,8 +91,7 @@ function StatCard({
   const colors: Record<string, string> = {
     red: "text-red-500",
     amber: "text-amber-500",
-    emerald: "text-emerald-500",
-  };
+    emerald: "text-emerald-500" };
   return (
     <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 flex flex-col gap-1">
       <span className="text-xs font-medium uppercase tracking-wider text-slate-500 dark:text-slate-400">
@@ -181,7 +177,7 @@ function IsmExpandedRows({ results }: { results: unknown[] }) {
 // Main Page
 
 export default function AutomationPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [status, setStatus] = useState<AutomationStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -203,10 +199,9 @@ export default function AutomationPage() {
   // Fetch status
 
   const fetchStatus = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/automation/status`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/automation/status`, {
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error(`Server returned ${res.status}`);
@@ -218,7 +213,7 @@ export default function AutomationPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
     fetchStatus();
@@ -242,14 +237,13 @@ export default function AutomationPage() {
   // Run cycle
 
   async function handleRunCycle() {
-    if (!token) return;
+    if (!user) return;
     setRunning(true);
     setRunError(null);
     setRunSuccess(false);
     try {
-      const res = await fetch(`${API_BASE}/automation/run-cycle?dial_limit=${dialLimit}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/automation/run-cycle?dial_limit=${dialLimit}`, {
+        method: "POST"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
@@ -269,14 +263,13 @@ export default function AutomationPage() {
   // Pause / Resume
 
   async function handlePauseResume() {
-    if (!token || !status) return;
+    if (!user || !status) return;
     setActionLoading(true);
     setActionError(null);
     const endpoint = status.paused ? "resume" : "pause";
     try {
-      const res = await fetch(`${API_BASE}/automation/${endpoint}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/automation/${endpoint}`, {
+        method: "POST"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error(`Server ${res.status}`);

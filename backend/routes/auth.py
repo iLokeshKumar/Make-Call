@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, File, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
@@ -20,13 +20,18 @@ import requests
 from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     PermissionChecker,
+    clear_auth_cookie,
+    clear_csrf_cookie,
     create_access_token,
+    generate_csrf_token,
     generate_mfa_qr_base64,
     generate_mfa_secret,
     get_current_active_user,
     get_current_user,
     get_mfa_provisioning_uri,
     get_password_hash,
+    set_auth_cookie,
+    set_csrf_cookie,
     verify_mfa_token,
     verify_password,
 )
@@ -418,6 +423,7 @@ async def _update_login_location(login_id: int, ip: str | None) -> None:
 @router.post("/companies/register", response_model=Token)
 async def register_company(
     data: CompanyRegister,
+    response: Response,
     session: Session = Depends(get_session),
 ):
     slug = data.company_slug.strip().lower()
@@ -486,6 +492,8 @@ async def register_company(
         },
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    set_auth_cookie(response, token)
+    set_csrf_cookie(response, generate_csrf_token())
     return Token(access_token=token)
 
 
@@ -609,6 +617,7 @@ async def resend_verification_alias(
 @router.post("/token", response_model=Token)
 async def login(
     request: Request,
+    response: Response,
     form_data: OAuth2PasswordRequestForm = Depends(),
     session: Session = Depends(get_session),
 ):
@@ -749,7 +758,24 @@ async def login(
         },
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
+    # Dual-mode: also set httpOnly cookie. Existing clients keep using the
+    # response-body token; new fetches that send credentials will get cookie auth.
+    set_auth_cookie(response, token)
+    set_csrf_cookie(response, generate_csrf_token())
     return Token(access_token=token)
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    """Clear the session + CSRF cookies. Frontends should additionally drop any
+    local token.
+
+    For full multi-device sign-out (rotates the token version, invalidates all
+    outstanding JWTs), use POST /logout-all.
+    """
+    clear_auth_cookie(response)
+    clear_csrf_cookie(response)
+    return {"ok": True}
 
 
 @router.post("/auth/mfa/setup")

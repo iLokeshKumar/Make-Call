@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { FileText, Plus, Trash2, Eye, Save, X, Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type Template = {
@@ -29,8 +30,7 @@ const CHANNEL_BADGE: Record<string, string> = {
   call: "bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300",
   email: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
   whatsapp: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
-  sms: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
-};
+  sms: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300" };
 
 const VARIABLES = ["{lead_name}", "{lead_phone}", "{company_name}", "{product_name}"];
 
@@ -66,7 +66,7 @@ function Toast({ message, onClose }: { message: string; onClose: () => void }) {
 }
 
 export default function TemplatesPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
@@ -83,17 +83,17 @@ export default function TemplatesPage() {
 
   const [toast, setToast] = useState<string | null>(null);
 
-  const authHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const authHeaders = {"Content-Type": "application/json" };
 
   const fetchTemplates = useCallback(async () => {
-    if (!token) { setLoading(false); return; }
+    if (!user) { setLoading(false); return; }
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/templates`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/templates`, { });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) setTemplates(await res.json());
     } finally { setLoading(false); }
-  }, [token]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [user]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => { fetchTemplates(); }, [fetchTemplates]);
 
@@ -106,8 +106,7 @@ export default function TemplatesPage() {
       name: tmpl.name,
       channel: tmpl.channel,
       subject: tmpl.subject ?? "",
-      body: tmpl.body,
-    });
+      body: tmpl.body });
     setPreview(null);
     setPreviewError(null);
     setPreviewLeadId("");
@@ -137,11 +136,10 @@ export default function TemplatesPage() {
         name: form.name.trim(),
         channel: form.channel,
         subject: form.channel === "email" ? (form.subject.trim() || undefined) : undefined,
-        body: form.body.trim(),
-      };
+        body: form.body.trim() };
       const res = isNew
-        ? await fetch(`${API_BASE}/templates`, { method: "POST", headers: authHeaders, body: JSON.stringify(body) })
-        : await fetch(`${API_BASE}/templates/${selectedId}`, { method: "PUT", headers: authHeaders, body: JSON.stringify(body) });
+        ? await apiFetch(`${API_BASE}/templates`, { method: "POST", headers: authHeaders, body: JSON.stringify(body) })
+        : await apiFetch(`${API_BASE}/templates/${selectedId}`, { method: "PUT", headers: authHeaders, body: JSON.stringify(body) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) {
         const saved: Template = await res.json();
@@ -157,9 +155,8 @@ export default function TemplatesPage() {
     e.stopPropagation();
     setDeleting(id);
     try {
-      const res = await fetch(`${API_BASE}/templates/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/templates/${id}`, {
+        method: "DELETE"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) {
@@ -179,11 +176,9 @@ export default function TemplatesPage() {
     setPreview(null);
     setPreviewError(null);
     try {
-      const res = await fetch(`${API_BASE}/templates/${id}/render`, {
+      const res = await apiFetch(`${API_BASE}/templates/${id}/render`, {
         method: "POST",
-        headers: authHeaders,
-        body: JSON.stringify({ lead_id: leadId }),
-      });
+        body: JSON.stringify({ lead_id: leadId }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) {
         setPreview(await res.json());

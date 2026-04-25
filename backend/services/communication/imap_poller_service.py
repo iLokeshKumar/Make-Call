@@ -257,10 +257,16 @@ def poll_company_inbox(company_id: int) -> int:
 
         mail.logout()
 
+    except imaplib.IMAP4.abort as exc:
+        logger.warning("[IMAP] company=%s socket aborted (will reconnect next cycle): %s", company_id, exc)
     except imaplib.IMAP4.error as exc:
-        logger.error("[IMAP] company=%s IMAP error: %s", company_id, exc)
+        msg = str(exc) or ""
+        if "socket error: EOF" in msg or "EOF" in msg:
+            logger.warning("[IMAP] company=%s socket EOF (transient, retry next cycle)", company_id)
+        else:
+            logger.error("[IMAP] company=%s IMAP error: %s", company_id, exc)
     except OSError as exc:
-        logger.error("[IMAP] company=%s connection error: %s", company_id, exc)
+        logger.warning("[IMAP] company=%s connection error (transient): %s", company_id, exc)
     except Exception as exc:
         logger.exception("[IMAP] company=%s unexpected error: %s", company_id, exc)
 
@@ -437,11 +443,18 @@ def poll_user_inbox(user_id: int, company_id: int) -> int:
 
         mail.logout()
 
+    except imaplib.IMAP4.abort as exc:
+        # Transient — Gmail/other IMAP servers drop idle sockets periodically.
+        # Next poll cycle will reconnect cleanly.
+        logger.warning("[IMAP] user=%s socket aborted (will reconnect next cycle): %s", user_id, exc)
     except imaplib.IMAP4.error as exc:
         msg = str(exc) or "(no detail — check IMAP is enabled in Gmail settings)"
-        logger.error("[IMAP] user=%s IMAP protocol error: %s", user_id, msg)
+        if "socket error: EOF" in msg or "EOF" in msg:
+            logger.warning("[IMAP] user=%s socket EOF (transient, retry next cycle)", user_id)
+        else:
+            logger.error("[IMAP] user=%s IMAP protocol error: %s", user_id, msg)
     except OSError as exc:
-        logger.error("[IMAP] user=%s connection error: %s", user_id, exc)
+        logger.warning("[IMAP] user=%s connection error (transient): %s", user_id, exc)
     except Exception as exc:
         logger.exception("[IMAP] user=%s unexpected error: %s", user_id, exc)
 

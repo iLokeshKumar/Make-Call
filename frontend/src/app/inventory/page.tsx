@@ -6,6 +6,7 @@ import { useAuth } from "@/context/AuthContext";
 import { useRouter } from "next/navigation";
 import Pagination from "@/components/Pagination";
 
+import { apiFetch } from "@/utils/apiFetch";
 interface Product {
     id?: number;
     name: string;
@@ -41,8 +42,7 @@ const EMPTY_FORM: Product = {
     name: "", sku: "", stock: 0, price: "", currency: "INR", note: "",
     brand: "", category: "", subcategory: "", product_line: "", model_number: "",
     description: "", mrp: "", cost_price: "", min_price: "",
-    hsn_code: "", tax_rate: "", unit: "", reorder_level: "", warranty_months: "", image_url: "",
-};
+    hsn_code: "", tax_rate: "", unit: "", reorder_level: "", warranty_months: "", image_url: "" };
 
 const inputCls = "w-full rounded-xl border border-slate-200 dark:border-white/10 bg-white/80 dark:bg-slate-800/60 backdrop-blur-sm px-3 py-2.5 text-sm text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-violet-400 shadow-sm";
 const labelCls = "text-xs font-bold text-slate-600 dark:text-slate-400 uppercase tracking-wide";
@@ -65,7 +65,7 @@ function FieldGroup({ title, children }: { title: string; children: React.ReactN
 }
 
 export default function InventoryPage() {
-    const { user, token, isLoading, sessionTimeout } = useAuth();
+    const { user, isLoading, sessionTimeout } = useAuth();
     const router = useRouter();
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
@@ -84,8 +84,7 @@ export default function InventoryPage() {
     const fetchInventory = useCallback(async (page: number = 1) => {
         setLoading(true);
         try {
-            const res = await fetch(`${CRM_BASE}/inventory?page=${page}&limit=${itemsPerPage}`, {
-                headers: { "Authorization": `Bearer ${token}` }
+            const res = await apiFetch(`${CRM_BASE}/inventory?page=${page}&limit=${itemsPerPage}`, {
             });
             if (res.status === 401) { sessionTimeout(); return; }
             const data = await res.json();
@@ -97,7 +96,7 @@ export default function InventoryPage() {
         } finally {
             setLoading(false);
         }
-    }, [token, itemsPerPage, sessionTimeout, CRM_BASE]);
+    }, [user, itemsPerPage, sessionTimeout, CRM_BASE]);
 
     const hasAdminAccess = user?.role === "company_admin" || user?.role === "company_owner";
 
@@ -126,9 +125,8 @@ export default function InventoryPage() {
     const handleDelete = async (id: number) => {
         if (!confirm("Delete this product?")) return;
         try {
-            const res = await fetch(`${CRM_BASE}/inventory/${id}`, {
-                method: "DELETE",
-                headers: { "Authorization": `Bearer ${token}` }
+            const res = await apiFetch(`${CRM_BASE}/inventory/${id}`, {
+                method: "DELETE"
             });
             if (res.status === 401) { sessionTimeout(); return; }
             fetchInventory();
@@ -147,11 +145,10 @@ export default function InventoryPage() {
             for (const [k, v] of Object.entries(formData)) {
                 payload[k] = v === "" ? null : v;
             }
-            const res = await fetch(url, {
+            const res = await apiFetch(url, {
                 method,
-                headers: { "Content-Type": "application/json", "Authorization": `Bearer ${token}` },
-                body: JSON.stringify(payload),
-            });
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(payload) });
             if (res.status === 401) { sessionTimeout(); return; }
             if (res.ok) {
                 setIsModalOpen(false);

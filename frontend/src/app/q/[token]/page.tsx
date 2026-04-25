@@ -1,15 +1,31 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useParams } from "next/navigation";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
-  CheckCircle2, XCircle, MessageSquare, ChevronDown, ChevronUp,
-  Loader2, Clock, Package, BadgePercent, FileText, AlertCircle,
+  AlertCircle,
+  BadgePercent,
+  CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  FileText,
+  Loader2,
+  MessageSquare,
+  Package,
+  XCircle,
 } from "lucide-react";
+import { toast } from "sonner";
+
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Textarea } from "@/components/ui/textarea";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
-
-// Types
 
 type QuoteInfo = {
   id: number;
@@ -38,7 +54,7 @@ type QuoteItem = {
 
 type TimelineEntry = { label: string; timestamp: string };
 
-// Helpers
+type QuotePayload = { quote: QuoteInfo; items: QuoteItem[]; timeline: TimelineEntry[] };
 
 const fmt = (v: string, currency: string) =>
   new Intl.NumberFormat("en-IN", { style: "currency", currency, maximumFractionDigits: 2 }).format(Number(v));
@@ -46,81 +62,74 @@ const fmt = (v: string, currency: string) =>
 const fmtDate = (v: string | null) =>
   v ? new Date(v).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" }) : "—";
 
-const STATUS_META: Record<string, { label: string; color: string; bg: string }> = {
-  draft:       { label: "Draft",       color: "text-slate-500",   bg: "bg-slate-100" },
-  pending:     { label: "Pending",     color: "text-amber-700",   bg: "bg-amber-50" },
-  sent:        { label: "Sent",        color: "text-blue-700",    bg: "bg-blue-50" },
-  accepted:    { label: "Accepted",    color: "text-emerald-700", bg: "bg-emerald-50" },
-  rejected:    { label: "Declined",    color: "text-red-700",     bg: "bg-red-50" },
-  negotiation: { label: "In Review",   color: "text-violet-700",  bg: "bg-violet-50" },
-  expired:     { label: "Expired",     color: "text-slate-500",   bg: "bg-slate-100" },
+const STATUS_META: Record<string, { label: string; tone: "default" | "secondary" | "destructive" | "outline" }> = {
+  draft:       { label: "Draft",       tone: "secondary" },
+  pending:     { label: "Pending",     tone: "outline" },
+  sent:        { label: "Sent",        tone: "default" },
+  accepted:    { label: "Accepted",    tone: "default" },
+  rejected:    { label: "Declined",    tone: "destructive" },
+  negotiation: { label: "In Review",   tone: "secondary" },
+  expired:     { label: "Expired",     tone: "outline" },
 };
-
-// Main Page
 
 export default function PublicQuotePage() {
   const params = useParams();
   const token = params?.token as string;
+  const qc = useQueryClient();
 
-  const [quote, setQuote]       = useState<QuoteInfo | null>(null);
-  const [items, setItems]       = useState<QuoteItem[]>([]);
-  const [timeline, setTimeline] = useState<TimelineEntry[]>([]);
-  const [loading, setLoading]   = useState(true);
-  const [error, setError]       = useState<string | null>(null);
+  const [acting, setActing] = useState<"accept" | "reject" | "negotiate" | null>(null);
+  const [done, setDone] = useState<"accepted" | "rejected" | "negotiation" | null>(null);
 
-  // Action state
-  const [acting, setActing]                 = useState<"accept" | "reject" | "negotiate" | null>(null);
-  const [done, setDone]                     = useState<string | null>(null);
+  const [showNegotiate, setShowNegotiate] = useState(false);
+  const [negMessage, setNegMessage] = useState("");
+  const [negDiscount, setNegDiscount] = useState("");
+  const [showTimeline, setShowTimeline] = useState(false);
 
-  // Negotiate panel
-  const [showNegotiate, setShowNegotiate]   = useState(false);
-  const [negMessage, setNegMessage]         = useState("");
-  const [negDiscount, setNegDiscount]       = useState("");
-  const [negError, setNegError]             = useState("");
+  const query = useQuery<QuotePayload>({
+    queryKey: ["public-quote", token],
+    enabled: !!token,
+    retry: false,
+    queryFn: async () => {
+      const r = await fetch(`${API_BASE}/tracking/quote/info/${token}`);
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || "Could not load quote");
+      }
+      return r.json();
+    },
+  });
 
-  // Timeline toggle
-  const [showTimeline, setShowTimeline]     = useState(false);
-
-  useEffect(() => {
-    if (!token) return;
-    fetch(`${API_BASE}/tracking/quote/info/${token}`)
-      .then(r => r.ok ? r.json() : r.json().then(e => Promise.reject(e.detail || "Not found")))
-      .then(data => {
-        setQuote(data.quote);
-        setItems(data.items ?? []);
-        setTimeline(data.timeline ?? []);
-      })
-      .catch(e => setError(typeof e === "string" ? e : "Could not load quote"))
-      .finally(() => setLoading(false));
-  }, [token]);
-
-  async function handleAccept() {
-    setActing("accept");
-    try {
+  const acceptMut = useMutation({
+    mutationFn: async () => {
       const r = await fetch(`${API_BASE}/tracking/quote/accept/${token}`, { method: "POST" });
-      if (!r.ok) throw new Error((await r.json()).detail || "Failed");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Failed");
+      return r.json();
+    },
+    onSuccess: () => {
+      toast.success("Quote accepted");
       setDone("accepted");
-      setQuote(q => q ? { ...q, status: "accepted" } : q);
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed"); }
-    finally { setActing(null); }
-  }
+      qc.invalidateQueries({ queryKey: ["public-quote", token] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+  });
 
-  async function handleReject() {
-    setActing("reject");
-    try {
+  const rejectMut = useMutation({
+    mutationFn: async () => {
       const r = await fetch(`${API_BASE}/tracking/quote/reject/${token}`, { method: "POST" });
-      if (!r.ok) throw new Error((await r.json()).detail || "Failed");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Failed");
+      return r.json();
+    },
+    onSuccess: () => {
+      toast.success("Quote declined");
       setDone("rejected");
-      setQuote(q => q ? { ...q, status: "rejected" } : q);
-    } catch (e) { setError(e instanceof Error ? e.message : "Failed"); }
-    finally { setActing(null); }
-  }
+      qc.invalidateQueries({ queryKey: ["public-quote", token] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+  });
 
-  async function handleNegotiate() {
-    setNegError("");
-    if (!negMessage.trim()) { setNegError("Please describe what you'd like changed."); return; }
-    setActing("negotiate");
-    try {
+  const negotiateMut = useMutation({
+    mutationFn: async () => {
+      if (!negMessage.trim()) throw new Error("Please describe what you'd like changed.");
       const r = await fetch(`${API_BASE}/tracking/quote/negotiate/${token}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -129,115 +138,117 @@ export default function PublicQuotePage() {
           requested_discount: negDiscount ? Number(negDiscount) : null,
         }),
       });
-      if (!r.ok) throw new Error((await r.json()).detail || "Failed");
+      if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || "Failed");
+      return r.json();
+    },
+    onSuccess: () => {
+      toast.success("Request sent");
       setDone("negotiation");
-      setQuote(q => q ? { ...q, status: "negotiation" } : q);
-    } catch (e) { setNegError(e instanceof Error ? e.message : "Failed"); }
-    finally { setActing(null); }
+      qc.invalidateQueries({ queryKey: ["public-quote", token] });
+    },
+    onError: (e) => toast.error(e instanceof Error ? e.message : "Failed"),
+  });
+
+  const quote = query.data?.quote;
+  const items = query.data?.items ?? [];
+  const timeline = query.data?.timeline ?? [];
+  const statusMeta = quote ? (STATUS_META[quote.status] ?? STATUS_META.pending) : null;
+  const isClosed = !!done || (quote && ["accepted", "rejected", "negotiation"].includes(quote.status));
+
+  if (query.isLoading) {
+    return (
+      <div className="flex min-h-screen w-full items-center justify-center bg-slate-50 dark:bg-slate-950">
+        <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
+      </div>
+    );
   }
 
-  const isClosed = done || (quote && ["accepted", "rejected", "negotiation"].includes(quote.status));
-  const statusMeta = quote ? (STATUS_META[quote.status] ?? STATUS_META.pending) : null;
-
-  // Loading / error
-
-  if (loading) return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <Loader2 className="h-8 w-8 animate-spin text-violet-500" />
-    </div>
-  );
-
-  if (error && !quote) return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <div className="text-center space-y-3">
-        <AlertCircle className="h-10 w-10 text-red-400 mx-auto" />
-        <p className="text-slate-700 font-medium">{error}</p>
-        <p className="text-slate-400 text-sm">This quote link may have expired or is invalid.</p>
+  if (query.error && !quote) {
+    return (
+      <div className="flex min-h-screen w-full items-center justify-center bg-slate-50 p-4 dark:bg-slate-950">
+        <Card className="w-full max-w-sm text-center">
+          <CardContent className="space-y-3 pt-8">
+            <AlertCircle className="mx-auto h-10 w-10 text-red-400" />
+            <p className="font-medium text-slate-700 dark:text-slate-200">
+              {query.error instanceof Error ? query.error.message : "Could not load quote"}
+            </p>
+            <p className="text-sm text-slate-500 dark:text-slate-400">This quote link may have expired or is invalid.</p>
+          </CardContent>
+        </Card>
       </div>
-    </div>
-  );
+    );
+  }
 
   if (!quote) return null;
 
-  // Done screen
-
-  if (done === "accepted") return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-emerald-50 to-teal-50">
-      <div className="text-center space-y-4 p-8 max-w-sm">
-        <CheckCircle2 className="h-16 w-16 text-emerald-500 mx-auto" />
-        <h2 className="text-2xl font-bold text-slate-800">Quote Accepted!</h2>
-        <p className="text-slate-600">Thank you, {quote.lead_name}. We've received your acceptance of <strong>{quote.quote_number}</strong>. Our team will be in touch shortly.</p>
-      </div>
-    </div>
-  );
-
-  if (done === "rejected") return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-red-50 to-rose-50">
-      <div className="text-center space-y-4 p-8 max-w-sm">
-        <XCircle className="h-16 w-16 text-red-400 mx-auto" />
-        <h2 className="text-2xl font-bold text-slate-800">Quote Declined</h2>
-        <p className="text-slate-600">We understand. If you'd like to revisit this or discuss alternatives, please reach out to us directly.</p>
-      </div>
-    </div>
-  );
-
-  if (done === "negotiation") return (
-    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-violet-50 to-indigo-50">
-      <div className="text-center space-y-4 p-8 max-w-sm">
-        <MessageSquare className="h-16 w-16 text-violet-500 mx-auto" />
-        <h2 className="text-2xl font-bold text-slate-800">Request Sent!</h2>
-        <p className="text-slate-600">Your message has been sent to our team. We'll review your request and get back to you soon.</p>
-      </div>
-    </div>
-  );
-
-  // Main quote view
+  if (done === "accepted") {
+    return (
+      <DoneScreen
+        icon={<CheckCircle2 className="h-16 w-16 text-emerald-500" />}
+        title="Quote Accepted!"
+        message={`Thank you, ${quote.lead_name ?? "there"}. We've received your acceptance of ${quote.quote_number}. Our team will be in touch shortly.`}
+      />
+    );
+  }
+  if (done === "rejected") {
+    return (
+      <DoneScreen
+        icon={<XCircle className="h-16 w-16 text-red-400" />}
+        title="Quote Declined"
+        message="We understand. If you'd like to revisit this or discuss alternatives, please reach out to us directly."
+      />
+    );
+  }
+  if (done === "negotiation") {
+    return (
+      <DoneScreen
+        icon={<MessageSquare className="h-16 w-16 text-violet-500" />}
+        title="Request Sent!"
+        message="Your message has been sent to our team. We'll review your request and get back to you soon."
+      />
+    );
+  }
 
   return (
-    <div className="min-h-screen bg-slate-50 py-10 px-4">
-      <div className="max-w-2xl mx-auto space-y-5">
-
-        {/* Header card */}
-        <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-          <div className="bg-gradient-to-r from-slate-800 to-slate-700 px-6 py-5 text-white">
-            <p className="text-xs font-semibold uppercase tracking-widest text-slate-400 mb-1">Quotation</p>
+    <div className="min-h-screen w-full bg-slate-50 px-4 py-10 dark:bg-slate-950">
+      <div className="mx-auto max-w-2xl space-y-5">
+        <Card className="overflow-hidden border-slate-200 dark:border-white/10">
+          <div className="bg-gradient-to-r from-slate-800 to-slate-700 px-6 py-5 text-white dark:from-slate-900 dark:to-slate-800">
+            <p className="mb-1 text-xs font-semibold uppercase tracking-widest text-slate-400">Quotation</p>
             <h1 className="text-2xl font-bold">{quote.quote_number}</h1>
-            {quote.lead_name && <p className="text-slate-300 text-sm mt-0.5">Prepared for {quote.lead_name}</p>}
+            {quote.lead_name && <p className="mt-0.5 text-sm text-slate-300">Prepared for {quote.lead_name}</p>}
           </div>
-          <div className="px-6 py-4 flex flex-wrap gap-6 text-sm">
+          <CardContent className="flex flex-wrap gap-6 pt-4 text-sm">
             <div>
-              <p className="text-[10px] text-slate-400 uppercase tracking-widest mb-0.5">Status</p>
-              <span className={`inline-block px-2.5 py-0.5 rounded-full text-xs font-semibold ${statusMeta?.bg} ${statusMeta?.color}`}>
-                {statusMeta?.label}
-              </span>
+              <p className="mb-0.5 text-[10px] uppercase tracking-widest text-slate-500 dark:text-slate-400">Status</p>
+              <Badge variant={statusMeta?.tone ?? "secondary"}>{statusMeta?.label}</Badge>
             </div>
             <div>
-              <p className="text-[10px] text-slate-400 uppercase tracking-widest mb-0.5">Total</p>
-              <p className="text-lg font-bold text-slate-800">{fmt(quote.total_amount, quote.currency)}</p>
+              <p className="mb-0.5 text-[10px] uppercase tracking-widest text-slate-500 dark:text-slate-400">Total</p>
+              <p className="text-lg font-bold text-slate-900 dark:text-white">{fmt(quote.total_amount, quote.currency)}</p>
             </div>
             {quote.valid_until && (
               <div>
-                <p className="text-[10px] text-slate-400 uppercase tracking-widest mb-0.5">Valid Until</p>
-                <p className="flex items-center gap-1 text-slate-700 font-medium">
+                <p className="mb-0.5 text-[10px] uppercase tracking-widest text-slate-500 dark:text-slate-400">Valid Until</p>
+                <p className="flex items-center gap-1 font-medium text-slate-700 dark:text-slate-200">
                   <Clock className="h-3.5 w-3.5 text-amber-500" />
                   {fmtDate(quote.valid_until)}
                 </p>
               </div>
             )}
-          </div>
-        </div>
+          </CardContent>
+        </Card>
 
-        {/* Line items */}
         {items.length > 0 && (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
-            <div className="px-6 py-4 border-b border-slate-100 flex items-center gap-2">
+          <Card className="overflow-hidden border-slate-200 dark:border-white/10">
+            <div className="flex items-center gap-2 border-b border-slate-200 px-6 py-4 dark:border-white/10">
               <Package className="h-4 w-4 text-violet-500" />
-              <p className="text-sm font-semibold text-slate-700">Items</p>
+              <p className="text-sm font-semibold text-slate-700 dark:text-slate-200">Items</p>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-400">
+                  <tr className="bg-slate-50 text-[10px] uppercase tracking-widest text-slate-500 dark:bg-white/5 dark:text-slate-400">
                     <th className="px-5 py-2.5 text-left">Product</th>
                     <th className="px-4 py-2.5 text-right">Qty</th>
                     <th className="px-4 py-2.5 text-right">Unit Price</th>
@@ -245,190 +256,226 @@ export default function PublicQuotePage() {
                     <th className="px-5 py-2.5 text-right">Total</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
-                  {items.map(it => (
-                    <tr key={it.id} className="hover:bg-slate-50 transition-colors">
+                <tbody className="divide-y divide-slate-100 dark:divide-white/10">
+                  {items.map((it) => (
+                    <tr key={it.id} className="hover:bg-slate-50 dark:hover:bg-white/5">
                       <td className="px-5 py-3">
-                        <p className="font-medium text-slate-800">{it.product_name}</p>
-                        {it.sku && <p className="text-[10px] text-slate-400 mt-0.5">SKU: {it.sku}</p>}
-                        {it.notes && <p className="text-xs text-slate-500 mt-0.5 italic">{it.notes}</p>}
+                        <p className="font-medium text-slate-800 dark:text-slate-100">{it.product_name}</p>
+                        {it.sku && <p className="mt-0.5 text-[10px] text-slate-500 dark:text-slate-400">SKU: {it.sku}</p>}
+                        {it.notes && <p className="mt-0.5 text-xs italic text-slate-500 dark:text-slate-400">{it.notes}</p>}
                       </td>
-                      <td className="px-4 py-3 text-right text-slate-600">{it.quantity}</td>
-                      <td className="px-4 py-3 text-right text-slate-600">{fmt(it.unit_price, quote.currency)}</td>
+                      <td className="px-4 py-3 text-right text-slate-600 dark:text-slate-300">{it.quantity}</td>
+                      <td className="px-4 py-3 text-right text-slate-600 dark:text-slate-300">{fmt(it.unit_price, quote.currency)}</td>
                       <td className="px-4 py-3 text-right">
                         {Number(it.discount_percent) > 0 ? (
-                          <span className="inline-flex items-center gap-1 text-emerald-600 font-medium">
-                            <BadgePercent className="h-3 w-3" />{it.discount_percent}%
+                          <span className="inline-flex items-center gap-1 font-medium text-emerald-600 dark:text-emerald-400">
+                            <BadgePercent className="h-3 w-3" />
+                            {it.discount_percent}%
                           </span>
-                        ) : <span className="text-slate-400">—</span>}
+                        ) : (
+                          <span className="text-slate-400">—</span>
+                        )}
                       </td>
-                      <td className="px-5 py-3 text-right font-semibold text-slate-800">{fmt(it.line_total, quote.currency)}</td>
+                      <td className="px-5 py-3 text-right font-semibold text-slate-900 dark:text-slate-100">
+                        {fmt(it.line_total, quote.currency)}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
                 <tfoot>
-                  <tr className="bg-slate-50 border-t border-slate-200">
-                    <td colSpan={4} className="px-5 py-3 text-sm font-semibold text-slate-600 text-right">Total</td>
-                    <td className="px-5 py-3 text-right text-base font-bold text-slate-900">{fmt(quote.total_amount, quote.currency)}</td>
+                  <tr className="border-t border-slate-200 bg-slate-50 dark:border-white/10 dark:bg-white/5">
+                    <td colSpan={4} className="px-5 py-3 text-right text-sm font-semibold text-slate-600 dark:text-slate-300">
+                      Total
+                    </td>
+                    <td className="px-5 py-3 text-right text-base font-bold text-slate-900 dark:text-white">
+                      {fmt(quote.total_amount, quote.currency)}
+                    </td>
                   </tr>
                 </tfoot>
               </table>
             </div>
-          </div>
+          </Card>
         )}
 
-        {/* Notes */}
         {quote.notes && (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 px-6 py-4">
-            <div className="flex items-center gap-2 mb-2">
-              <FileText className="h-4 w-4 text-slate-400" />
-              <p className="text-sm font-semibold text-slate-600">Notes</p>
-            </div>
-            <p className="text-sm text-slate-600 whitespace-pre-wrap">{quote.notes}</p>
-          </div>
+          <Card className="border-slate-200 dark:border-white/10">
+            <CardContent className="pt-4">
+              <div className="mb-2 flex items-center gap-2">
+                <FileText className="h-4 w-4 text-slate-500 dark:text-slate-400" />
+                <p className="text-sm font-semibold text-slate-600 dark:text-slate-300">Notes</p>
+              </div>
+              <p className="whitespace-pre-wrap text-sm text-slate-600 dark:text-slate-300">{quote.notes}</p>
+            </CardContent>
+          </Card>
         )}
 
-        {/* Already actioned */}
-        {quote.status === "accepted" && (
-          <div className="rounded-2xl bg-emerald-50 border border-emerald-200 px-6 py-5 flex items-center gap-3">
-            <CheckCircle2 className="h-6 w-6 text-emerald-500 flex-shrink-0" />
-            <p className="text-emerald-800 font-medium text-sm">You've already accepted this quote. Our team will be in touch.</p>
-          </div>
+        {quote.status === "accepted" && !done && (
+          <StatusBanner
+            tone="emerald"
+            icon={<CheckCircle2 className="h-6 w-6 text-emerald-500" />}
+            text="You've already accepted this quote. Our team will be in touch."
+          />
         )}
-        {quote.status === "rejected" && (
-          <div className="rounded-2xl bg-red-50 border border-red-200 px-6 py-5 flex items-center gap-3">
-            <XCircle className="h-6 w-6 text-red-400 flex-shrink-0" />
-            <p className="text-red-800 font-medium text-sm">This quote was declined. Contact us if you'd like to discuss further.</p>
-          </div>
+        {quote.status === "rejected" && !done && (
+          <StatusBanner
+            tone="red"
+            icon={<XCircle className="h-6 w-6 text-red-400" />}
+            text="This quote was declined. Contact us if you'd like to discuss further."
+          />
         )}
-        {quote.status === "negotiation" && (
-          <div className="rounded-2xl bg-violet-50 border border-violet-200 px-6 py-5 flex items-center gap-3">
-            <MessageSquare className="h-6 w-6 text-violet-500 flex-shrink-0" />
-            <p className="text-violet-800 font-medium text-sm">Your change request is being reviewed. We'll update you soon.</p>
-          </div>
+        {quote.status === "negotiation" && !done && (
+          <StatusBanner
+            tone="violet"
+            icon={<MessageSquare className="h-6 w-6 text-violet-500" />}
+            text="Your change request is being reviewed. We'll update you soon."
+          />
         )}
 
-        {/* Action buttons */}
         {!isClosed && (
           <div className="space-y-3">
             <div className="grid grid-cols-2 gap-3">
-              <button
-                onClick={handleAccept}
+              <Button
+                onClick={() => { setActing("accept"); acceptMut.mutate(undefined, { onSettled: () => setActing(null) }); }}
                 disabled={!!acting}
-                className="flex items-center justify-center gap-2 rounded-2xl bg-emerald-500 hover:bg-emerald-600 active:bg-emerald-700 text-white font-semibold py-4 text-sm transition-colors disabled:opacity-50"
+                className="h-14 rounded-2xl bg-emerald-500 text-sm font-semibold hover:bg-emerald-600"
               >
-                {acting === "accept" ? <Loader2 className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                {acting === "accept" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <CheckCircle2 className="mr-2 h-4 w-4" />}
                 Accept Quote
-              </button>
-              <button
-                onClick={handleReject}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={() => { setActing("reject"); rejectMut.mutate(undefined, { onSettled: () => setActing(null) }); }}
                 disabled={!!acting}
-                className="flex items-center justify-center gap-2 rounded-2xl bg-white hover:bg-red-50 active:bg-red-100 border border-red-200 text-red-600 font-semibold py-4 text-sm transition-colors disabled:opacity-50"
+                className="h-14 rounded-2xl border-red-200 text-sm font-semibold text-red-600 hover:bg-red-50 dark:border-red-500/30 dark:text-red-300 dark:hover:bg-red-500/10"
               >
-                {acting === "reject" ? <Loader2 className="h-4 w-4 animate-spin" /> : <XCircle className="h-4 w-4" />}
+                {acting === "reject" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <XCircle className="mr-2 h-4 w-4" />}
                 Decline
-              </button>
+              </Button>
             </div>
 
-            {/* Request changes toggle */}
-            <button
-              onClick={() => setShowNegotiate(v => !v)}
-              className="w-full flex items-center justify-between gap-2 rounded-2xl bg-white hover:bg-violet-50 border border-violet-200 text-violet-700 font-semibold px-5 py-4 text-sm transition-colors"
+            <Button
+              variant="outline"
+              onClick={() => setShowNegotiate((v) => !v)}
+              className="h-14 w-full justify-between rounded-2xl border-violet-200 text-sm font-semibold text-violet-700 hover:bg-violet-50 dark:border-violet-500/30 dark:text-violet-300 dark:hover:bg-violet-500/10"
             >
               <span className="flex items-center gap-2">
                 <MessageSquare className="h-4 w-4" />
                 Request Changes or Discount
               </span>
               {showNegotiate ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
-            </button>
+            </Button>
 
             {showNegotiate && (
-              <div className="bg-white rounded-2xl border border-violet-200 px-6 py-5 space-y-4">
-                <p className="text-sm text-slate-500">
-                  Tell us what you'd like changed — a discount, removal of an item, a revised quantity, or anything else. Our team will review and send a revised quote.
-                </p>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                    Your message <span className="text-red-400">*</span>
-                  </label>
-                  <textarea
-                    value={negMessage}
-                    onChange={e => setNegMessage(e.target.value)}
-                    placeholder="e.g. Can you offer a 10% discount on the total? Or remove item 2 from the list."
-                    rows={4}
-                    className="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm text-slate-700 placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-400 resize-none"
-                  />
-                </div>
-
-                <div>
-                  <label className="block text-xs font-semibold text-slate-500 uppercase tracking-widest mb-1.5">
-                    Requested discount % <span className="text-slate-400">(optional)</span>
-                  </label>
-                  <div className="relative max-w-[160px]">
-                    <input
-                      type="number"
-                      min="0"
-                      max="100"
-                      step="0.5"
-                      value={negDiscount}
-                      onChange={e => setNegDiscount(e.target.value)}
-                      placeholder="e.g. 15"
-                      className="w-full rounded-xl border border-slate-200 pl-4 pr-8 py-2.5 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-violet-400"
-                    />
-                    <span className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 text-sm">%</span>
-                  </div>
-                </div>
-
-                {negError && (
-                  <p className="text-red-500 text-xs flex items-center gap-1">
-                    <AlertCircle className="h-3.5 w-3.5" />{negError}
+              <Card className="border-violet-200 dark:border-violet-500/30">
+                <CardContent className="space-y-4 pt-5">
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    Tell us what you&apos;d like changed — a discount, removal of an item, a revised quantity, or anything else. Our team will review and send a revised quote.
                   </p>
-                )}
 
-                <button
-                  onClick={handleNegotiate}
-                  disabled={!!acting}
-                  className="flex items-center gap-2 rounded-xl bg-violet-600 hover:bg-violet-700 text-white font-semibold px-5 py-2.5 text-sm transition-colors disabled:opacity-50"
-                >
-                  {acting === "negotiate" ? <Loader2 className="h-4 w-4 animate-spin" /> : <MessageSquare className="h-4 w-4" />}
-                  Send Request
-                </button>
-              </div>
+                  <div className="space-y-1.5">
+                    <Label htmlFor="neg-message" className="text-xs font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                      Your message <span className="text-red-400">*</span>
+                    </Label>
+                    <Textarea
+                      id="neg-message"
+                      value={negMessage}
+                      onChange={(e) => setNegMessage(e.target.value)}
+                      placeholder="e.g. Can you offer a 10% discount on the total? Or remove item 2 from the list."
+                      rows={4}
+                    />
+                  </div>
+
+                  <div className="space-y-1.5">
+                    <Label htmlFor="neg-discount" className="text-xs font-semibold uppercase tracking-widest text-slate-500 dark:text-slate-400">
+                      Requested discount % <span className="font-normal normal-case text-slate-400">(optional)</span>
+                    </Label>
+                    <div className="relative max-w-[160px]">
+                      <Input
+                        id="neg-discount"
+                        type="number"
+                        min="0"
+                        max="100"
+                        step="0.5"
+                        value={negDiscount}
+                        onChange={(e) => setNegDiscount(e.target.value)}
+                        placeholder="e.g. 15"
+                        className="pr-8"
+                      />
+                      <span className="absolute right-3 top-1/2 -translate-y-1/2 text-sm text-slate-400">%</span>
+                    </div>
+                  </div>
+
+                  <Button
+                    onClick={() => { setActing("negotiate"); negotiateMut.mutate(undefined, { onSettled: () => setActing(null) }); }}
+                    disabled={!!acting}
+                    className="bg-violet-600 hover:bg-violet-700"
+                  >
+                    {acting === "negotiate" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <MessageSquare className="mr-2 h-4 w-4" />}
+                    Send Request
+                  </Button>
+                </CardContent>
+              </Card>
             )}
           </div>
         )}
 
-        {/* Timeline */}
         {timeline.length > 0 && (
-          <div className="bg-white rounded-2xl shadow-sm border border-slate-200 overflow-hidden">
+          <Card className="overflow-hidden border-slate-200 dark:border-white/10">
             <button
-              onClick={() => setShowTimeline(v => !v)}
-              className="w-full flex items-center justify-between px-6 py-4 text-sm font-semibold text-slate-600 hover:bg-slate-50 transition-colors"
+              onClick={() => setShowTimeline((v) => !v)}
+              className="flex w-full items-center justify-between px-6 py-4 text-sm font-semibold text-slate-600 hover:bg-slate-50 dark:text-slate-300 dark:hover:bg-white/5"
+              type="button"
             >
               <span>Quote Timeline</span>
               {showTimeline ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
             </button>
             {showTimeline && (
-              <div className="px-6 pb-5 space-y-3 border-t border-slate-100 pt-4">
+              <div className="space-y-3 border-t border-slate-200 px-6 pb-5 pt-4 dark:border-white/10">
                 {timeline.map((t, i) => (
                   <div key={i} className="flex items-start gap-3">
-                    <span className="mt-1.5 h-2 w-2 rounded-full bg-violet-400 flex-shrink-0" />
+                    <span className="mt-1.5 h-2 w-2 flex-shrink-0 rounded-full bg-violet-400" />
                     <div>
-                      <p className="text-sm font-medium text-slate-700">{t.label}</p>
-                      <p className="text-[11px] text-slate-400">{new Date(t.timestamp).toLocaleString("en-IN")}</p>
+                      <p className="text-sm font-medium text-slate-700 dark:text-slate-200">{t.label}</p>
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400">{new Date(t.timestamp).toLocaleString("en-IN")}</p>
                     </div>
                   </div>
                 ))}
               </div>
             )}
-          </div>
+          </Card>
         )}
 
-        <p className="text-center text-[11px] text-slate-400 pb-4">
+        <p className="pb-4 text-center text-[11px] text-slate-500 dark:text-slate-500">
           Powered by Rio CRM · This quote was prepared specifically for {quote.lead_name ?? "you"}
         </p>
       </div>
+    </div>
+  );
+}
+
+function DoneScreen({ icon, title, message }: { icon: React.ReactNode; title: string; message: string }) {
+  return (
+    <div className="flex min-h-screen w-full items-center justify-center bg-slate-50 p-4 dark:bg-slate-950">
+      <div className="w-full max-w-sm space-y-4 p-8 text-center">
+        <div className="mx-auto">{icon}</div>
+        <h2 className="text-2xl font-bold text-slate-800 dark:text-white">{title}</h2>
+        <p className="text-slate-600 dark:text-slate-300">{message}</p>
+      </div>
+    </div>
+  );
+}
+
+function StatusBanner({ tone, icon, text }: { tone: "emerald" | "red" | "violet"; icon: React.ReactNode; text: string }) {
+  const cls =
+    tone === "emerald"
+      ? "bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-500/10 dark:border-emerald-500/30 dark:text-emerald-200"
+      : tone === "red"
+      ? "bg-red-50 border-red-200 text-red-800 dark:bg-red-500/10 dark:border-red-500/30 dark:text-red-200"
+      : "bg-violet-50 border-violet-200 text-violet-800 dark:bg-violet-500/10 dark:border-violet-500/30 dark:text-violet-200";
+  return (
+    <div className={`flex items-center gap-3 rounded-2xl border px-6 py-5 ${cls}`}>
+      {icon}
+      <p className="text-sm font-medium">{text}</p>
     </div>
   );
 }

@@ -11,6 +11,8 @@ import TodaysCallTask from "@/components/dashboard/todays_call_task";
 import AnalyticsSummary from "@/components/dashboard/analytics_summary";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
+import { reportUiLatency } from "@/utils/uiLatency";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type Lead = {
@@ -49,25 +51,29 @@ function humanize(value?: string | null) {
 }
 
 export default function Home() {
-  const { user, token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const [loading, setLoading] = useState(true);
   const [leads, setLeads] = useState<Lead[]>([]);
   const [tasks, setTasks] = useState<CallTask[]>([]);
 
+  // Beacon for SLO #2 (login → dashboard p95).  Fires once per page-load.
+  useEffect(() => {
+    if (!user) return;
+    reportUiLatency("/", "fmp");
+  }, [user]);
+
   useEffect(() => {
     async function fetchDashboardData() {
-      if (!token) {
+      if (!user) {
         setLoading(false);
         return;
       }
 
       try {
         const [leadsRes, tasksRes] = await Promise.all([
-          fetch(`${API_BASE}/crm/leads?page=1&limit=100`, {
-            headers: { Authorization: `Bearer ${token}` },
+          apiFetch(`${API_BASE}/crm/leads?page=1&limit=100`, {
           }),
-          fetch(`${API_BASE}/call-tasks`, {
-            headers: { Authorization: `Bearer ${token}` },
+          apiFetch(`${API_BASE}/call-tasks`, {
           }),
         ]);
 
@@ -93,7 +99,7 @@ export default function Home() {
     }
 
     fetchDashboardData();
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   const leadMap = useMemo(() => new Map(leads.map((lead) => [lead.id, lead])), [leads]);
 
@@ -104,29 +110,25 @@ export default function Home() {
         value: leads.length,
         helper: "Company pipeline right now",
         icon: Users,
-        tone: "blue" as const,
-      },
+        tone: "blue" as const },
       {
         title: "Open Call Tasks",
         value: tasks.filter((task) => ["pending", "queued", "dialing"].includes(task.status)).length,
         helper: "Need action from the team",
         icon: PhoneCall,
-        tone: "emerald" as const,
-      },
+        tone: "emerald" as const },
       {
         title: "Qualified Leads",
         value: leads.filter((lead) => ["qualified", "proposal", "follow_up"].includes((lead.qualification_status || "").toLowerCase())).length,
         helper: "Moved beyond raw prospecting",
         icon: CheckCircle2,
-        tone: "violet" as const,
-      },
+        tone: "violet" as const },
       {
         title: "Next Actions",
         value: leads.filter((lead) => lead.next_action && lead.next_action !== "none").length,
         helper: "AI or rep follow-up suggestions",
         icon: ClipboardList,
-        tone: "orange" as const,
-      },
+        tone: "orange" as const },
     ],
     [leads, tasks]
   );
@@ -143,8 +145,7 @@ export default function Home() {
           leadName: leadMap.get(task.lead_id)?.name || `Lead #${task.lead_id}`,
           status: task.status,
           scheduledAt: task.scheduled_at,
-          note: task.notes,
-        })),
+          note: task.notes })),
     [leadMap, tasks]
   );
 
@@ -154,8 +155,7 @@ export default function Home() {
       title: `${lead.name} added to pipeline`,
       subtitle: lead.notes || `${humanize(lead.status)} · ${humanize(lead.source)}`,
       timestamp: lead.created_at,
-      status: lead.status === "new" ? ("new" as const) : ("success" as const),
-    }));
+      status: lead.status === "new" ? ("new" as const) : ("success" as const) }));
 
     const taskItems = tasks.slice(0, 4).map((task) => ({
       id: `task-${task.id}`,
@@ -167,8 +167,7 @@ export default function Home() {
           ? ("warning" as const)
           : task.status === "completed"
             ? ("success" as const)
-            : ("pending" as const),
-    }));
+            : ("pending" as const) }));
 
     return [...leadItems, ...taskItems]
       .sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""))
@@ -185,8 +184,7 @@ export default function Home() {
         description:
           lead.notes || `Qualification: ${humanize(lead.qualification_status)} · Due ${formatShortDate(lead.next_action_due_at)}`,
         href: `/leads/${lead.id}`,
-        ctaLabel: "Open Lead 360",
-      }));
+        ctaLabel: "Open Lead 360" }));
 
     if (recommended.length > 0) return recommended;
 
@@ -196,15 +194,13 @@ export default function Home() {
         title: "Start with today’s call queue",
         description: "Use the dashboard to work pending outreach in order.",
         href: "/leads",
-        ctaLabel: "Review leads",
-      },
+        ctaLabel: "Review leads" },
       {
         id: 2,
         title: "Open Lead 360 after each call",
         description: "Reps should confirm AI insights and schedule the next action immediately.",
         href: "/leads",
-        ctaLabel: "See pipeline",
-      },
+        ctaLabel: "See pipeline" },
     ];
   }, [leads]);
 
@@ -250,7 +246,7 @@ export default function Home() {
         ))}
       </div>
 
-      <AnalyticsSummary token={token} />
+      <AnalyticsSummary />
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="space-y-6 xl:col-span-2">

@@ -14,6 +14,7 @@ import { useEffect } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import { maskEmail, maskPhone } from "@/utils/security";
 
+import { apiFetch } from "@/utils/apiFetch";
 type LoginHistoryEntry = {
     id: number;
     created_at?: string;
@@ -25,7 +26,7 @@ type LoginHistoryEntry = {
 };
 
 export default function ProfilePage() {
-    const { user, token, refreshUser, googleStatus, refreshGoogleStatus, logoutAll, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    const { user, refreshUser, googleStatus, refreshGoogleStatus, logoutAll, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
     const [isSaving, setIsSaving] = useState(false);
     const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
@@ -46,8 +47,7 @@ export default function ProfilePage() {
         phone_number: user?.phone_number || "",
         company_name: user?.company_name || "",
         company_website: user?.company_website || "",
-        profile_picture_url: user?.profile_picture_url || "",
-    });
+        profile_picture_url: user?.profile_picture_url || "" });
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -60,13 +60,11 @@ export default function ProfilePage() {
         uploadData.append("file", file);
 
         try {
-            const res = await fetch("http://localhost:6060/auth/upload-avatar", {
+            const res = await apiFetch("http://localhost:6060/auth/upload-avatar", {
                 method: "POST",
                 headers: {
-                    Authorization: `Bearer ${token}`,
                 },
-                body: uploadData,
-            });
+                body: uploadData });
 
             if (res.ok) {
                 const data = await res.json();
@@ -96,11 +94,10 @@ export default function ProfilePage() {
     };
 
     const fetchLoginHistory = async () => {
-        if (!token) return;
+        if (!user) return;
         setIsHistoryLoading(true);
         try {
-            const res = await fetch("http://localhost:6060/auth/login-history", {
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch("http://localhost:6060/auth/login-history", {
             });
             if (res.ok) {
                 setLoginHistory(await res.json());
@@ -122,7 +119,7 @@ export default function ProfilePage() {
     };
 
     const handleLogoutAll = async () => {
-        if (!token) return;
+        if (!user) return;
         setIsLogoutAllLoading(true);
         try {
             await logoutAll();
@@ -136,19 +133,16 @@ export default function ProfilePage() {
 
     useEffect(() => {
         const code = searchParams.get("code");
-        if (code && token && !hasHandledCode.current) {
+        if (code && user && !hasHandledCode.current) {
             hasHandledCode.current = true;  // ← blocks second fire
             const finalizeGoogleAuth = async () => {
                 setIsConnectingGoogle(true);
                 try {
-                    const res = await fetch("http://localhost:6060/auth/google/callback", {
+                    const res = await apiFetch("http://localhost:6060/auth/google/callback", {
                         method: "POST",
                         headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${token}`,
-                        },
-                        body: JSON.stringify({ code }),
-                    });
+                            "Content-Type": "application/json" },
+                        body: JSON.stringify({ code }) });
                     if (res.ok) {
                         setMessage({ type: 'success', text: "Google account connected successfully! 📅" });
                         await refreshUser();
@@ -166,20 +160,19 @@ export default function ProfilePage() {
             };
             finalizeGoogleAuth();
         }
-    }, [searchParams, token]);
+    }, [searchParams, user]);
 
     useEffect(() => {
-        if (token) {
+        if (user) {
             refreshGoogleStatus();
             fetchLoginHistory();
         }
-    }, [token]);
+    }, [user]);
 
     const handleConnectGoogle = async () => {
         setIsConnectingGoogle(true);
         try {
-            const res = await fetch("http://localhost:6060/auth/google/url", {
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch("http://localhost:6060/auth/google/url", {
             });
             const data = await res.json();
             if (data.auth_url) {
@@ -205,17 +198,14 @@ export default function ProfilePage() {
     useEffect(() => {
         const code = searchParams.get("code");
         const state = searchParams.get("state");
-        if (!code || !token) return;
+        if (!code ) return;
         const submitCallback = async () => {
             try {
-                const res = await fetch("http://localhost:6060/auth/google/callback", {
+                const res = await apiFetch("http://localhost:6060/auth/google/callback", {
                     method: "POST",
                     headers: {
-                        "Content-Type": "application/json",
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: JSON.stringify({ code, state }),
-                });
+                        "Content-Type": "application/json" },
+                    body: JSON.stringify({ code, state }) });
                 if (!res.ok) throw new Error("Failed to finish Google OAuth.");
                 await refreshUser();
                 await refreshGoogleStatus();
@@ -231,15 +221,14 @@ export default function ProfilePage() {
             }
         };
         submitCallback();
-    }, [searchParams.toString(), token, refreshUser, refreshGoogleStatus]);
+    }, [searchParams.toString(), user, refreshUser, refreshGoogleStatus]);
 
     const handleDisconnectGoogle = async () => {
         if (!window.confirm("Disconnect your Google account? You won't be able to generate Meet links automatically.")) return;
 
         try {
-            const res = await fetch("http://localhost:6060/auth/google/disconnect", {
-                method: "DELETE",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch("http://localhost:6060/auth/google/disconnect", {
+                method: "DELETE"
             });
             if (res.ok) {
                 setMessage({ type: 'success', text: "Google account disconnected." });
@@ -262,9 +251,8 @@ export default function ProfilePage() {
         setOtpError("");
 
         try {
-            const res = await fetch("http://localhost:6060/auth/reveal/request", {
-                method: "POST",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch("http://localhost:6060/auth/reveal/request", {
+                method: "POST"
             });
             if (!res.ok) throw new Error("Failed to send OTP");
         } catch (err) {
@@ -279,14 +267,11 @@ export default function ProfilePage() {
         setOtpError("");
 
         try {
-            const res = await fetch("http://localhost:6060/auth/reveal/verify", {
+            const res = await apiFetch("http://localhost:6060/auth/reveal/verify", {
                 method: "POST",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`
-                },
-                body: JSON.stringify({ token: otpValue }),
-            });
+                    "Content-Type": "application/json" },
+                body: JSON.stringify({ token: otpValue }) });
 
             if (res.ok) {
                 revealPersonalDetails();
@@ -309,16 +294,14 @@ export default function ProfilePage() {
         }
 
         try {
-            const res = await fetch("http://localhost:6060/auth/me", {
-                method: "DELETE",
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                },
+            const res = await apiFetch("http://localhost:6060/auth/me", {
+                method: "DELETE"
             });
 
             if (res.ok) {
                 alert("Account deleted successfully.");
-                localStorage.removeItem("access_token");
+                // Server already cleared the session cookie during account
+                // deletion; nothing to clear client-side.
                 window.location.href = "/register";
             } else {
                 const errorData = await res.json();
@@ -336,14 +319,11 @@ export default function ProfilePage() {
         setMessage(null);
 
         try {
-            const res = await fetch("http://localhost:6060/users/me", {
+            const res = await apiFetch("http://localhost:6060/users/me", {
                 method: "PATCH",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify(formData),
-            });
+                    "Content-Type": "application/json" },
+                body: JSON.stringify(formData) });
 
             if (res.ok) {
                 setMessage({ type: 'success', text: "Profile updated successfully! ✨" });

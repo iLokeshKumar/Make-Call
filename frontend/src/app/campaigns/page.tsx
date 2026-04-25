@@ -3,10 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   BarChart2, ChevronDown, ChevronUp, GripVertical, List, Loader2,
-  Mail, MessageCircle, Pause, Pencil, Phone, Play, Plus, Trash2, Users, X,
-} from "lucide-react";
+  Mail, MessageCircle, Pause, Pencil, Phone, Play, Plus, Trash2, Users, X } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 // Types
@@ -52,8 +52,7 @@ function delayLabel(hours: number) {
 const CHANNEL_META: Record<string, { label: string; Icon: React.ElementType; color: string }> = {
   call:      { label: "Call",      Icon: Phone,         color: "text-emerald-600 dark:text-emerald-400" },
   email:     { label: "Email",     Icon: Mail,          color: "text-blue-600 dark:text-blue-400" },
-  whatsapp:  { label: "WhatsApp",  Icon: MessageCircle, color: "text-green-600 dark:text-green-400" },
-};
+  whatsapp:  { label: "WhatsApp",  Icon: MessageCircle, color: "text-green-600 dark:text-green-400" } };
 
 function ChannelIcon({ channel }: { channel: string }) {
   const meta = CHANNEL_META[channel] ?? { Icon: Phone, color: "text-slate-500" };
@@ -66,12 +65,11 @@ interface SequenceBuilderProps {
   campaignId: number;
   steps: CampaignStep[];
   loading: boolean;
-  token: string | null;
   onRefresh: () => void;
 }
 
-function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: SequenceBuilderProps) {
-  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+function SequenceBuilder({ campaignId, steps, loading, onRefresh }: SequenceBuilderProps) {
+  const headers = {"Content-Type": "application/json" };
 
   // Drag state
   const dragSrcIdx = useRef<number | null>(null);
@@ -95,10 +93,9 @@ function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: Seque
 
   async function handleDelete(stepId: number) {
     if (!confirm("Delete this step?")) return;
-    const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps/${stepId}`, {
+    const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/steps/${stepId}`, {
       method: "DELETE",
-      headers,
-    });
+      headers });
     if (res.ok || res.status === 204) { onRefresh(); }
     else { setStepMsg("Delete failed"); }
   }
@@ -107,11 +104,10 @@ function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: Seque
     if (editId == null) return;
     setEditSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps/${editId}`, {
+      const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/steps/${editId}`, {
         method: "PATCH",
         headers,
-        body: JSON.stringify({ channel: editChannel, delay_hours: editDelay }),
-      });
+        body: JSON.stringify({ channel: editChannel, delay_hours: editDelay }) });
       if (!res.ok) throw new Error((await res.json()).detail || "Save failed");
       setEditId(null);
       onRefresh();
@@ -126,11 +122,10 @@ function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: Seque
     setAddSaving(channel);
     try {
       const nextOrder = steps.length + 1;
-      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps`, {
+      const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/steps`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ channel, delay_hours: 24, step_order: nextOrder }),
-      });
+        body: JSON.stringify({ channel, delay_hours: 24, step_order: nextOrder }) });
       if (!res.ok) throw new Error((await res.json()).detail || "Add failed");
       onRefresh();
     } catch (e) {
@@ -167,11 +162,10 @@ function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: Seque
     reordered.splice(targetIdx, 0, moved);
     const step_ids = reordered.map((s) => s.id);
 
-    const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps/reorder`, {
+    const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/steps/reorder`, {
       method: "PUT",
       headers,
-      body: JSON.stringify({ step_ids }),
-    });
+      body: JSON.stringify({ step_ids }) });
     if (res.ok) { onRefresh(); }
     else { setStepMsg("Reorder failed"); }
   }
@@ -314,7 +308,7 @@ function SequenceBuilder({ campaignId, steps, loading, token, onRefresh }: Seque
 // Main page
 
 export default function CampaignsPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading] = useState(true);
@@ -352,15 +346,15 @@ export default function CampaignsPage() {
   const [recipientsLoading, setRecipientsLoading] = useState<Record<number, boolean>>({});
   const [showRecipients, setShowRecipients] = useState<Record<number, boolean>>({});
 
-  const headers = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const headers = {"Content-Type": "application/json" };
 
   // Data fetching
 
   const fetchCampaigns = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/campaigns`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/campaigns`, { });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Failed to load campaigns");
       const data = await res.json();
@@ -370,14 +364,14 @@ export default function CampaignsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => { fetchCampaigns(); }, [fetchCampaigns]);
 
   async function fetchSteps(campaignId: number) {
     setStepsLoading((s) => ({ ...s, [campaignId]: true }));
     try {
-      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/steps`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/steps`, { });
       if (!res.ok) return;
       const data = await res.json();
       setSteps((s) => ({ ...s, [campaignId]: data }));
@@ -396,7 +390,7 @@ export default function CampaignsPage() {
     if (reportLoading[campaignId]) return;
     setReportLoading((r) => ({ ...r, [campaignId]: true }));
     try {
-      const res = await fetch(`${API_BASE}/analytics/campaign/${campaignId}/email-report`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/analytics/campaign/${campaignId}/email-report`, { });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) { const data = await res.json(); setEmailReports((r) => ({ ...r, [campaignId]: data })); }
     } finally {
@@ -413,7 +407,7 @@ export default function CampaignsPage() {
     if (recipientsLoading[campaignId]) return;
     setRecipientsLoading((r) => ({ ...r, [campaignId]: true }));
     try {
-      const res = await fetch(`${API_BASE}/campaigns/${campaignId}/recipients`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/recipients`, { });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) { const data = await res.json(); setRecipients((r) => ({ ...r, [campaignId]: data })); }
     } finally {
@@ -433,11 +427,10 @@ export default function CampaignsPage() {
     setCreateSaving(true);
     setMsg(null);
     try {
-      const res = await fetch(`${API_BASE}/campaigns`, {
+      const res = await apiFetch(`${API_BASE}/campaigns`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ name: newName.trim(), description: newDesc.trim() || null }),
-      });
+        body: JSON.stringify({ name: newName.trim(), description: newDesc.trim() || null }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error((await res.json()).detail || "Failed to create");
       setNewName(""); setNewDesc(""); setCreating(false);
@@ -453,7 +446,7 @@ export default function CampaignsPage() {
   async function handleLaunch(id: number) {
     setActionLoading((a) => ({ ...a, [id]: true }));
     try {
-      const res = await fetch(`${API_BASE}/campaigns/${id}/launch`, { method: "POST", headers });
+      const res = await apiFetch(`${API_BASE}/campaigns/${id}/launch`, { method: "POST", headers });
       if (!res.ok) throw new Error((await res.json()).detail || "Failed to launch");
       setMsg("Campaign launched.");
       fetchCampaigns();
@@ -467,7 +460,7 @@ export default function CampaignsPage() {
   async function handlePause(id: number) {
     setActionLoading((a) => ({ ...a, [id]: true }));
     try {
-      const res = await fetch(`${API_BASE}/campaigns/${id}/pause`, { method: "POST", headers });
+      const res = await apiFetch(`${API_BASE}/campaigns/${id}/pause`, { method: "POST", headers });
       if (!res.ok) throw new Error((await res.json()).detail || "Failed to pause");
       setMsg("Campaign paused.");
       fetchCampaigns();
@@ -482,7 +475,7 @@ export default function CampaignsPage() {
     setEnrollFor(campaignId);
     setSelectedLeads([]);
     if (leads.length === 0) {
-      const res = await fetch(`${API_BASE}/crm/leads?page=1&limit=200`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=200`, { });
       if (res.ok) { const d = await res.json(); setLeads(d.items || []); }
     }
   }
@@ -491,11 +484,10 @@ export default function CampaignsPage() {
     if (!enrollFor || selectedLeads.length === 0) return;
     setEnrollSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/campaigns/${enrollFor}/enroll`, {
+      const res = await apiFetch(`${API_BASE}/campaigns/${enrollFor}/enroll`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ lead_ids: selectedLeads }),
-      });
+        body: JSON.stringify({ lead_ids: selectedLeads }) });
       if (!res.ok) throw new Error((await res.json()).detail || "Enroll failed");
       setMsg(`${selectedLeads.length} lead(s) enrolled.`);
       setEnrollFor(null); setSelectedLeads([]);
@@ -512,15 +504,13 @@ export default function CampaignsPage() {
     active:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
     paused:    "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
     draft:     "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-    completed: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
-  };
+    completed: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" };
   const recipientStatusColor: Record<string, string> = {
     active:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
     paused:    "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300",
     completed: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300",
     pending:   "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400",
-    failed:    "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300",
-  };
+    failed:    "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300" };
 
   // Render
 
@@ -662,7 +652,6 @@ export default function CampaignsPage() {
                     campaignId={campaign.id}
                     steps={steps[campaign.id] || []}
                     loading={!!stepsLoading[campaign.id]}
-                    token={token}
                     onRefresh={() => fetchSteps(campaign.id)}
                   />
                 </div>

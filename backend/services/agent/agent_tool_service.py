@@ -352,7 +352,7 @@ async def book_meeting(
 
     # Advance ISM stage to "engaged" — they agreed to a meeting
     try:
-        from call.outcome_service import advance_ism_stage
+        from services.call.outcome_service import advance_ism_stage
         if advance_ism_stage(lead, "engaged"):
             lead.updated_at = utc_now()
             lead.updated_by = actor_user_id
@@ -455,7 +455,7 @@ async def book_demo(
 
     # Advance ISM stage to "engaged" — they agreed to a demo
     try:
-        from call.outcome_service import advance_ism_stage
+        from services.call.outcome_service import advance_ism_stage
         if advance_ism_stage(lead, "engaged"):
             lead.updated_at = utc_now()
             lead.updated_by = actor_user_id

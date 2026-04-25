@@ -69,8 +69,8 @@ def auto_create_quote_from_interaction(
         }
     """
     from services.next_action_service import _resolve_quote_product_match
-    from call.outbound_call_service import create_call_task
-    from quote.quote_service import create_quote
+    from services.call.outbound_call_service import create_call_task
+    from services.quote.quote_service import create_quote
 
     lead = session.exec(
         select(Lead).where(

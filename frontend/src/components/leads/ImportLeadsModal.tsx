@@ -10,10 +10,10 @@ import {
   Search,
   Upload,
   Users,
-  X,
-} from "lucide-react";
+  X } from "lucide-react";
 import { useRef, useState } from "react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 // Types
@@ -67,9 +67,7 @@ function ResultBanner({ result, onDismiss }: { result: ImportResult; onDismiss: 
 // tag input
 
 function TagInput({
-  placeholder,
-  tags,
-  onChange,
+  placeholder, tags, onChange
 }: {
   placeholder: string;
   tags: string[];
@@ -108,11 +106,8 @@ function TagInput({
 // main modal
 
 export default function ImportLeadsModal({
-  token,
-  onClose,
-  onImported,
+  onClose, onImported
 }: {
-  token: string;
   onClose: () => void;
   onImported: () => void;
 }) {
@@ -148,11 +143,10 @@ export default function ImportLeadsModal({
   const [ziLimit, setZiLimit] = useState(25);
 
   async function post(url: string, body?: object) {
-    const res = await fetch(`${API_BASE}${url}`, {
+    const res = await apiFetch(`${API_BASE}${url}`, {
       method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: body ? JSON.stringify(body) : undefined,
-    });
+      headers: { "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || "Request failed");
     return data as ImportResult;
@@ -163,11 +157,10 @@ export default function ImportLeadsModal({
     if (!manualForm.name || !manualForm.normalized_phone) return;
     setBusy(true); setResult(null);
     try {
-      await fetch(`${API_BASE}/crm/leads`, {
+      await apiFetch(`${API_BASE}/crm/leads`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(manualForm),
-      }).then(async (r) => {
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(manualForm) }).then(async (r) => {
         if (!r.ok) { const d = await r.json(); throw new Error(d.detail); }
         return r.json();
       });
@@ -187,11 +180,9 @@ export default function ImportLeadsModal({
       const fd = new FormData();
       fd.append("file", file);
       fd.append("source_tag", sourceTag);
-      const res = await fetch(`${API_BASE}/crm/leads/import/file`, {
+      const res = await apiFetch(`${API_BASE}/crm/leads/import/file`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-        body: fd,
-      });
+        body: fd });
       const data = await res.json();
       if (!res.ok) throw new Error(data.detail || "Upload failed");
       setResult(data);
@@ -211,8 +202,7 @@ export default function ImportLeadsModal({
         locations: apolloLocations,
         companies: apolloCompanies,
         keywords: apolloKeywords,
-        limit: apolloLimit,
-      });
+        limit: apolloLimit });
       setResult(data);
       onImported();
     } catch (err) {
@@ -230,8 +220,7 @@ export default function ImportLeadsModal({
         companies: ziCompanies,
         departments: ziDepartments,
         keywords: ziKeywords,
-        limit: ziLimit,
-      });
+        limit: ziLimit });
       setResult(data);
       onImported();
     } catch (err) {
@@ -548,9 +537,7 @@ function SubmitBtn({ busy, label, disabled }: { busy: boolean; label: string; di
 }
 
 function CsvGuideTab({
-  source,
-  steps,
-  onFileSelected,
+  source, steps, onFileSelected
 }: {
   source: string;
   steps: string[];

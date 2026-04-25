@@ -6,12 +6,13 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
   ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2, Megaphone,
-  FileText, Layout, Cpu, BookOpen, LayoutGrid, MessageSquare, Database, Bot
+  FileText, Layout, Cpu, BookOpen, LayoutGrid, MessageSquare, Database, Bot, Inbox
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 import { maskEmail, maskPhone } from "@/utils/security";
 
+import { apiFetch } from "@/utils/apiFetch";
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Leads", href: "/leads", icon: Users },
@@ -28,6 +29,7 @@ const navItems = [
   { name: "Objections", href: "/objections", icon: BookOpen },
   { name: "Knowledge", href: "/knowledge", icon: Database },
   { name: "Agent Tasks", href: "/agent-tasks", icon: Bot },
+  { name: "Approvals", href: "/agents/approvals", icon: Inbox },
   { name: "Admin", href: "/admin", icon: ShieldCheck, adminOnly: true },
   { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Company", href: "/company-profile", icon: Building2, adminOnly: true },
@@ -36,7 +38,7 @@ const navItems = [
 
 export default function Sidebar() {
   const pathname = usePathname();
-  const { user, token, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+  const { user, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   // Resizing State
@@ -95,9 +97,8 @@ export default function Sidebar() {
     setOtpError("");
 
     try {
-      const res = await fetch("http://localhost:6060/auth/reveal/request", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch("http://localhost:6060/auth/reveal/request", {
+        method: "POST"
       });
       if (!res.ok) throw new Error("Failed to send OTP");
     } catch (err) {
@@ -112,14 +113,11 @@ export default function Sidebar() {
     setOtpError("");
 
     try {
-      const res = await fetch("http://localhost:6060/auth/reveal/verify", {
+      const res = await apiFetch("http://localhost:6060/auth/reveal/verify", {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`
-        },
-        body: JSON.stringify({ token: otpValue }),
-      });
+          "Content-Type": "application/json" },
+        body: JSON.stringify({ token: otpValue }) });
 
       if (res.ok) {
         revealPersonalDetails();

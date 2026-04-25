@@ -3,11 +3,11 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Activity, BarChart2, Bell, Brain, Clock, Download, Loader2,
-  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2, Zap,
-} from "lucide-react";
+  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2, Zap } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type EngagementSummary = {
@@ -21,7 +21,7 @@ type EngagementSummary = {
   meta: Record<string, unknown>;
 };
 
-type EngineRow  = { engine: string; rows: number; stt_avg: number; llm_avg: number; tts_avg: number; total_avg: number; total_min: number; total_max: number };
+type EngineRow  = { engine: string; rows: number; stt_avg: number; llm_avg: number; tts_avg: number; total_avg: number; total_min: number; total_max: number; total_p95?: number; llm_p95?: number };
 type CallRow    = { id: number; engine: string; stt_model: string; llm_model: string; tts_model: string; turns: number; stt_avg: number; llm_avg: number; tts_avg: number; total_avg: number; total_min: number; total_max: number };
 type ModelRow   = { model: string; provider: string; rows: number; avg: number; min: number; max: number };
 type TrendPoint = { day: string; engine: string; avg_ms: number; turns: number };
@@ -48,13 +48,11 @@ const ENGINE_PALETTE: Record<string, string> = {
   "cartesia-mistral-cartesia":   "#f87171",
   "sarvam-mistral-sarvam":       "#fb923c",
   "deepgram-openrouter-cartesia":"#a78bfa",
-  "cartesia-openrouter-cartesia":"#e879f9",
-};
+  "cartesia-openrouter-cartesia":"#e879f9" };
 const engineColor = (e: string) => ENGINE_PALETTE[e] ?? "#94a3b8";
 
 const CALL_STATUS_COLORS: Record<string, string> = {
-  completed: "bg-emerald-500", failed: "bg-red-500", queued: "bg-blue-500", pending: "bg-slate-400",
-};
+  completed: "bg-emerald-500", failed: "bg-red-500", queued: "bg-blue-500", pending: "bg-slate-400" };
 
 function Pulse() {
   return (
@@ -209,7 +207,7 @@ type MainTab = typeof MAIN_TABS[number];
 type LatencySubTab = "engines" | "calls" | "models" | "trend";
 
 export default function AnalyticsPage() {
-  const { token, user, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const isSalesRep = user?.role === "sales_representative";
 
   // Main tab
@@ -259,11 +257,11 @@ export default function AnalyticsPage() {
     setToast(msg); setToastError(error); setTimeout(() => setToast(null), 3500);
   }
 
-  const authH = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const authH = {"Content-Type": "application/json" };
 
 
   const fetchSummary = useCallback(async (d: number, from?: string, to?: string) => {
-    if (!token) return;
+    if (!user) return;
     setSummaryLoading(true);
     try {
       let url: string;
@@ -272,45 +270,45 @@ export default function AnalyticsPage() {
       } else {
         url = `${API_BASE}/analytics/engagement-summary?days=${d}`;
       }
-      const res = await fetch(url, { headers: authH });
+      const res = await apiFetch(url, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) setSummary(await res.json());
     } catch {} finally { setSummaryLoading(false); }
-  }, [token]);
+  }, [user]);
 
   const fetchLatency = useCallback(async (silent = false) => {
-    if (!token) return;
+    if (!user) return;
     silent ? setLatencyRefreshing(true) : setLatencyLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/latency?days=${latencyDays}&scope=${scope}`, { headers: authH });
+      const res = await apiFetch(`${API_BASE}/analytics/latency?days=${latencyDays}&scope=${scope}`, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) { setLatency(await res.json()); setLastAt(new Date()); }
     } catch {} finally { setLatencyLoading(false); setLatencyRefreshing(false); }
-  }, [token, latencyDays, scope]);
+  }, [user, latencyDays, scope]);
 
   const fetchAlerts = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setAlertsLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/alerts`, { headers: authH });
+      const res = await apiFetch(`${API_BASE}/analytics/alerts`, { headers: authH });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.ok) setAlerts(await res.json());
     } catch {} finally { setAlertsLoading(false); }
-  }, [token]);
+  }, [user]);
 
   const fetchPerformance = useCallback(async (d: number) => {
-    if (!token) return;
+    if (!user) return;
     setPerfLoading(true);
     try {
       const [pr, cr] = await Promise.all([
-        fetch(`${API_BASE}/analytics/call-performance?days=${d}`, { headers: authH }),
-        fetch(`${API_BASE}/analytics/call-conversion?days=${d}`, { headers: authH }),
+        apiFetch(`${API_BASE}/analytics/call-performance?days=${d}`, { headers: authH }),
+        apiFetch(`${API_BASE}/analytics/call-conversion?days=${d}`, { headers: authH }),
       ]);
       if (pr.status === 401 || cr.status === 401) { sessionTimeout(); return; }
       if (pr.ok) setPerf(await pr.json());
       if (cr.ok) setConv(await cr.json());
     } catch {} finally { setPerfLoading(false); }
-  }, [token]);
+  }, [user]);
 
   useEffect(() => { if (activeTab === "Performance") fetchPerformance(perfDays); }, [activeTab, fetchPerformance, perfDays]);
 
@@ -334,10 +332,8 @@ export default function AnalyticsPage() {
     if (!newAlertMetric.trim()) { showToast("Metric is required", true); return; }
     setAlertSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/alerts`, {
-        method: "POST", headers: authH,
-        body: JSON.stringify({ metric: newAlertMetric.trim(), threshold: newAlertThreshold, direction: newAlertDirection, channel: newAlertChannel }),
-      });
+      const res = await apiFetch(`${API_BASE}/analytics/alerts`, {
+        method: "POST",        body: JSON.stringify({ metric: newAlertMetric.trim(), threshold: newAlertThreshold, direction: newAlertDirection, channel: newAlertChannel }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).detail || "Failed");
       showToast("Alert created"); setNewAlertMetric(""); setNewAlertThreshold(0); fetchAlerts();
@@ -347,12 +343,12 @@ export default function AnalyticsPage() {
 
   async function handleToggleAlert(a: Alert) {
     const action = a.enabled ? "disable" : "enable";
-    const res = await fetch(`${API_BASE}/analytics/alerts/${a.id}/${action}`, { method: "PATCH", headers: authH });
+    const res = await apiFetch(`${API_BASE}/analytics/alerts/${a.id}/${action}`, { method: "PATCH", headers: authH });
     if (res.ok) { showToast(`Alert ${action}d`); fetchAlerts(); }
   }
 
   async function handleDeleteAlert(id: number) {
-    const res = await fetch(`${API_BASE}/analytics/alerts/${id}`, { method: "DELETE", headers: authH });
+    const res = await apiFetch(`${API_BASE}/analytics/alerts/${id}`, { method: "DELETE", headers: authH });
     if (res.ok) { showToast("Alert deleted"); fetchAlerts(); }
   }
 
@@ -385,7 +381,7 @@ export default function AnalyticsPage() {
   async function handleExportQuoteCSV() {
     setQuoteExportLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/quote/export`, { headers: authH });
+      const res = await apiFetch(`${API_BASE}/analytics/quote/export`, { headers: authH });
       if (!res.ok) throw new Error("Export failed");
       const a = document.createElement("a");
       a.href = URL.createObjectURL(await res.blob());
@@ -678,6 +674,12 @@ export default function AnalyticsPage() {
                             <p className="text-[10px] text-slate-500 font-mono">#{i + 1} · {e.rows.toLocaleString()} turns</p>
                             <p className="text-base font-bold mt-0.5" style={{ color: col }}>{e.engine}</p>
                             <p className="text-[10px] text-slate-500 mt-0.5">best {fms(e.total_min)} · worst {fms(e.total_max)}</p>
+                            {(e.total_p95 || e.llm_p95) ? (
+                              <p className="text-[10px] text-slate-400 mt-0.5 font-mono">
+                                p95 total <span className={clsx(e.total_p95 && e.total_p95 > 800 ? "text-red-400" : "text-emerald-400")}>{fms(e.total_p95 || 0)}</span>
+                                {" · "}p95 llm <span className="text-slate-300">{fms(e.llm_p95 || 0)}</span>
+                              </p>
+                            ) : null}
                           </div>
                           <div className="text-right">
                             <p className="text-3xl font-black leading-none" style={{ color: col }}>{fms(e.total_avg)}</p>

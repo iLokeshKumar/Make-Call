@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 import { Phone, PhoneCall, PhoneOff, Loader2, UserCheck, Database, Sparkles, X, ExternalLink } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 
@@ -89,11 +90,7 @@ function LiveTimer({ connectedAt }: { connectedAt: string | null }) {
 // Warm Transfer Modal
 
 function WarmTransferModal({
-  token,
-  row,
-  onClose,
-}: {
-  token: string;
+  row, onClose }: {
   row: CallRow;
   onClose: () => void;
 }) {
@@ -111,12 +108,10 @@ function WarmTransferModal({
     try {
       const params = new URLSearchParams({
         interaction_id: String(interactionId),
-        transfer_to: phone.trim(),
-      });
+        transfer_to: phone.trim() });
       if (name.trim()) params.set("isr_name", name.trim());
-      const res = await fetch(`${API_BASE}/telephony/warm-transfer?${params}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/telephony/warm-transfer?${params}`, {
+        method: "POST"
       });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
@@ -205,7 +200,7 @@ function WarmTransferModal({
 // Component
 
 export default function CallMonitorPage() {
-  const { token, user, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [selectedCampaign, setSelectedCampaign] = useState<number | null>(null);
@@ -217,9 +212,8 @@ export default function CallMonitorPage() {
   const wsRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
-    if (!token) return;
-    fetch(`${API_BASE}/crm/campaigns`, {
-      headers: { Authorization: `Bearer ${token}` },
+    if (!user) return;
+    apiFetch(`${API_BASE}/crm/campaigns`, {
     })
       .then((r) => {
         if (r.status === 401) { sessionTimeout(); return null; }
@@ -230,11 +224,11 @@ export default function CallMonitorPage() {
         else if (Array.isArray(data)) setCampaigns(data);
       })
       .catch(() => {});
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   // WebSocket
   useEffect(() => {
-    if (!token || !user?.company_id) return;
+    if (!user || !user?.company_id) return;
 
 
     if (wsRef.current) {
@@ -274,8 +268,7 @@ export default function CallMonitorPage() {
             connected_at:
               msg.status === "connected"
                 ? msg.ts
-                : (existing?.connected_at ?? null),
-          });
+                : (existing?.connected_at ?? null) });
           return next;
         });
       } catch {
@@ -286,7 +279,7 @@ export default function CallMonitorPage() {
       ws.close();
       wsRef.current = null;
     };
-  }, [token, user?.company_id, selectedCampaign, sessionTimeout]);
+  }, [user, user?.company_id, selectedCampaign, sessionTimeout]);
 
   // Sorted: active calls first (ringing/connected), then ended by most recent
   const sorted = [...rows.values()].sort((a, b) => {
@@ -494,9 +487,8 @@ export default function CallMonitorPage() {
         </div>
       )}
 
-      {transferRow && token && (
+      {transferRow && user && (
         <WarmTransferModal
-          token={token}
           row={transferRow}
           onClose={() => setTransferRow(null)}
         />

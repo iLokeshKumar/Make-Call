@@ -323,6 +323,189 @@ async def delete_lead(
     return {"message": "Lead deleted"}
 
 
+@router.get("/leads/{lead_id}/agent-actions")
+async def agent_actions_timeline(
+    lead_id: int,
+    limit: int = Query(50, ge=1, le=200),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Unified agent-actions timeline for a lead: AgentTask + EngagementEvent + Interaction
+    merged, sorted desc by timestamp. Used by the 'Agent Actions Timeline' Lead 360 panel.
+    """
+    from models.models import AgentTask, EngagementEvent
+
+    lead = session.exec(
+        select(Lead).where(
+            Lead.id == lead_id,
+            Lead.company_id == current_user.company_id,
+            Lead.deleted_at.is_(None),
+        )
+    ).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    tasks = session.exec(
+        select(AgentTask)
+        .where(AgentTask.lead_id == lead_id, AgentTask.company_id == current_user.company_id)
+        .order_by(AgentTask.created_at.desc())
+        .limit(limit)
+    ).all()
+    events = session.exec(
+        select(EngagementEvent)
+        .where(EngagementEvent.lead_id == lead_id, EngagementEvent.company_id == current_user.company_id)
+        .order_by(EngagementEvent.created_at.desc())
+        .limit(limit)
+    ).all()
+    interactions = session.exec(
+        select(Interaction)
+        .where(Interaction.lead_id == lead_id, Interaction.company_id == current_user.company_id)
+        .order_by(Interaction.created_at.desc())
+        .limit(limit)
+    ).all()
+
+    merged: list[dict] = []
+    for t in tasks:
+        merged.append({
+            "kind": "agent_task",
+            "id": t.id,
+            "timestamp": (t.updated_at or t.created_at).isoformat() if (t.updated_at or t.created_at) else None,
+            "agent": t.assigned_agent,
+            "task_type": t.task_type,
+            "status": t.status,
+            "requires_approval": t.requires_approval,
+            "input": t.input_json,
+            "output": t.output_json,
+            "error": t.error_json,
+            "undoable": t.status in {"pending", "awaiting_approval", "approved"},
+            "takeoverable": t.status in {"pending", "awaiting_approval", "running"},
+        })
+    for e in events:
+        merged.append({
+            "kind": "engagement_event",
+            "id": e.id,
+            "timestamp": e.created_at.isoformat() if e.created_at else None,
+            "event_type": e.event_type,
+            "channel": e.channel,
+            "payload": e.payload,
+        })
+    for i in interactions:
+        merged.append({
+            "kind": "interaction",
+            "id": i.id,
+            "timestamp": (i.started_at or i.created_at).isoformat() if (i.started_at or i.created_at) else None,
+            "type": i.type,
+            "channel": i.channel,
+            "direction": i.direction,
+            "status": i.status,
+            "content": i.content,
+        })
+
+    merged.sort(key=lambda r: r["timestamp"] or "", reverse=True)
+    return {"lead_id": lead_id, "items": merged[:limit]}
+
+
+@router.post("/agent-tasks/{task_id}/undo")
+async def undo_agent_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel a pending/awaiting/approved AgentTask before it runs."""
+    from models.models import AgentTask
+
+    task = session.exec(
+        select(AgentTask).where(
+            AgentTask.id == task_id,
+            AgentTask.company_id == current_user.company_id,
+        )
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status not in {"pending", "awaiting_approval", "approved"}:
+        raise HTTPException(status_code=409, detail=f"Cannot undo task in status '{task.status}'")
+    task.status = "rejected"
+    task.error_json = {**(task.error_json or {}), "undo_by": current_user.id, "undo_reason": "user_undo"}
+    task.updated_at = utc_now()
+    task.updated_by = current_user.id
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return {"id": task.id, "status": task.status}
+
+
+@router.post("/agent-tasks/{task_id}/takeover")
+async def takeover_agent_task(
+    task_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Mark a task as needs_human — worker skips it; operator owns follow-up."""
+    from models.models import AgentTask
+
+    task = session.exec(
+        select(AgentTask).where(
+            AgentTask.id == task_id,
+            AgentTask.company_id == current_user.company_id,
+        )
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    if task.status in {"done", "failed", "rejected"}:
+        raise HTTPException(status_code=409, detail=f"Cannot takeover task in status '{task.status}'")
+    task.status = "needs_human"
+    task.error_json = {**(task.error_json or {}), "takeover_by": current_user.id}
+    task.updated_at = utc_now()
+    task.updated_by = current_user.id
+    session.add(task)
+    session.commit()
+    session.refresh(task)
+    return {"id": task.id, "status": task.status}
+
+
+@router.get("/leads/{lead_id}/next-action-explain")
+async def explain_next_action(
+    lead_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Return which IsmRule would fire for this lead right now, or None if no rule
+    matches. Frontend uses this to render an 'Explain Next Action' panel.
+    """
+    from agents.ism_rules_engine import evaluate_rules, parse_action
+
+    lead = session.exec(
+        select(Lead).where(
+            Lead.id == lead_id,
+            Lead.company_id == current_user.company_id,
+            Lead.deleted_at.is_(None),
+        )
+    ).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    matched = evaluate_rules(session, current_user.company_id, lead)
+    result: dict = {
+        "lead_id": lead_id,
+        "ism_stage": lead.ism_stage,
+        "matched_rule": None,
+        "action": None,
+    }
+    if matched:
+        verb, arg = parse_action(matched.then_action or "")
+        result["matched_rule"] = {
+            "id": matched.id,
+            "name": matched.name,
+            "priority": matched.priority,
+            "when_json": matched.when_json,
+            "then_action": matched.then_action,
+        }
+        result["action"] = {"verb": verb, "argument": arg}
+    return result
+
+
 @router.get("/ai-insights")
 async def ai_insights(
     lead_id: int = Query(default=None, ge=1),

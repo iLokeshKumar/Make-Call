@@ -2,12 +2,12 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  Bot, CheckCircle, XCircle, Clock, AlertCircle, Loader2,
-  ChevronDown, ChevronUp, RefreshCw, Plus, Ban, ExternalLink,
-} from "lucide-react";
+  Bot, CheckCircle, XCircle, Clock, AlertCircle, AlertTriangle, Loader2,
+  ChevronDown, ChevronUp, RefreshCw, Plus, Ban, ExternalLink, Code2 } from "lucide-react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 // Types
@@ -28,6 +28,23 @@ type AgentTask = {
   error_json: Record<string, unknown> | null;
 };
 
+type ApprovalPresentation = {
+  title: string;
+  description: string;
+  preview: null | {
+    channel: string;
+    to?: string;
+    subject?: string;
+    body?: string;
+    cta?: string | null;
+    quote?: string;
+    channels?: string[];
+    message?: string;
+  };
+  warnings: string[];
+  raw: Record<string, unknown>;
+};
+
 type Approval = {
   approval_id: number;
   task_id: number;
@@ -43,6 +60,8 @@ type Approval = {
     lead_id: number | null;
     priority: number;
   };
+  // server-computed human-readable view. Optional because older backends and cancelled approvals may not include it.
+  presentation?: ApprovalPresentation;
 };
 
 // Helpers
@@ -54,8 +73,7 @@ const STATUS_BADGE: Record<string, string> = {
   approved:           "bg-sky-500/15 text-sky-400 border border-sky-500/25",
   done:               "bg-emerald-500/15 text-emerald-400 border border-emerald-500/25",
   failed:             "bg-red-500/15 text-red-400 border border-red-500/25",
-  rejected:           "bg-slate-500/15 text-slate-400 border border-slate-500/25",
-};
+  rejected:           "bg-slate-500/15 text-slate-400 border border-slate-500/25" };
 
 function StatusBadge({ status }: { status: string }) {
   return (
@@ -82,7 +100,8 @@ function expiresIn(iso: string | null) {
 
 const STATUS_FILTERS = ["all", "pending", "running", "awaiting_approval", "done", "failed", "rejected"];
 
-function TaskQueue({ token }: { token: string }) {
+function TaskQueue() {
+  const { user } = useAuth();
   const [tasks, setTasks] = useState<AgentTask[]>([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState("all");
@@ -93,23 +112,21 @@ function TaskQueue({ token }: { token: string }) {
     try {
       const params = new URLSearchParams({ limit: "100" });
       if (statusFilter !== "all") params.set("status", statusFilter);
-      const res = await fetch(`${API_BASE}/crm/agent-tasks?${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/agent-tasks?${params}`, {
       });
       if (res.ok) setTasks(await res.json());
     } finally {
       setLoading(false);
     }
-  }, [token, statusFilter]);
+  }, [user, statusFilter]);
 
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
 
   const cancelTask = async (taskId: number) => {
     setCancelling(taskId);
     try {
-      await fetch(`${API_BASE}/crm/agent-tasks/${taskId}/cancel`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      await apiFetch(`${API_BASE}/crm/agent-tasks/${taskId}/cancel`, {
+        method: "POST"
       });
       fetchTasks();
     } finally {
@@ -202,8 +219,9 @@ function TaskQueue({ token }: { token: string }) {
 
 // Approval Card
 
-function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: string; onRefresh: () => void }) {
+function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => void }) {
   const [expanded, setExpanded] = useState(false);
+  const [showRaw, setShowRaw] = useState(false);
   const [note, setNote] = useState("");
   const [loading, setLoading] = useState<"approve" | "reject" | null>(null);
   const [done, setDone] = useState<"approved" | "rejected" | null>(null);
@@ -213,11 +231,10 @@ function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: strin
     setLoading(action);
     try {
       const body = action === "approve" ? { note } : { note };
-      await fetch(`${API_BASE}/crm/agent-tasks/${appr.task_id}/${action}`, {
+      await apiFetch(`${API_BASE}/crm/agent-tasks/${appr.task_id}/${action}`, {
         method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+        headers: {"Content-Type": "application/json" },
+        body: JSON.stringify(body) });
       setDone(action === "approve" ? "approved" : "rejected");
       setTimeout(onRefresh, 800);
     } finally {
@@ -226,6 +243,11 @@ function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: strin
   };
 
   const exp = expiresIn(appr.expires_at);
+  // Prefer server-rendered presentation. Falls back to legacy fields if the backend hasn't been upgraded yet.
+  const p = appr.presentation;
+  const title = p?.title ?? appr.action_summary;
+  const description = p?.description ?? "";
+  const warnings = p?.warnings ?? [];
 
   if (done) {
     return (
@@ -233,7 +255,7 @@ function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: strin
         {done === "approved"
           ? <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
           : <XCircle className="w-5 h-5 text-red-400 shrink-0" />}
-        <span className="text-slate-300 text-sm">{appr.action_summary} — {done}</span>
+        <span className="text-slate-300 text-sm">{title} — {done}</span>
       </div>
     );
   }
@@ -252,8 +274,16 @@ function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: strin
                 <Clock className="w-3 h-3" /> {exp}
               </span>
             )}
+            {warnings.length > 0 && (
+              <span className="flex items-center gap-1 text-xs text-amber-400">
+                <AlertTriangle className="w-3 h-3" /> {warnings.length} warning{warnings.length > 1 ? "s" : ""}
+              </span>
+            )}
           </div>
-          <p className="text-slate-200 text-sm mt-1 font-medium">{appr.action_summary}</p>
+          <p className="text-slate-200 text-sm mt-1 font-medium">{title}</p>
+          {description && (
+            <p className="text-slate-400 text-xs mt-0.5 line-clamp-2">{description}</p>
+          )}
           <p className="text-slate-500 text-xs mt-0.5">
             Agent: {appr.task.assigned_agent} · Task #{appr.task_id}
             {appr.task.lead_id && (
@@ -269,15 +299,73 @@ function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: strin
         </button>
       </div>
 
-      {/* Expanded payload + actions */}
+      {/* Expanded — structured preview + warnings + actions */}
       {expanded && (
         <div className="border-t border-white/8 px-4 py-3 space-y-3">
-          {/* Payload preview */}
+          {/* Warnings (if any) */}
+          {warnings.length > 0 && (
+            <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2 space-y-1">
+              {warnings.map((w, i) => (
+                <div key={i} className="flex items-start gap-2 text-xs text-amber-300">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Human-readable preview per channel */}
+          {p?.preview && (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">
+                {p.preview.channel} preview
+              </p>
+              <div className="rounded bg-black/30 border border-white/5 p-3 space-y-2 text-sm">
+                {p.preview.to && (
+                  <div><span className="text-slate-500 text-xs">To: </span><span className="text-slate-200">{p.preview.to}</span></div>
+                )}
+                {p.preview.quote && (
+                  <div><span className="text-slate-500 text-xs">Quote: </span><span className="text-slate-200">{p.preview.quote}</span></div>
+                )}
+                {p.preview.channels && p.preview.channels.length > 0 && (
+                  <div><span className="text-slate-500 text-xs">Channels: </span><span className="text-slate-200">{p.preview.channels.join(", ")}</span></div>
+                )}
+                {p.preview.subject && (
+                  <div><span className="text-slate-500 text-xs">Subject: </span><span className="text-slate-200 font-medium">{p.preview.subject}</span></div>
+                )}
+                {p.preview.body && (
+                  <div>
+                    <span className="text-slate-500 text-xs">Body:</span>
+                    <p className="mt-1 text-slate-200 whitespace-pre-wrap text-sm">{p.preview.body}</p>
+                  </div>
+                )}
+                {p.preview.message && (
+                  <div>
+                    <span className="text-slate-500 text-xs">Message:</span>
+                    <p className="mt-1 text-slate-200 whitespace-pre-wrap text-sm">{p.preview.message}</p>
+                  </div>
+                )}
+                {p.preview.cta && (
+                  <div><span className="text-slate-500 text-xs">CTA: </span><span className="text-indigo-400">{p.preview.cta}</span></div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Raw payload (advanced toggle) */}
           <div>
-            <p className="text-xs text-slate-500 mb-1 font-medium uppercase tracking-wide">Action payload</p>
-            <pre className="text-xs text-slate-300 bg-black/30 rounded p-3 overflow-x-auto max-h-40">
-              {JSON.stringify(appr.action_payload, null, 2)}
-            </pre>
+            <button
+              onClick={() => setShowRaw(r => !r)}
+              className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+            >
+              <Code2 className="w-3 h-3" />
+              {showRaw ? "Hide" : "Show"} raw payload
+            </button>
+            {showRaw && (
+              <pre className="mt-2 text-xs text-slate-400 bg-black/30 rounded p-3 overflow-x-auto max-h-40">
+                {JSON.stringify(p?.raw ?? appr.action_payload, null, 2)}
+              </pre>
+            )}
           </div>
 
           {/* Note */}
@@ -321,21 +409,21 @@ function ApprovalCard({ appr, token, onRefresh }: { appr: Approval; token: strin
 
 // Review Queue Tab
 
-function ReviewQueue({ token }: { token: string }) {
+function ReviewQueue() {
+  const { user } = useAuth();
   const [approvals, setApprovals] = useState<Approval[]>([]);
   const [loading, setLoading] = useState(true);
 
   const fetchApprovals = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/crm/agent-tasks/approvals`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/agent-tasks/approvals`, {
       });
       if (res.ok) setApprovals(await res.json());
     } finally {
       setLoading(false);
     }
-  }, [token]);
+  }, [user]);
 
   useEffect(() => { fetchApprovals(); }, [fetchApprovals]);
 
@@ -360,7 +448,7 @@ function ReviewQueue({ token }: { token: string }) {
       ) : (
         <div className="space-y-3">
           {approvals.map(appr => (
-            <ApprovalCard key={appr.approval_id} appr={appr} token={token} onRefresh={fetchApprovals} />
+            <ApprovalCard key={appr.approval_id} appr={appr} onRefresh={fetchApprovals} />
           ))}
         </div>
       )}
@@ -371,10 +459,10 @@ function ReviewQueue({ token }: { token: string }) {
 // Page
 
 export default function AgentTasksPage() {
-  const { token } = useAuth();
+  const { user } = useAuth();
   const [tab, setTab] = useState<"queue" | "review">("queue");
 
-  if (!token) return (
+  if (!user) return (
     <div className="flex items-center justify-center h-64 text-slate-500">
       <Loader2 className="w-6 h-6 animate-spin" />
     </div>
@@ -412,8 +500,8 @@ export default function AgentTasksPage() {
 
       {/* Content */}
       {tab === "queue"
-        ? <TaskQueue token={token} />
-        : <ReviewQueue token={token} />}
+        ? <TaskQueue />
+        : <ReviewQueue />}
     </div>
   );
 }

@@ -199,8 +199,8 @@ def handle_inbound_quote_request(
             "call_task_id": None,
         }
 
-    from quote.quote_service import create_quote
-    from quote.quote_pdf_service import generate_quote_pdf
+    from services.quote.quote_service import create_quote
+    from services.quote.quote_pdf_service import generate_quote_pdf
 
     quote = create_quote(
         session=session,

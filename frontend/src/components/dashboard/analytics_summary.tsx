@@ -2,7 +2,9 @@
 
 import Link from "next/link";
 import { useEffect, useState } from "react";
+import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type SummaryResponse = {
@@ -14,7 +16,8 @@ type SummaryResponse = {
   quote_timeline_export: Array<{ quote_id: number; quote_number: string; status: string; dates: Record<string, string | null> }>;
 };
 
-export default function AnalyticsSummary({ token }: { token: string | null }) {
+export default function AnalyticsSummary() {
+  const { user } = useAuth();
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -23,11 +26,10 @@ export default function AnalyticsSummary({ token }: { token: string | null }) {
 
   useEffect(() => {
     async function loadSummary() {
-      if (!token) return;
+      if (!user) return;
       setLoading(true);
       try {
-        const res = await fetch(`${API_BASE}/analytics/engagement-summary?days=7`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${API_BASE}/analytics/engagement-summary?days=7`, {
         });
         if (!res.ok) {
           throw new Error("Unable to load analytics");
@@ -40,9 +42,9 @@ export default function AnalyticsSummary({ token }: { token: string | null }) {
       }
     }
     loadSummary();
-  }, [token]);
+  }, [user]);
 
-  if (!token) return null;
+  if (!user) return null;
 
   const timeline = summary?.event_timeline.slice(-3) ?? [];
   const pastel = ["from-indigo-500/60 to-blue-500/30", "from-emerald-500/60 to-cyan-500/30"];
@@ -51,12 +53,11 @@ export default function AnalyticsSummary({ token }: { token: string | null }) {
   const quotePreview = summary?.quote_timeline_export.slice(0, 3) ?? [];
 
   const downloadQuoteTimeline = async () => {
-    if (!token) return;
+    if (!user) return;
     setDownloadLoading(true);
     setDownloadMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/analytics/quote/export`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/analytics/quote/export`, {
       });
       if (!res.ok) {
         throw new Error("Failed to download quote timeline");

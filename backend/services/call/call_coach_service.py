@@ -24,7 +24,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from models.models import CallCoachScore, CompanySetting, utc_now
+from models.models import CallCoachScore, CompanySetting, Feedback, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +153,27 @@ async def score_call_and_coach(
     if existing:
         return existing
 
-    prompt = f"{COACH_PROMPT}\n\nCALL TRANSCRIPT:\n{transcript[:4000]}"
+    # Pull customer's verbal feedback for this call (if any) so the coach's
+    # prompt_suggestion is informed by the customer's actual voice, not just
+    # the LLM's read of the transcript.
+    customer_voice = ""
+    fb = session.exec(
+        select(Feedback).where(
+            Feedback.company_id == company_id,
+            Feedback.interaction_id == interaction_id,
+            Feedback.source == "customer",
+        ).limit(1)
+    ).first()
+    if fb:
+        bits = []
+        if fb.rating is not None:
+            bits.append(f"Customer rating: {fb.rating}/5")
+        if fb.comment:
+            bits.append(f"Customer comment: {fb.comment.strip()[:300]}")
+        if bits:
+            customer_voice = "\n\nCUSTOMER VERBAL FEEDBACK:\n" + "\n".join(bits)
+
+    prompt = f"{COACH_PROMPT}{customer_voice}\n\nCALL TRANSCRIPT:\n{transcript[:4000]}"
 
     try:
         llm_service.add_user_message(prompt)
@@ -262,6 +282,30 @@ def get_coach_averages(session: Session, company_id: int) -> dict:
         clean = [v for v in vals if v is not None]
         return round(sum(clean) / len(clean), 1) if clean else None
 
+    # Recent low-CSAT signal: customer-given verbal ratings ≤ 2 (last 30 rows).
+    # Surfaced in the coach panel so reps see customer voice alongside LLM scoring.
+    low_csat = session.exec(
+        select(Feedback)
+        .where(
+            Feedback.company_id == company_id,
+            Feedback.source == "customer",
+            Feedback.feedback_type == "csat",
+            Feedback.rating <= 2,
+        )
+        .order_by(Feedback.created_at.desc())
+        .limit(30)
+    ).all()
+    csat_avg = session.exec(
+        select(Feedback)
+        .where(
+            Feedback.company_id == company_id,
+            Feedback.source == "customer",
+            Feedback.feedback_type == "csat",
+            Feedback.rating.is_not(None),
+        )
+    ).all()
+    csat_ratings = [f.rating for f in csat_avg if f.rating is not None]
+
     return {
         "total_calls_scored": len(scores),
         "avg_overall": avg([s.score_overall for s in scores]),
@@ -271,4 +315,16 @@ def get_coach_averages(session: Session, company_id: int) -> dict:
         "avg_value_proposition": avg([s.score_value_proposition for s in scores]),
         "avg_closing": avg([s.score_closing for s in scores]),
         "auto_tune_applied_count": sum(1 for s in scores if s.prompt_applied),
+        "csat_count": len(csat_ratings),
+        "csat_avg": round(sum(csat_ratings) / len(csat_ratings), 2) if csat_ratings else None,
+        "recent_low_csat": [
+            {
+                "interaction_id": f.interaction_id,
+                "lead_id": f.lead_id,
+                "rating": f.rating,
+                "comment": (f.comment or "")[:200],
+                "created_at": f.created_at.isoformat() if f.created_at else None,
+            }
+            for f in low_csat
+        ],
     }

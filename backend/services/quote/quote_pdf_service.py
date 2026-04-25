@@ -106,9 +106,16 @@ def generate_quote_pdf(
     story = []
     inner_w = PAGE_W - 2 * M
 
-    # HEADER BAND
-    issued_str = quote.created_at.strftime("%-d %b %Y") if hasattr(quote.created_at, "strftime") else str(quote.created_at)[:10]
-    valid_str  = quote.valid_until.strftime("%-d %b %Y") if quote.valid_until else "—"
+    # HEADER BAND.  strftime("%-d") is GNU-only; on Windows it raises
+    # ValueError.  Use "%d" (zero-padded) and strip the leading 0 manually
+    # so the format works on Linux, macOS, and Windows.
+    def _fmt_date(dt):
+        if not hasattr(dt, "strftime"):
+            return str(dt)[:10]
+        return dt.strftime("%d %b %Y").lstrip("0")
+
+    issued_str = _fmt_date(quote.created_at)
+    valid_str  = _fmt_date(quote.valid_until) if quote.valid_until else "—"
 
     header_left = [
         [Paragraph("QUOTATION", s_h1)],

@@ -1,9 +1,11 @@
 "use client";
 
 import { useSearchParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useState } from "react";
 import { Eye, EyeOff, Loader2, Lock, Mail, ShieldCheck, User, UserPlus, Users } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+
+import { apiFetch } from "@/utils/apiFetch";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
@@ -16,7 +18,17 @@ type InviteInfo = {
     expires_at: string;
 };
 
+// Next 16 requires useSearchParams() inside a Suspense boundary so the CSR
+// bailout during prerender is explicit. Wrap the real component in one.
 export default function InviteAcceptPage() {
+    return (
+        <Suspense fallback={<div className="min-h-screen flex items-center justify-center text-slate-400">Loading…</div>}>
+            <InviteAcceptInner />
+        </Suspense>
+    );
+}
+
+function InviteAcceptInner() {
     const params = useSearchParams();
     const router = useRouter();
     const { login } = useAuth();
@@ -41,7 +53,7 @@ export default function InviteAcceptPage() {
                 return;
             }
             try {
-                const res = await fetch(`${API_BASE}/auth/invites/accept?token=${encodeURIComponent(token)}`);
+                const res = await apiFetch(`${API_BASE}/auth/invites/accept?token=${encodeURIComponent(token)}`);
                 if (!res.ok) {
                     const data = await res.json().catch(() => ({}));
                     throw new Error(data.detail || "Invalid or expired invite link.");
@@ -66,7 +78,7 @@ export default function InviteAcceptPage() {
         setLoading(true);
         setError(null);
         try {
-            const res = await fetch(`${API_BASE}/auth/invites/accept`, {
+            const res = await apiFetch(`${API_BASE}/auth/invites/accept`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -82,7 +94,7 @@ export default function InviteAcceptPage() {
             if (!res.ok) {
                 throw new Error(data.detail || "Could not accept invite.");
             }
-            login(data.access_token);
+            await login();
             router.push("/");
         } catch (err) {
             setError((err as Error).message);

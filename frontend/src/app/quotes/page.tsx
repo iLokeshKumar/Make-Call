@@ -10,10 +10,10 @@ import {
   Send,
   Trash2,
   XCircle,
-  DollarSign,
-} from "lucide-react";
+  DollarSign } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type Quote = {
@@ -56,8 +56,7 @@ function fmtAmount(amount?: number | null, currency?: string) {
   return new Intl.NumberFormat("en-IN", {
     style: "currency",
     currency: currency || "INR",
-    maximumFractionDigits: 2,
-  }).format(amount);
+    maximumFractionDigits: 2 }).format(amount);
 }
 
 const STATUS_COLORS: Record<string, string> = {
@@ -67,8 +66,7 @@ const STATUS_COLORS: Record<string, string> = {
   accepted:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300",
   rejected:    "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300",
   negotiation: "bg-violet-100 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300",
-  expired:     "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-500",
-};
+  expired:     "bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-500" };
 
 const STATUS_TABS = ["All", "Draft", "Sent", "Accepted", "Rejected", "Negotiation"];
 
@@ -77,11 +75,10 @@ const emptyItem = (): QuoteItem => ({
   sku_snapshot: "",
   quantity: 1,
   unit_price: 0,
-  discount_percent: 0,
-});
+  discount_percent: 0 });
 
 export default function QuotesPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [quotes, setQuotes] = useState<Quote[]>([]);
   const [leads, setLeads] = useState<Lead[]>([]);
@@ -114,7 +111,7 @@ export default function QuotesPage() {
   const [actionLoading, setActionLoading] = useState<Record<number, Record<string, boolean>>>({});
   const [exportLoading, setExportLoading] = useState(false);
 
-  const authHeaders = { Authorization: `Bearer ${token}`, "Content-Type": "application/json" };
+  const authHeaders = {"Content-Type": "application/json" };
 
   function showToast(msg: string, error = false) {
     setToast(msg);
@@ -123,10 +120,10 @@ export default function QuotesPage() {
   }
 
   const fetchQuotes = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/quotes`, { headers: { Authorization: `Bearer ${token}` } });
+      const res = await apiFetch(`${API_BASE}/quotes`, { });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Failed to load quotes");
       const data = await res.json();
@@ -136,13 +133,12 @@ export default function QuotesPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   const fetchLeads = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/crm/leads?page=1&limit=200`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=200`, {
       });
       if (res.ok) {
         const d = await res.json();
@@ -151,19 +147,18 @@ export default function QuotesPage() {
     } catch {
       
     }
-  }, [token]);
+  }, [user]);
 
   const fetchProducts = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/crm/products`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/products`, {
       });
       if (res.ok) setProducts(await res.json());
     } catch {
       
     }
-  }, [token]);
+  }, [user]);
 
   useEffect(() => {
     fetchQuotes();
@@ -206,8 +201,7 @@ export default function QuotesPage() {
       product_id: p.id,
       product_name_snapshot: p.name,
       sku_snapshot: p.sku,
-      unit_price: p.base_price ?? 0,
-    });
+      unit_price: p.base_price ?? 0 });
   }
 
   function removeItem(idx: number) {
@@ -222,9 +216,8 @@ export default function QuotesPage() {
     }
     setCreateSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/quotes`, {
+      const res = await apiFetch(`${API_BASE}/quotes`, {
         method: "POST",
-        headers: authHeaders,
         body: JSON.stringify({
           lead_id: selectedLeadId,
           currency,
@@ -236,10 +229,7 @@ export default function QuotesPage() {
             sku_snapshot: it.sku_snapshot?.trim() || null,
             quantity: it.quantity,
             unit_price: it.unit_price,
-            discount_percent: it.discount_percent ?? 0,
-          })),
-        }),
-      });
+            discount_percent: it.discount_percent ?? 0 })) }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -264,10 +254,8 @@ export default function QuotesPage() {
   async function handleGeneratePDF(id: number) {
     setActionLoading((a) => ({ ...a, [id]: { ...a[id], pdf: true } }));
     try {
-      const res = await fetch(`${API_BASE}/quotes/${id}/generate-pdf`, {
-        method: "POST",
-        headers: authHeaders,
-      });
+      const res = await apiFetch(`${API_BASE}/quotes/${id}/generate-pdf`, {
+        method: "POST" });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Failed to generate PDF");
       showToast("PDF generated");
@@ -282,15 +270,12 @@ export default function QuotesPage() {
     if (sendChannels.length === 0) { showToast("Select at least one channel", true); return; }
     setSendSaving(true);
     try {
-      const res = await fetch(`${API_BASE}/quotes/${id}/send`, {
+      const res = await apiFetch(`${API_BASE}/quotes/${id}/send`, {
         method: "POST",
-        headers: authHeaders,
         body: JSON.stringify({
           channels: sendChannels,
           subject: sendSubject.trim() || null,
-          message: sendMessage.trim() || null,
-        }),
-      });
+          message: sendMessage.trim() || null }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
@@ -310,12 +295,11 @@ export default function QuotesPage() {
   }
 
   async function handleExportQuoteCSV() {
-    if (!token) return;
+    if (!user) return;
     if (quotes.length === 0) { showToast("No quotes available to export", true); return; }
     setExportLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/analytics/quote/export`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/analytics/quote/export`, {
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Export failed");
@@ -339,10 +323,8 @@ export default function QuotesPage() {
   async function handleStatusChange(id: number, action: "accept" | "reject") {
     setActionLoading((a) => ({ ...a, [id]: { ...a[id], [action]: true } }));
     try {
-      const res = await fetch(`${API_BASE}/quotes/${id}/${action}`, {
-        method: "POST",
-        headers: authHeaders,
-      });
+      const res = await apiFetch(`${API_BASE}/quotes/${id}/${action}`, {
+        method: "POST" });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error(`Failed to ${action} quote`);
       showToast(`Quote ${action}ed`);

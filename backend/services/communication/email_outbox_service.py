@@ -41,6 +41,15 @@ def enqueue_email(
         if existing and existing.status != "failed":
             return existing
 
+    # Capture the current request_id (or worker trace_id) so the outbound
+    # mail row can be correlated back to the request that queued it.
+    try:
+        from utils.logger import request_id_var
+        _rid = request_id_var.get("-")
+        request_id_value = _rid if _rid and _rid != "-" else None
+    except Exception:  # noqa: BLE001
+        request_id_value = None
+
     item = EmailOutbox(
         company_id=company_id,
         actor_user_id=actor_user_id,
@@ -55,6 +64,7 @@ def enqueue_email(
         attempts=0,
         max_attempts=max_attempts,
         next_attempt_at=utc_now(),
+        request_id=request_id_value,
         created_by=actor_user_id,
         updated_by=actor_user_id,
     )

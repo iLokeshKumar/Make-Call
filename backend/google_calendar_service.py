@@ -6,7 +6,6 @@ from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from google.oauth2 import service_account
 from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as UserCredentials
 import pickle
 import requests
@@ -302,7 +301,6 @@ class GoogleMeetGenerator:
     
     def _get_calendar_service(self):
         """Get Google Calendar service object and ensure tokens are fresh/saved."""
-        from google.auth.transport.requests import Request
         from googleapiclient.discovery import build
         
         if not self.credentials:

@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Loader2, MessageSquare, Send } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type WaMessage = {
@@ -15,11 +16,10 @@ type WaMessage = {
 
 type Props = {
   leadId: number;
-  token: string;
   onSessionTimeout?: () => void;
 };
 
-export default function WhatsAppThread({ leadId, token, onSessionTimeout }: Props) {
+export default function WhatsAppThread({ leadId, onSessionTimeout }: Props) {
   const [messages, setMessages] = useState<WaMessage[]>([]);
   const [loading, setLoading] = useState(true);
   const [sendText, setSendText] = useState("");
@@ -29,8 +29,7 @@ export default function WhatsAppThread({ leadId, token, onSessionTimeout }: Prop
 
   const fetchThread = useCallback(async () => {
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/whatsapp`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/whatsapp`, {
       });
       if (res.status === 401) { onSessionTimeout?.(); return; }
       if (!res.ok) throw new Error("Failed to load thread");
@@ -41,7 +40,7 @@ export default function WhatsAppThread({ leadId, token, onSessionTimeout }: Prop
     } finally {
       setLoading(false);
     }
-  }, [leadId, token, onSessionTimeout]);
+  }, [leadId, onSessionTimeout]);
 
   useEffect(() => { fetchThread(); }, [fetchThread]);
   useEffect(() => {
@@ -54,11 +53,10 @@ export default function WhatsAppThread({ leadId, token, onSessionTimeout }: Prop
     setSending(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/whatsapp/send`, {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/whatsapp/send`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ message: sendText.trim() }),
-      });
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ message: sendText.trim() }) });
       if (res.status === 401) { onSessionTimeout?.(); return; }
       if (!res.ok) {
         const payload = await res.json();
@@ -77,8 +75,7 @@ export default function WhatsAppThread({ leadId, token, onSessionTimeout }: Prop
     if (!ts) return "";
     return new Date(ts).toLocaleString(undefined, {
       month: "short", day: "numeric",
-      hour: "2-digit", minute: "2-digit",
-    });
+      hour: "2-digit", minute: "2-digit" });
   }
 
   return (

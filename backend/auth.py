@@ -8,19 +8,126 @@ import bcrypt
 import jwt
 import pyotp
 import qrcode
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlmodel import Session
 
+from csrf import (
+    CSRF_BYPASS_PREFIXES,
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    SESSION_COOKIE_NAME,
+    generate_csrf_token,
+    verify_csrf_invariants,
+)
 from database import get_session
 from models.models import User
 from services.core.auth_service import get_user_permission_keys
+
+
+__all__ = [
+    "ACCESS_TOKEN_EXPIRE_MINUTES",
+    "ALGORITHM",
+    "CSRF_BYPASS_PREFIXES",
+    "CSRF_COOKIE_NAME",
+    "CSRF_HEADER_NAME",
+    "PermissionChecker",
+    "SECRET_KEY",
+    "SESSION_COOKIE_NAME",
+    "clear_auth_cookie",
+    "clear_csrf_cookie",
+    "create_access_token",
+    "generate_csrf_token",
+    "generate_mfa_qr_base64",
+    "generate_mfa_secret",
+    "get_current_active_user",
+    "get_current_user",
+    "get_mfa_provisioning_uri",
+    "get_password_hash",
+    "oauth2_scheme",
+    "set_auth_cookie",
+    "set_csrf_cookie",
+    "validate_password_rules",
+    "verify_csrf_invariants",
+    "verify_mfa_token",
+    "verify_password",
+]
 
 SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token")
+# OAuth2 scheme stays for OpenAPI docs + bearer-token clients (mobile, scripts). `auto_error=False` makes the header optional so we can fall back to a cookie.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token", auto_error=False)
+
+
+def set_auth_cookie(response: Response, token: str) -> None:
+    """Store the session JWT as an httpOnly cookie.
+
+    httpOnly blocks JavaScript access (XSS can't exfiltrate the token).
+    Secure restricts to HTTPS in production (set COOKIE_SECURE=0 for local dev).
+    SameSite=Lax blocks classic CSRF on cross-site form posts while still
+    allowing top-level navigation to carry the cookie.
+    """
+    secure = os.getenv("COOKIE_SECURE", "1") == "1"
+    samesite = os.getenv("COOKIE_SAMESITE", "lax").lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    domain = os.getenv("COOKIE_DOMAIN") or None
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        domain=domain,
+        path="/",
+    )
+
+
+def clear_auth_cookie(response: Response) -> None:
+    """Remove the session cookie. Used on /auth/logout."""
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        domain=os.getenv("COOKIE_DOMAIN") or None,
+    )
+
+
+def set_csrf_cookie(response: Response, token: str) -> None:
+    """Set the CSRF double-submit cookie alongside the session cookie.
+
+    Non-httpOnly on purpose — the SPA reads this cookie with JavaScript and
+    echoes the value back in the `X-CSRF-Token` header. The session cookie
+    stays httpOnly; only the CSRF token is JS-readable. That pairing is what
+    makes the pattern XSS-resistant (attacker can read the CSRF cookie but
+    not the session cookie that carries auth).
+    """
+    secure = os.getenv("COOKIE_SECURE", "1") == "1"
+    samesite = os.getenv("COOKIE_SAMESITE", "lax").lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    domain = os.getenv("COOKIE_DOMAIN") or None
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        httponly=False, # intentional — SPA must read this
+        secure=secure,
+        samesite=samesite,
+        domain=domain,
+        path="/",
+    )
+
+
+def clear_csrf_cookie(response: Response) -> None:
+    """Remove the CSRF cookie. Call alongside clear_auth_cookie on logout."""
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path="/",
+        domain=os.getenv("COOKIE_DOMAIN") or None,
+    )
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
@@ -75,14 +182,24 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 
 
 async def get_current_user(
-    token: str = Depends(oauth2_scheme),
+    request: Request,
+    header_token: Optional[str] = Depends(oauth2_scheme),
     session: Session = Depends(get_session),
 ) -> User:
+    """Resolve the authenticated user from a session cookie or bearer header.
+
+    The cookie takes precedence so frontends can migrate fetch-by-fetch
+    without a flag day. Both paths decode the same JWT.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+    token = request.cookies.get(SESSION_COOKIE_NAME) or header_token
+    if not token:
+        raise credentials_exception
 
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])

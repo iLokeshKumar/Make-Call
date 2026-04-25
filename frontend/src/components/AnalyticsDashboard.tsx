@@ -4,10 +4,10 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useAuth } from "@/context/AuthContext";
 import {
   Activity, RefreshCw, Mic, Brain, Volume2,
-  TrendingDown, TrendingUp, Phone,
-} from "lucide-react";
+  TrendingDown, TrendingUp, Phone } from "lucide-react";
 import clsx from "clsx";
 
+import { apiFetch } from "@/utils/apiFetch";
 // Types
 
 interface EngineRow {
@@ -86,8 +86,7 @@ const ENGINE_COLORS: Record<string, string> = {
   "deepgram-mistral-cartesia":  "#60a5fa",
   "deepgram-mistral-deepgram":  "#818cf8",
   "sarvam-cerebras-sarvam":     "#fbbf24",
-  "cartesia-mistral-cartesia":  "#f87171",
-};
+  "cartesia-mistral-cartesia":  "#f87171" };
 
 const engineColor = (e: string) => {
   if (ENGINE_COLORS[e]) return ENGINE_COLORS[e];
@@ -147,8 +146,7 @@ function Pulse() {
 }
 
 function KpiCard({
-  label, value, sub, color, icon: Icon,
-}: { label: string; value: string; sub?: string; color: string; icon: React.ElementType }) {
+  label, value, sub, color, icon: Icon }: { label: string; value: string; sub?: string; color: string; icon: React.ElementType }) {
   return (
     <div
       className="glass rounded-2xl p-5 border border-white/10"
@@ -171,7 +169,7 @@ function KpiCard({
 // Main Component
 
 export default function AnalyticsDashboard() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const [data, setData]             = useState<AnalyticsData | null>(null);
   const [loading, setLoading]       = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -197,15 +195,14 @@ export default function AnalyticsDashboard() {
   const API_BASE = "http://localhost:6060";
 
   const loadSummary = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setSummaryLoading(true);
     try {
       let url = `${API_BASE}/analytics/engagement-summary?days=${days}`;
       if (days === 0 && startDate && endDate) {
         url = `${API_BASE}/analytics/engagement-summary?start_date=${startDate}&end_date=${endDate}`;
       }
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(url, {
       });
       if (res.status === 401) {
         sessionTimeout();
@@ -217,18 +214,17 @@ export default function AnalyticsDashboard() {
     } finally {
       setSummaryLoading(false);
     }
-  }, [token, days, startDate, endDate, sessionTimeout]);
+  }, [user, days, startDate, endDate, sessionTimeout]);
 
   const load = useCallback(async (silent = false) => {
-    if (!token) return;
+    if (!user) return;
     silent ? setRefreshing(true) : setLoading(true);
     try {
       let url = `${API_BASE}/analytics/latency?days=${days}`;
       if (days === 0 && startDate && endDate) {
         url = `${API_BASE}/analytics/latency?start_date=${startDate}&end_date=${endDate}`;
       }
-      const res = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(url, {
       });
       if (res.status === 401) {
         sessionTimeout();
@@ -238,13 +234,12 @@ export default function AnalyticsDashboard() {
     } finally {
       setLoading(false); setRefreshing(false);
     }
-  }, [token, days, startDate, endDate]);
+  }, [user, days, startDate, endDate]);
 
   const loadAlerts = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     try {
-      const res = await fetch(`${API_BASE}/analytics/alerts`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/analytics/alerts`, {
       });
       if (res.status === 401) {
         sessionTimeout();
@@ -256,26 +251,22 @@ export default function AnalyticsDashboard() {
     } catch (err) {
       console.error("Failed to load alerts", err);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   const createAlert = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setAlertLoading(true);
     setAlertMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/analytics/alerts`, {
+      const res = await apiFetch(`${API_BASE}/analytics/alerts`, {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
+          "Content-Type": "application/json" },
         body: JSON.stringify({
           metric: alertMetric,
           threshold: alertThreshold,
           direction: alertDirection,
-          channel: alertChannel,
-        }),
-      });
+          channel: alertChannel }) });
       if (res.status === 401) {
         sessionTimeout();
         return;
@@ -290,16 +281,15 @@ export default function AnalyticsDashboard() {
     } finally {
       setAlertLoading(false);
     }
-  }, [alertChannel, alertDirection, alertMetric, alertThreshold, loadAlerts, sessionTimeout, token]);
+  }, [alertChannel, alertDirection, alertMetric, alertThreshold, loadAlerts, sessionTimeout, user]);
 
   const evaluateAlerts = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setAlertLoading(true);
     setAlertMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/analytics/alerts/evaluate`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/analytics/alerts/evaluate`, {
+        method: "POST"
       });
       if (res.status === 401) {
         sessionTimeout();
@@ -320,7 +310,7 @@ export default function AnalyticsDashboard() {
     } finally {
       setAlertLoading(false);
     }
-  }, [loadAlerts, sessionTimeout, token]);
+  }, [loadAlerts, sessionTimeout, user]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => {

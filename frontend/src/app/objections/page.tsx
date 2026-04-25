@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState } from "react";
 import { BookOpen, Edit3, Plus, Save, Trash2, X, Loader2, Shield, TrendingUp } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type Objection = {
@@ -21,8 +22,7 @@ const CATEGORY_CONFIG: Record<string, { label: string; cls: string }> = {
   competitor: { label: "Competitor", cls: "bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-300" },
   timing:     { label: "Timing",     cls: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300" },
   need:       { label: "Need",       cls: "bg-blue-100 text-blue-700 dark:bg-blue-500/10 dark:text-blue-300" },
-  general:    { label: "General",    cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" },
-};
+  general:    { label: "General",    cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" } };
 
 const CATEGORIES = ["price", "competitor", "timing", "need", "general"];
 
@@ -36,7 +36,7 @@ function CategoryPill({ category }: { category: string }) {
 }
 
 export default function ObjectionsPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
   const [objections, setObjections] = useState<Objection[]>([]);
   const [loading, setLoading] = useState(true);
   const [filterCategory, setFilterCategory] = useState<string>("all");
@@ -51,17 +51,15 @@ export default function ObjectionsPage() {
     objection_key: "",
     objection_text: "",
     category: "general",
-    rebuttal: "",
-  });
+    rebuttal: "" });
   const [creating, setCreating] = useState(false);
 
   const fetchObjections = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setLoading(true);
     try {
       const params = filterCategory !== "all" ? `?category=${filterCategory}` : "";
-      const res = await fetch(`${API_BASE}/crm/objections${params}`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/objections${params}`, {
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Failed to load objections");
@@ -70,25 +68,23 @@ export default function ObjectionsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout, filterCategory]);
+  }, [user, sessionTimeout, filterCategory]);
 
   useEffect(() => { fetchObjections(); }, [fetchObjections]);
 
   async function handleSaveEdit(id: number) {
-    if (!token) return;
+    if (!user) return;
     setSaving(true);
     setMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/crm/objections/${id}`, {
+      const res = await apiFetch(`${API_BASE}/crm/objections/${id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           objection_text: editDraft.objection_text,
           category: editDraft.category,
           rebuttal: editDraft.rebuttal || null,
-          is_active: editDraft.is_active,
-        }),
-      });
+          is_active: editDraft.is_active }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Update failed");
       const updated = await res.json();
@@ -103,11 +99,10 @@ export default function ObjectionsPage() {
   }
 
   async function handleDelete(id: number) {
-    if (!token || !window.confirm("Delete this objection entry?")) return;
+    if (!user || !window.confirm("Delete this objection entry?")) return;
     try {
-      const res = await fetch(`${API_BASE}/crm/objections/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/objections/${id}`, {
+        method: "DELETE"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       setObjections((prev) => prev.filter((o) => o.id !== id));
@@ -118,20 +113,18 @@ export default function ObjectionsPage() {
 
   async function handleCreate(e: React.FormEvent) {
     e.preventDefault();
-    if (!token || !newForm.objection_key || !newForm.objection_text) return;
+    if (!user || !newForm.objection_key || !newForm.objection_text) return;
     setCreating(true);
     setMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/crm/objections`, {
+      const res = await apiFetch(`${API_BASE}/crm/objections`, {
         method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           objection_key: newForm.objection_key.toLowerCase().trim(),
           objection_text: newForm.objection_text.trim(),
           category: newForm.category,
-          rebuttal: newForm.rebuttal.trim() || null,
-        }),
-      });
+          rebuttal: newForm.rebuttal.trim() || null }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
         const payload = await res.json();
@@ -179,8 +172,7 @@ export default function ObjectionsPage() {
             value: objections[0]
               ? `${objections[0].frequency_count}×`
               : "—",
-            icon: TrendingUp,
-          },
+            icon: TrendingUp },
         ].map(({ label, value, icon: Icon }) => (
           <div
             key={label}

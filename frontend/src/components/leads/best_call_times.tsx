@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Clock, Loader2, RefreshCw, TrendingUp } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type Window = {
@@ -22,7 +23,6 @@ type BestCallData = {
 
 type Props = {
   leadId: number;
-  token: string;
   onSessionTimeout?: () => void;
   onScheduleCall?: (dt: string) => void;
 };
@@ -43,11 +43,10 @@ function formatSlot(iso: string): { date: string; time: string } {
   const d = new Date(iso);
   return {
     date: d.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" }),
-    time: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }),
-  };
+    time: d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" }) };
 }
 
-export default function BestCallTimes({ leadId, token, onSessionTimeout, onScheduleCall }: Props) {
+export default function BestCallTimes({ leadId, onSessionTimeout, onScheduleCall }: Props) {
   const [data, setData] = useState<BestCallData | null>(null);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -57,9 +56,9 @@ export default function BestCallTimes({ leadId, token, onSessionTimeout, onSched
       if (!quiet) setLoading(true);
       else setRefreshing(true);
       try {
-        const res = await fetch(
+        const res = await apiFetch(
           `${API_BASE}/crm/leads/${leadId}/best-call-times?n_windows=5&lookahead_hours=72`,
-          { headers: { Authorization: `Bearer ${token}` } }
+          { }
         );
         if (res.status === 401) { onSessionTimeout?.(); return; }
         if (!res.ok) return;
@@ -69,7 +68,7 @@ export default function BestCallTimes({ leadId, token, onSessionTimeout, onSched
         setRefreshing(false);
       }
     },
-    [leadId, token, onSessionTimeout]
+    [leadId, onSessionTimeout]
   );
 
   useEffect(() => { fetchWindows(); }, [fetchWindows]);

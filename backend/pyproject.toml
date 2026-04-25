@@ -1,0 +1,44 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 120
+extend-exclude = [
+  "__pycache__",
+  ".venv",
+  "venv",
+  "migrations",
+]
+
+[tool.ruff.lint]
+# Start narrow: catch real runtime bugs, not style.
+# Future PRs can widen this set without forcing a one-shot cleanup.
+select = [
+  "E9",      # syntax errors
+  "F63",     # invalid pytest comparisons
+  "F7",      # invalid uses of comprehensions / list / dict
+  "F82",     # undefined names in __all__
+  "F821",    # undefined name (e.g. forgot to import)
+  "F823",    # local var referenced before assignment
+  "F811",    # redefinition of unused name (duplicate imports etc.)
+  "F501",    # invalid % format
+  "F601",    # repeated dict key
+  "F602",    # repeated dict key in update
+  "F621",    # too many expressions in starred assignment
+  "F622",    # two starred expressions
+  "F631",    # assert tuple — always True
+  "F632",    # use of == on literals (e.g. is None vs == None)
+  "F633",    # use of >> with print
+  "F634",    # if tuple — always True
+  "F701",    # break outside loop
+  "F702",    # continue outside loop
+  "F704",    # yield/await outside function
+  "F706",    # return outside function
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests do sys.path manipulation before imports.
+"test/**/*.py" = ["E402"]
+
+[tool.ruff.format]
+# Disabled — reformatting the codebase is a separate decision.
+# Run `ruff format` manually when the team is ready.
+quote-style = "double"

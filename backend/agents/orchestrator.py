@@ -47,6 +47,18 @@ _AGENT_MODULES: dict[str, str] = {
     "campaign":   "agents.campaign",
     "quote":      "agents.quote",
     "analytics":  "agents.analytics",
+    # Side-effecting send executor — invoked by the worker when it claims an
+    # AgentTask with assigned_agent="send". Not LLM-driven; just dispatches
+    # to communication_service based on task_type.
+    "send":       "agents.send",
+    # Webhook audit sink — Phase 1 no-op; Phase 2 (Week 3+) replaces with
+    # per-event-type handlers reading from AgentTask.input_json["payload"].
+    "webhook_sink": "agents.webhook_sink",
+    # Week 7 — three-agent split. outreacher + closer carry ISM dispatch + deal
+    # closure; reply_classifier buckets inbound replies into roadmap intents.
+    "outreacher":       "agents.outreacher",
+    "closer":           "agents.closer",
+    "reply_classifier": "agents.reply_classifier",
 }
 
 

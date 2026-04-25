@@ -11,10 +11,10 @@ import {
   Plus,
   Search,
   Trash2,
-  Users,
-} from "lucide-react";
+  Users } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 // Types
@@ -54,8 +54,7 @@ const emptyForm: AccountForm = {
   country: "",
   employee_count: "",
   notes: "",
-  is_active: true,
-};
+  is_active: true };
 
 // Helpers
 
@@ -69,8 +68,7 @@ function formToPayload(f: AccountForm): Record<string, unknown> {
     ...(f.country.trim() && { country: f.country.trim() }),
     ...(f.employee_count && { employee_count: Number(f.employee_count) }),
     ...(f.notes.trim() && { notes: f.notes.trim() }),
-    is_active: f.is_active,
-  };
+    is_active: f.is_active };
 }
 
 function accountToForm(a: Account): AccountForm {
@@ -83,8 +81,7 @@ function accountToForm(a: Account): AccountForm {
     country: a.country ?? "",
     employee_count: a.employee_count != null ? String(a.employee_count) : "",
     notes: a.notes ?? "",
-    is_active: a.is_active,
-  };
+    is_active: a.is_active };
 }
 
 function locationString(a: Account): string {
@@ -94,11 +91,7 @@ function locationString(a: Account): string {
 // Account Card
 
 function AccountCard({
-  account,
-  onEdit,
-  onDelete,
-  deleting,
-}: {
+  account, onEdit, onDelete, deleting }: {
   account: Account;
   onEdit: (a: Account) => void;
   onDelete: (id: number) => void;
@@ -208,14 +201,7 @@ function AccountCard({
 // Form Panel
 
 function AccountFormPanel({
-  form,
-  saving,
-  editId,
-  onChange,
-  onSave,
-  onCancel,
-  error,
-}: {
+  form, saving, editId, onChange, onSave, onCancel, error }: {
   form: AccountForm;
   saving: boolean;
   editId: number | null;
@@ -389,7 +375,7 @@ function AccountFormPanel({
 // Main Page
 
 export default function AccountsPage() {
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
@@ -408,11 +394,10 @@ export default function AccountsPage() {
   // Fetch accounts
 
   const fetchAccounts = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API_BASE}/crm/accounts`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/accounts`, {
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (res.status === 404 || res.status === 405) {
@@ -430,7 +415,7 @@ export default function AccountsPage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
     fetchAccounts();
@@ -467,7 +452,7 @@ export default function AccountsPage() {
   // Save
 
   async function handleSave() {
-    if (!token || !form.name.trim()) return;
+    if (!user || !form.name.trim()) return;
     setSaving(true);
     setSaveError(null);
     const payload = formToPayload(form);
@@ -476,14 +461,11 @@ export default function AccountsPage() {
         ? `${API_BASE}/crm/accounts/${editId}`
         : `${API_BASE}/crm/accounts`;
       const method = editId ? "PATCH" : "POST";
-      const res = await fetch(url, {
+      const res = await apiFetch(url, {
         method,
         headers: {
-          Authorization: `Bearer ${token}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify(payload),
-      });
+          "Content-Type": "application/json" },
+        body: JSON.stringify(payload) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
         const body = await res.json().catch(() => ({}));
@@ -504,13 +486,12 @@ export default function AccountsPage() {
   // Delete
 
   async function handleDelete(id: number) {
-    if (!token) return;
+    if (!user) return;
     if (!window.confirm("Delete this account? This action cannot be undone.")) return;
     setDeletingId(id);
     try {
-      const res = await fetch(`${API_BASE}/crm/accounts/${id}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/accounts/${id}`, {
+        method: "DELETE"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error(`Server ${res.status}`);

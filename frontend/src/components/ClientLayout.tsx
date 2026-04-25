@@ -15,6 +15,7 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
         pathname === "/register" ||
         pathname === "/invite/accept" ||
         pathname.startsWith("/q/") ||         // public quote view
+        pathname.startsWith("/quote/") ||     // legacy public quote view
         pathname.startsWith("/feedback/");    // public CSAT feedback
 
     useEffect(() => {
@@ -32,7 +33,10 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     }
 
     if (isAuthPage) {
-        return <>{children}</>;
+        // Body is flex/overflow-hidden for the CRM shell; public pages need their
+        // own scroll container so forms and quote screens longer than the viewport
+        // aren't clipped.
+        return <div className="h-screen w-full overflow-y-auto">{children}</div>;
     }
 
     return (

@@ -1,10 +1,12 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { ArrowLeft, Loader2, Phone, RefreshCw } from "lucide-react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 const ISM_STAGES = [
@@ -40,57 +42,60 @@ function ScoreDot({ score }: { score?: number | null }) {
 }
 
 export default function KanbanPage() {
-  const { token, sessionTimeout } = useAuth();
-  const [leads, setLeads] = useState<Lead[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [updating, setUpdating] = useState<number | null>(null);
+  const { user, sessionTimeout } = useAuth();
+  const qc = useQueryClient();
 
   // drag state
   const dragLeadId   = useRef<number | null>(null);
   const dragFromStage = useRef<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
-  const fetchLeads = useCallback(async () => {
-    if (!token) return;
-    setLoading(true);
-    try {
-      const res = await fetch(`${API_BASE}/crm/leads?page=1&limit=500`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.status === 401) { sessionTimeout(); return; }
+  const leadsQuery = useQuery<{ items: Lead[] }>({
+    queryKey: ["kanban-leads"],
+    enabled: !!user,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=500`);
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
       if (!res.ok) throw new Error("Failed to load leads");
-      const data = await res.json();
-      setLeads(data.items ?? []);
-    } finally {
-      setLoading(false);
-    }
-  }, [token, sessionTimeout]);
+      return res.json();
+    },
+  });
+  const leads = leadsQuery.data?.items ?? [];
+  const loading = leadsQuery.isLoading;
 
-  useEffect(() => { fetchLeads(); }, [fetchLeads]);
-
-  async function moveLeadToStage(leadId: number, stage: StageKey) {
-    if (!token) return;
-    setUpdating(leadId);
-    // Optimistic update
-    setLeads((prev) =>
-      prev.map((l) => (l.id === leadId ? { ...l, ism_stage: stage } : l))
-    );
-    try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}`, {
+  const moveMutation = useMutation({
+    mutationFn: async ({ leadId, stage }: { leadId: number; stage: StageKey }) => {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ ism_stage: stage }),
       });
-      if (res.status === 401) { sessionTimeout(); return; }
-      if (!res.ok) {
-        // Roll back
-        await fetchLeads();
-      }
-    } catch {
-      await fetchLeads();
-    } finally {
-      setUpdating(null);
-    }
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+      if (!res.ok) throw new Error("patch failed");
+      return res.json();
+    },
+    onMutate: async ({ leadId, stage }) => {
+      await qc.cancelQueries({ queryKey: ["kanban-leads"] });
+      const snapshot = qc.getQueryData<{ items: Lead[] }>(["kanban-leads"]);
+      qc.setQueryData<{ items: Lead[] } | undefined>(["kanban-leads"], (prev) =>
+        prev ? { ...prev, items: prev.items.map((l) => (l.id === leadId ? { ...l, ism_stage: stage } : l)) } : prev,
+      );
+      return { snapshot };
+    },
+    onError: (_err, _vars, ctx) => {
+      if (ctx?.snapshot) qc.setQueryData(["kanban-leads"], ctx.snapshot);
+    },
+    onSettled: () => qc.invalidateQueries({ queryKey: ["kanban-leads"] }),
+  });
+
+  const updating = moveMutation.isPending ? moveMutation.variables?.leadId ?? null : null;
+
+  function moveLeadToStage(leadId: number, stage: StageKey) {
+    moveMutation.mutate({ leadId, stage });
+  }
+
+  function fetchLeads() {
+    qc.invalidateQueries({ queryKey: ["kanban-leads"] });
   }
 
   function onDragStart(leadId: number, stage: string) {

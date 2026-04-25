@@ -28,6 +28,7 @@ from services.agent.agent_approval_service import (
     get_pending,
     reject,
 )
+from services.agent.approval_presenter import present
 
 router = APIRouter(prefix="/agent-tasks", tags=["Agent Tasks"])
 
@@ -103,10 +104,33 @@ async def list_pending_approvals(
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("agent.review")),
 ):
-    """Return all actions currently awaiting human approval."""
+    """Return all actions currently awaiting human approval.
+
+    Each item includes a `presentation` field produced by approval_presenter
+    with human-readable title/description/preview/warnings. The original
+    `action_payload` is preserved under that key for power-user access.
+    """
     # Expire stale approvals first so the list is always fresh
     expire_stale(session=session, company_id=current_user.company_id)
-    return get_pending(session=session, company_id=current_user.company_id, skip=skip, limit=limit)
+    items = get_pending(session=session, company_id=current_user.company_id, skip=skip, limit=limit)
+
+    # Enrich each approval with a presenter-rendered view. The presenter is
+    # pure + defensive — never raises — so this is safe inline.
+    task_type_for = {
+        it["task_id"]: (it.get("task") or {}).get("task_type") or it.get("action_type")
+        for it in items
+    }
+    for it in items:
+        tt = task_type_for.get(it["task_id"]) or it.get("action_type") or ""
+        lead_id = (it.get("task") or {}).get("lead_id")
+        it["presentation"] = present(
+            task_type=tt,
+            input_json=it.get("action_payload") or {},
+            company_id=current_user.company_id,
+            lead_id=lead_id,
+            session=session,
+        )
+    return items
 
 
 @router.get("/{task_id}")

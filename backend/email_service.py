@@ -44,9 +44,9 @@ def _markdown_table_to_html(text: str) -> str:
     Must run BEFORE newline→<br> conversion.
     """
     _TABLE_RE = re.compile(
-        r'(^\|.+\|[ \t]*\n'          # header row
-        r'\|[\s:|-]+\|[ \t]*\n'      # separator row (dashes, colons, pipes)
-        r'(?:\|.+\|[ \t]*\n?)+)',     # one or more data rows
+        r'(^\|.+\|[ \t]*\n'
+        r'\|[\s:|-]+\|[ \t]*\n'
+        r'(?:\|.+\|[ \t]*\n?)+)',
         re.MULTILINE,
     )
 
@@ -255,6 +255,14 @@ def send_smtp_email(
         message["From"] = f"Rio from {company_name} <{smtp_from_email}>"
         message["To"] = to_email
         message["Subject"] = subject
+        # Stamp the request_id (or worker trace_id) on the outbound mail so a support ticket → backend log walk works in either direction.  Falls back to "-" when no request context is set.
+        try:
+            from utils.logger import request_id_var
+            req_id = request_id_var.get("-")
+            if req_id and req_id != "-":
+                message["X-Request-Id"] = req_id
+        except Exception:  # noqa: BLE001
+            pass
         message.attach(MIMEText(body, "plain"))
         if html_body:
             message.attach(MIMEText(html_body, "html"))

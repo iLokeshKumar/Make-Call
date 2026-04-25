@@ -32,7 +32,7 @@ class Company(AuditMixin, table=True):
     status: str = Field(default="active", max_length=30)
     subscription_tier: str = Field(default="starter", max_length=50)
     max_users: int = Field(default=10)
-    # Contact & address details (used on quotes, invoices)
+    
     contact_email: Optional[str] = Field(default=None, max_length=255)
     phone: Optional[str] = Field(default=None, max_length=30)
     address: Optional[str] = Field(default=None, max_length=400)
@@ -215,10 +215,10 @@ class Lead(AuditMixin, table=True):
     )
     ism_stage: Optional[str] = Field(default="new", max_length=50)
     preferred_language: Optional[str] = Field(default="en", max_length=10)
-    # e.g. "en", "hi", "ta", "te", "kn", "mr", "gu", "bn", "pa", "ml"
+
     company_name: Optional[str] = Field(default=None, max_length=200)
     designation: Optional[str] = Field(default=None, max_length=150)
-    # B2B billing details for quotes
+
     billing_address: Optional[str] = Field(default=None, max_length=400)
     pincode: Optional[str] = Field(default=None, max_length=20)
     gst_number: Optional[str] = Field(default=None, max_length=50)
@@ -1043,6 +1043,36 @@ class EmailOutbox(AuditMixin, table=True):
     sent_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     last_issue: Optional[str] = None
 
+    # Distributed tracing — request_id_var (or worker trace_id) at enqueue time.
+    # Lets a support ticket → outbound email → backend log walk work in either
+    # direction.  Indexed for fast lookup when a customer cites the
+    # X-Request-Id header from their copy of the email.
+    request_id: Optional[str] = Field(default=None, max_length=64, index=True)
+
+
+class UiLatencyLog(SQLModel, table=True):
+    """Frontend timing beacon for SLO #2 (login → dashboard p95).
+
+    Populated by the apiFetch beacon at `frontend/src/utils/uiLatency.ts`
+    on `window.load` of `/`.  Cookie-auth only.  No PII.
+    """
+    __tablename__ = "ui_latency_log"
+    __table_args__ = (
+        Index("ix_ui_latency_log_company_created", "company_id", "created_at"),
+        Index("ix_ui_latency_log_route_event", "route", "event"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    route: str = Field(max_length=120)              # "/" | "/leads" etc.
+    event: str = Field(max_length=20)               # "ttfb" | "fmp" | "tti"
+    duration_ms: int
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
 
 class FeedbackPublicAudit(SQLModel, table=True):
     __tablename__ = "feedback_public_audit"
@@ -1163,6 +1193,12 @@ class AgentTask(AuditMixin, table=True):
     # Deduplication
     idempotency_key: Optional[str] = Field(default=None, max_length=200, index=True)
 
+    # Distributed tracing — inherited from request_id_var when the task is
+    # created inside an HTTP request, or from the parent task's trace when
+    # an executor enqueues a sub-task.  See
+    # services/agent/agent_task_service.create_agent_task.
+    trace_id: Optional[str] = Field(default=None, max_length=64, index=True)
+
     # Retry
     attempts: int = Field(default=0)
     max_attempts: int = Field(default=3)
@@ -1243,6 +1279,58 @@ class CompanyFeatureFlag(SQLModel, table=True):
         default_factory=utc_now,
         sa_column=Column(DateTime(timezone=True), nullable=False),
     )
+
+
+class IsmRule(AuditMixin, table=True):
+    """
+    ISM rule — data-driven override for stage-based channel selection.
+
+    When the ISM orchestrator evaluates a lead, it first consults the ordered
+    list of active rules. The first rule whose `when_json` conditions match
+    fires its `then_action`. Rules replace "add a new elif in Python and
+    redeploy" with "ops inserts a row."
+
+    Example:
+        priority=10  name="vip_high_budget"
+        when_json={"stage": "engaged", "budget_usd_min": 50000}
+        then_action="dispatch:send_quote"
+
+        priority=20  name="stuck_lead_handoff"
+        when_json={"stage": "negotiation", "days_since_contact_min": 7}
+        then_action="handoff_to_human"
+
+    when_json DSL (all optional, AND-combined):
+        stage: str                              — exact match on Lead.ism_stage
+        stages: list[str]                       — any match
+        budget_usd_min: int                     — LeadRequirement.budget_range ≥ this
+        budget_usd_max: int                     — ≤ this
+        urgency: str in {urgent, routine}       — classified from timeline
+        days_since_contact_min: int             — lead.last_outreach_at at-least N days ago
+        days_since_contact_max: int             — at-most
+        has_email: bool                         — lead.email non-empty
+        has_phone: bool                         — lead.normalized_phone non-empty
+        lead_score_min: float                   — Lead.lead_score ≥ this
+        lead_score_max: float                   — ≤ this
+
+    then_action format:
+        "advance_to:<stage>"                    — transition lead to <stage>
+        "dispatch:<task_type>"                  — enqueue an agent task
+        "handoff_to_human"                      — create approval task, stop
+        "skip"                                  — no-op (useful for testing)
+    """
+    __tablename__ = "ism_rules"
+    __table_args__ = (
+        Index("ix_ism_rules_company_active_priority", "company_id", "is_active", "priority"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    name: str = Field(max_length=200)
+    description: Optional[str] = None
+    priority: int = Field(default=10)
+    when_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    then_action: str = Field(max_length=200)
+    is_active: bool = Field(default=True)
 
 
 class FeedbackCreate(SQLModel):

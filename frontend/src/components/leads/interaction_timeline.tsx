@@ -46,7 +46,7 @@ export default function InteractionTimeline({ items }: InteractionTimelineProps)
                   <p className="font-medium text-slate-900 dark:text-white">{item.title}</p>
                   <span className="text-xs text-slate-400 dark:text-slate-500">{formatDate(item.timestamp)}</span>
                 </div>
-                {item.subtitle && <p className="mt-1 text-sm text-slate-600 dark:text-slate-300">{item.subtitle}</p>}
+                {item.subtitle && <p className="mt-1 whitespace-pre-line text-sm text-slate-600 dark:text-slate-300">{item.subtitle}</p>}
               </div>
             </div>
           ))

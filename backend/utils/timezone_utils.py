@@ -6,24 +6,24 @@ import datetime
 
 # Country ISO-2 / common name → IANA timezone
 _COUNTRY_TZ: dict[str, str] = {
-    # South Asia
+
     "IN": "Asia/Kolkata",  "INDIA": "Asia/Kolkata",
     "LK": "Asia/Colombo", "BD": "Asia/Dhaka", "PK": "Asia/Karachi",
     "NP": "Asia/Kathmandu",
-    # Southeast / East Asia
+
     "SG": "Asia/Singapore", "MY": "Asia/Kuala_Lumpur",
     "PH": "Asia/Manila",    "TH": "Asia/Bangkok",
     "ID": "Asia/Jakarta",   "VN": "Asia/Ho_Chi_Minh",
     "CN": "Asia/Shanghai",  "HK": "Asia/Hong_Kong",
     "TW": "Asia/Taipei",    "JP": "Asia/Tokyo",
     "KR": "Asia/Seoul",
-    # Middle East
+
     "AE": "Asia/Dubai",   "UAE": "Asia/Dubai",
     "SA": "Asia/Riyadh",  "QA": "Asia/Qatar",
     "KW": "Asia/Kuwait",  "BH": "Asia/Bahrain",
     "OM": "Asia/Muscat",  "JO": "Asia/Amman",
     "IL": "Asia/Jerusalem","EG": "Africa/Cairo",
-    # Europe
+
     "GB": "Europe/London", "UK": "Europe/London",
     "IE": "Europe/Dublin", "PT": "Europe/Lisbon",
     "FR": "Europe/Paris",  "DE": "Europe/Berlin",
@@ -35,13 +35,13 @@ _COUNTRY_TZ: dict[str, str] = {
     "PL": "Europe/Warsaw", "CZ": "Europe/Prague",
     "RO": "Europe/Bucharest", "GR": "Europe/Athens",
     "TR": "Europe/Istanbul",  "RU": "Europe/Moscow",
-    # Americas
+
     "US": "America/New_York",  "CA": "America/Toronto",
     "MX": "America/Mexico_City", "BR": "America/Sao_Paulo",
     "AR": "America/Argentina/Buenos_Aires",
     "CL": "America/Santiago",  "CO": "America/Bogota",
     "PE": "America/Lima",
-    # Africa / Oceania
+
     "ZA": "Africa/Johannesburg", "NG": "Africa/Lagos",
     "KE": "Africa/Nairobi",
     "AU": "Australia/Sydney",  "NZ": "Pacific/Auckland",
@@ -60,7 +60,6 @@ _INDIA_STATE_TZ: dict[str, str] = {
     ]
 }
 
-# Well-known city → timezone for ambiguous cases
 _CITY_TZ: dict[str, str] = {
     "chennai": "Asia/Kolkata", "mumbai": "Asia/Kolkata", "delhi": "Asia/Kolkata",
     "bangalore": "Asia/Kolkata", "bengaluru": "Asia/Kolkata", "hyderabad": "Asia/Kolkata",
@@ -131,27 +130,105 @@ def get_company_timezone_from_login_history(session, company_id: int) -> str | N
     return None
 
 
-_BUSINESS_START = 9   # 09:00 local
-_BUSINESS_END   = 20  # 20:00 local  (8 pm)
+# Defaults are re-read every call so env changes take effect without restart in dev.  Cheap: two dict lookups per guard invocation.
+_BUSINESS_START_DEFAULT = 9
+_BUSINESS_END_DEFAULT = 22
+_SUNDAY_BLOCKED_DEFAULT = True
+
+
+def _parse_int(raw, default: int) -> int:
+    if raw is None or str(raw).strip() == "":
+        return default
+    try:
+        return int(str(raw).strip())
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_bool(raw, default: bool) -> bool:
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def business_hours_config_for_company(session, company_id: int | None) -> dict:
+    """Resolve the effective business-hours config for *company_id*.
+
+    Priority: CompanySetting (if company_id supplied + session live) → env vars
+    → hard-coded defaults.  Never raises — any lookup failure falls through.
+    Callers get a dict: {start, end, sunday_blocked, disabled}.
+    """
+    start = _parse_int(os.getenv("BUSINESS_HOURS_START"), _BUSINESS_START_DEFAULT)
+    end = _parse_int(os.getenv("BUSINESS_HOURS_END"), _BUSINESS_END_DEFAULT)
+    sunday_blocked = _parse_bool(os.getenv("BUSINESS_SUNDAY_BLOCKED"), _SUNDAY_BLOCKED_DEFAULT)
+    disabled = _parse_bool(os.getenv("DISABLE_BUSINESS_HOURS_GUARD"), False)
+
+    if session is not None and company_id:
+        try:
+            from credentials_service import get_company_setting_value
+            cs = get_company_setting_value
+            v = cs(session, company_id, "BUSINESS_HOURS_START")
+            start = _parse_int(v, start)
+            v = cs(session, company_id, "BUSINESS_HOURS_END")
+            end = _parse_int(v, end)
+            v = cs(session, company_id, "BUSINESS_SUNDAY_BLOCKED")
+            sunday_blocked = _parse_bool(v, sunday_blocked)
+            v = cs(session, company_id, "DISABLE_BUSINESS_HOURS_GUARD")
+            disabled = _parse_bool(v, disabled)
+        except Exception:
+            pass
+
+    return {
+        "start": start,
+        "end": end,
+        "sunday_blocked": sunday_blocked,
+        "disabled": disabled,
+    }
 
 
 def is_within_business_hours(
     timezone_str: str,
     *,
-    start_hour: int = _BUSINESS_START,
-    end_hour: int   = _BUSINESS_END,
+    start_hour: int | None = None,
+    end_hour: int | None = None,
+    sunday_blocked: bool | None = None,
+    disabled: bool | None = None,
 ) -> bool:
+    """Return True if it is currently between start_hour and end_hour (exclusive)
+    in the given IANA timezone.
+
+    Defaults read from env (when the caller does not pass overrides):
+      * BUSINESS_HOURS_START (default 9)
+      * BUSINESS_HOURS_END   (default 22)
+      * BUSINESS_SUNDAY_BLOCKED (default 1 — block Sundays)
+      * DISABLE_BUSINESS_HOURS_GUARD (default 0) — when 1, always returns True
+
+    Callers with access to a DB session should use
+    business_hours_config_for_company() to pick up per-company overrides
+    from CompanySetting, then pass them in via the kwargs above.
+
+    Falls back to True (allow call) on any error so a bad timezone string
+    never silently blocks all calls.
     """
-    Return True if it is currently between start_hour and end_hour (exclusive)
-    in the given IANA timezone.  Treats Monday–Saturday as working days;
-    Sunday is blocked.  Falls back to True (allow call) on any error so that
-    a bad timezone string never silently blocks all calls.
-    """
+    eff_disabled = (
+        disabled if disabled is not None
+        else _parse_bool(os.getenv("DISABLE_BUSINESS_HOURS_GUARD"), False)
+    )
+    if eff_disabled:
+        return True
+
+    start = start_hour if start_hour is not None else _parse_int(os.getenv("BUSINESS_HOURS_START"), _BUSINESS_START_DEFAULT)
+    end = end_hour if end_hour is not None else _parse_int(os.getenv("BUSINESS_HOURS_END"), _BUSINESS_END_DEFAULT)
+    eff_sunday_blocked = (
+        sunday_blocked if sunday_blocked is not None
+        else _parse_bool(os.getenv("BUSINESS_SUNDAY_BLOCKED"), _SUNDAY_BLOCKED_DEFAULT)
+    )
+
     try:
-        tz   = ZoneInfo(timezone_str)
-        now  = datetime.datetime.now(tz)
-        if now.weekday() == 6:
+        tz = ZoneInfo(timezone_str)
+        now = datetime.datetime.now(tz)
+        if eff_sunday_blocked and now.weekday() == 6:
             return False
-        return start_hour <= now.hour < end_hour
+        return start <= now.hour < end
     except (ZoneInfoNotFoundError, Exception):
         return True

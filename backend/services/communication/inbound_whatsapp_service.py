@@ -103,7 +103,7 @@ def _send_whatsapp_auto_reply(
 
     body = _AUTO_REPLY_TEMPLATES[template_key]
     try:
-        from communication.communication_service import send_whatsapp_to_lead
+        from services.communication.communication_service import send_whatsapp_to_lead
         return send_whatsapp_to_lead(
             session=session,
             company_id=company_id,
@@ -152,7 +152,7 @@ def _find_active_whatsapp_campaign_recipient(
     if not recipients:
         return None
 
-    from campaign.campaign_service import get_current_step
+    from services.campaign.campaign_service import get_current_step
     for recipient in recipients:
         step = get_current_step(session, company_id, recipient.campaign_id, recipient.current_step)
         if step and step.channel == "whatsapp":
@@ -203,7 +203,7 @@ def _update_lead_for_whatsapp_reply(
         lead.next_action_due_at = utc_now() + timedelta(minutes=5)
         lead.last_outreach_at = utc_now()
 
-        from call.outbound_call_service import create_call_task
+        from services.call.outbound_call_service import create_call_task
         existing_task = session.exec(
             select(CallTask).where(
                 CallTask.company_id == lead.company_id,
@@ -239,8 +239,8 @@ def _progress_campaign_for_whatsapp_reply(
     actor_user_id: int | None,
     intent: str,
 ) -> dict[str, Any]:
-    from campaign.campaign_service import get_current_step, schedule_campaign_recipient_next_step
-    from call.outcome_service import (
+    from services.campaign.campaign_service import get_current_step, schedule_campaign_recipient_next_step
+    from services.call.outcome_service import (
         OUTCOME_NOT_INTERESTED, OUTCOME_INTERESTED,
         OUTCOME_CALLBACK_REQUESTED, OUTCOME_NO_ANSWER,
         ANSWERED_OUTCOMES,
@@ -391,6 +391,34 @@ def ingest_whatsapp_webhook_event(
         session.refresh(interaction)
 
         intent = classify_reply_intent(body)
+        # LLM-backed classification elevates "neutral" rule results into the
+        # roadmap 5-intent set {interested, objection, unsubscribe, question, noise}.
+        # It's best-effort — runs cached + rate-limited; existing rule branches
+        # below keep driving the legacy per-intent behaviour.
+        try:
+            from agents.reply_classifier import classify_reply_sync as _classify_reply_sync
+            classification = _classify_reply_sync(session, company_id, body, "whatsapp", lead.id)
+        except Exception as _cls_exc:  # noqa: BLE001
+            classification = {"intent": "noise", "source": "error", "confidence": 0.0, "error": str(_cls_exc)}
+
+        # If the LLM detected an unsubscribe intent the rule path missed, honor it.
+        if classification.get("intent") == "unsubscribe" and intent != "opt_out":
+            try:
+                unsubscribe_lead(
+                    session=session,
+                    company_id=company_id,
+                    actor_user_id=lead.owner_user_id,
+                    lead_id=lead.id,
+                    channel="whatsapp",
+                    reason="llm_reply_classifier",
+                )
+                intent = "opt_out"
+            except Exception as _unsub_exc:  # noqa: BLE001
+                import logging as _logging
+                _logging.getLogger(__name__).warning(
+                    "[inbound_whatsapp] unsubscribe_lead failed: %s", _unsub_exc,
+                )
+
         lead_update_result = _update_lead_for_whatsapp_reply(
             session=session, lead=lead, actor_user_id=lead.owner_user_id, body=body, intent=intent,
         )
@@ -436,6 +464,7 @@ def ingest_whatsapp_webhook_event(
             "company_id": company_id,
             "lead_id": lead.id,
             "intent": intent,
+            "classification": classification,
             "auto_reply_sent": auto_reply_result is not None and auto_reply_result.get("success"),
             "call_task_id": lead_update_result["call_task_id"],
             **campaign_result,

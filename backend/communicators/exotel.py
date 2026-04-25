@@ -56,7 +56,7 @@ class ExotelCommunicator(TelephonyCommunicator):
         TTS pipeline produces mulaw. Exotel expects PCM s16le.
         Convert here so nothing else in the pipeline needs to change.
         """
-        import audioop, base64
+        import audioop
         if self.stream_sid:
             try:
                 if self.websocket.client_state.name == "CONNECTED":

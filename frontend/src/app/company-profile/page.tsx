@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import { Building2, Globe, Link, Palette, Sliders, Users, ShieldCheck } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 type CompanyProfile = {
@@ -37,7 +38,7 @@ const STATUS_OPTIONS = ["Active", "Suspended", "Trial"];
 const TIER_OPTIONS = ["Starter", "Growth", "Professional", "Enterprise"];
 
 export default function CompanyProfilePage() {
-  const { user, token, isLoading, sessionTimeout } = useAuth();
+  const { user, isLoading, sessionTimeout } = useAuth();
   const router = useRouter();
   const [profile, setProfile] = useState<CompanyProfile | null>(null);
   const [form, setForm] = useState<CompanyProfile | null>(null);
@@ -51,12 +52,11 @@ export default function CompanyProfilePage() {
   const isAdmin = !!user && ["company_owner", "company_admin"].includes(user.role);
 
   const fetchProfile = useCallback(async () => {
-    if (!token) return;
+    if (!user) return;
     setLoading(true);
     setError(null);
     try {
-      const res = await fetch(`${API_BASE}/company-profile`, {
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/company-profile`, {
       });
       if (res.status === 401) {
         sessionTimeout();
@@ -73,7 +73,7 @@ export default function CompanyProfilePage() {
     } finally {
       setLoading(false);
     }
-  }, [token, sessionTimeout]);
+  }, [user, sessionTimeout]);
 
   useEffect(() => {
     if (!isLoading && !isAdmin) {
@@ -87,18 +87,15 @@ export default function CompanyProfilePage() {
 
   const handleSubmit = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!token || !form) return;
+    if (!user || !form) return;
     setSaving(true);
     setMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/company-profile`, {
+      const res = await apiFetch(`${API_BASE}/company-profile`, {
         method: "PATCH",
         headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(form),
-      });
+          "Content-Type": "application/json" },
+        body: JSON.stringify(form) });
       if (res.status === 401) {
         sessionTimeout();
         return;
@@ -215,11 +212,9 @@ export default function CompanyProfilePage() {
                         try {
                           const fd = new FormData();
                           fd.append("file", file);
-                          const res = await fetch(`${API_BASE}/company-profile/logo`, {
+                          const res = await apiFetch(`${API_BASE}/company-profile/logo`, {
                             method: "POST",
-                            headers: { Authorization: `Bearer ${token}` },
-                            body: fd,
-                          });
+                            body: fd });
                           if (!res.ok) throw new Error("Upload failed");
                           const data = await res.json();
                           setForm({ ...form, logo_url: data.logo_url });
@@ -392,8 +387,7 @@ export default function CompanyProfilePage() {
                 onChange={(e) =>
                   setForm({
                     ...form,
-                    max_users: Number(e.target.value) || 0,
-                  })
+                    max_users: Number(e.target.value) || 0 })
                 }
                 className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 focus:outline-none focus:ring-2 focus:ring-violet-500"
               />

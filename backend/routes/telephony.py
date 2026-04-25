@@ -16,7 +16,7 @@ from credentials_service import get_company_credential
 from database import get_session
 from models.models import CallTask, Company, Interaction, Lead, User, utc_now
 from services.campaign.dialer_service import initiate_outbound_call
-from services.call.outcome_service import apply_call_outcome
+from services.call.outcome_service import apply_call_outcome, apply_lead_only_outcome
 from services.call.outbound_call_service import start_call_task
 from services.call.warm_transfer_service import execute_warm_transfer
 from utils.phone import normalize_phone
@@ -162,26 +162,44 @@ async def twilio_status_callback(
             except Exception:
                 pass
 
-    # Outcome processing only for terminal state with a valid call task
+    # Outcome processing only for terminal state
     TERMINAL = {"completed", "busy", "no-answer", "failed", "canceled"}
     if CallStatus not in TERMINAL:
-        return {"status": "tracked", "call_status": CallStatus}
-    if not call_task_id or not call_task_id.isdigit() or int(call_task_id) == 0:
         return {"status": "tracked", "call_status": CallStatus}
     if not actor_user:
         return {"status": "tracked", "call_status": CallStatus}
 
     transcript = db_interaction.transcript if db_interaction else None
-    result = apply_call_outcome(
+    interaction_id_int = int(interaction_id) if interaction_id and interaction_id.isdigit() else None
+    has_call_task = bool(call_task_id and call_task_id.isdigit() and int(call_task_id) != 0)
+
+    if has_call_task:
+        result = apply_call_outcome(
+            session=session,
+            company_id=actor_user.company_id,
+            actor_user_id=actor_user.id,
+            task_id=int(call_task_id),
+            interaction_id=interaction_id_int,
+            raw_status=CallStatus,
+            transcript=transcript,
+        )
+        return {"status": "processed", "result": result}
+
+    # Manual 'Call now' path — no CallTask. Advance lead from interaction.lead_id.
+    lead_id_from_interaction = db_interaction.lead_id if db_interaction else None
+    if not lead_id_from_interaction:
+        return {"status": "tracked", "call_status": CallStatus}
+
+    result = apply_lead_only_outcome(
         session=session,
         company_id=actor_user.company_id,
         actor_user_id=actor_user.id,
-        task_id=int(call_task_id),
-        interaction_id=int(interaction_id) if interaction_id and interaction_id.isdigit() else None,
+        lead_id=lead_id_from_interaction,
+        interaction_id=interaction_id_int,
         raw_status=CallStatus,
         transcript=transcript,
     )
-    return {"status": "processed", "result": result}
+    return {"status": "processed_lead_only", "result": result}
 
 
 @router.get("/call-status")

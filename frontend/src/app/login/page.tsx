@@ -5,6 +5,7 @@ import { useAuth } from "@/context/AuthContext";
 import Link from "next/link";
 import { Eye, EyeOff, Loader2, Lock, User } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 export default function LoginPage() {
@@ -52,7 +53,7 @@ export default function LoginPage() {
             formData.append("password", password);
             const url = new URL(`${API_BASE}/token`);
             if (mfaRequired && mfaToken) url.searchParams.append("mfa_token", mfaToken);
-            const res = await fetch(url.toString(), {
+            const res = await apiFetch(url.toString(), {
                 method: "POST",
                 headers: { "Content-Type": "application/x-www-form-urlencoded" },
                 body: formData,
@@ -71,7 +72,7 @@ export default function LoginPage() {
                 }
                 throw new Error(errorMessage || "Invalid username or password");
             }
-            login(data.access_token);
+            await login();
         } catch (err: any) {
             setError(err.message);
         } finally {

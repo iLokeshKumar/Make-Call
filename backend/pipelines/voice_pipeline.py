@@ -7,7 +7,6 @@ import re
 import time
 import uuid as _uuid
 from datetime import datetime
-import re
 from collections import deque
 from typing import Any, Dict, List, Optional
 
@@ -28,7 +27,7 @@ from services.call import sentiment_broadcaster
 
 logger = logging.getLogger(__name__)
 
-# Sentinel stored alongside settings to distinguish "cached & empty" from "never cached"
+
 _SETTINGS_CACHE_SENTINEL = "__cache_loaded__"
 
 
@@ -36,14 +35,14 @@ def _load_company_settings(session: Session, company_id: int | None) -> dict[str
     if not company_id:
         return {}
 
-    # Return from cache if already loaded for this company
+
     if _sc.get(_SETTINGS_CACHE_SENTINEL, user_id=company_id) is not None:
         result = _sc.get_all(user_id=company_id)
         result.pop(_SETTINGS_CACHE_SENTINEL, None)
         logger.debug(f"[SettingsCache] HIT — {len(result)} keys for company {company_id}")
         return result
 
-    # Cache miss — query DB
+
     settings = session.exec(
         select(CompanySetting).where(CompanySetting.company_id == company_id)
     ).all()
@@ -83,7 +82,7 @@ class VoicePipeline:
                  company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
                  company_website: str = None, lead_id: int = None,
                  audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000,
-                 lead_language: str = "en-IN"): #made changes for exotel. specified audio_encoding and audio_sample_rate as str & int respectively.
+                 lead_language: str = "en-IN"):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
@@ -95,8 +94,8 @@ class VoicePipeline:
         self.lead_context = lead_context
         self.company_website = company_website
         user_id = user.id if user else None
-        self.user_id = user_id  # Store as plain int to avoid DetachedInstanceError on long sessions
-        self.lead_id = lead_id  # Store directly to avoid stale session lookups in save_latency
+        self.user_id = user_id
+        self.lead_id = lead_id
         self.company_id = user.company_id if user else None
 
         company_id = user.company_id if user else None
@@ -144,8 +143,12 @@ class VoicePipeline:
         self.disable_barge_in = os.getenv("DISABLE_BARGE_IN", "0").lower() in {"1", "true", "yes", "on"}
         self._last_barge_trigger_ts = 0.0
 
-        # Determine specific LLM, TTS, STT keys based on provider
-        # Use provider-specific keys (e.g., MISTRAL_API_KEY) or fall back to general keys
+        # Silero-VAD confirmation gate — opt-in, confirms suspected barge-ins actually contain speech (filters coughs, background noise, mic plosives). Falls back to RMS-only if disabled or model load fails.
+        self.use_silero_vad = os.getenv("USE_SILERO_VAD", "0").lower() in {"1", "true", "yes", "on"}
+
+        # Rolling buffer of sentences actually emitted to TTS this turn — used to seed the next LLM prompt with "you were saying X" context on confirmed barge-in, so the agent does not restart cold.
+        self.last_rio_spoken: deque[str] = deque(maxlen=5)
+
         llm_api_key = _resolve_setting(
             all_settings,
             [f"{self.llm_provider.upper()}_API_KEY", "LLM_API_KEY"],
@@ -237,6 +240,24 @@ class VoicePipeline:
         self.trace_id = _uuid.uuid4().hex
         self.turn_index = 0
 
+    def _silero_confirms(self, audio_chunk: bytes) -> bool:
+        """Wrap Silero VAD with the same encoding the barge-in loop receives.
+
+        Fails OPEN — any exception returns True so a misbehaving VAD never
+        silently drops legitimate barge-ins.  Call only when `use_silero_vad`
+        is set; RMS stays as the cheap first-pass filter.
+        """
+        try:
+            from services.ai.vad import silero_confirms_speech
+            return silero_confirms_speech(
+                audio_bytes=audio_chunk,
+                encoding=self.audio_encoding,
+                sample_rate=self.audio_sample_rate,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[VoicePipeline] Silero gate failure (fail-open): %s", exc)
+            return True
+
     def _pause_playback_for_interrupt(self):
         if not self.pause_playback:
             self.pause_playback = True
@@ -281,11 +302,24 @@ class VoicePipeline:
         finally:
             self.llm_dispatch_task = None
 
-    async def _dispatch_llm(self, transcript: str, latency: float):
+    async def _dispatch_llm(self, transcript: str, latency: float, interrupted_context: str = ""):
         if not transcript:
             return
         if self.current_llm_task and not self.current_llm_task.done():
             self.current_llm_task.cancel()
+        # Inject "you were saying X" context ONCE before the user turn lands.
+        # Must fire before _process_llm_response adds the user message.
+        if interrupted_context:
+            try:
+                self.llm_service.add_system_message(
+                    "[MID-TURN INTERRUPTION]\n"
+                    f"You were just saying: \"{interrupted_context}\"\n"
+                    f"The user cut you off to say: \"{transcript}\"\n"
+                    "Acknowledge their interruption and address what they said. "
+                    "Do NOT repeat what you already said."
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[VoicePipeline] add_system_message for interrupt failed: %s", exc)
         self.current_llm_task = asyncio.create_task(
             self._process_llm_response(transcript, latency)
         )
@@ -308,9 +342,14 @@ class VoicePipeline:
             self.current_llm_task.cancel()
         transcript = self.pending_user_turn_text.strip()
         self.pending_user_turn_text = ""
+        # Snapshot + clear the "what we had actually said this turn" buffer so the next LLM call can acknowledge the interruption.  Next turn starts with a fresh buffer.
+        interrupted_text = " ".join(s for s in self.last_rio_spoken if s).strip()
+        self.last_rio_spoken.clear()
         self._resume_playback_from_interrupt()
         if transcript:
-            asyncio.create_task(self._dispatch_llm(transcript, latency))
+            asyncio.create_task(
+                self._dispatch_llm(transcript, latency, interrupted_context=interrupted_text)
+            )
 
     def _apply_context_to_prompt(self, context: str):
         """Helper to structure and inject lead context into the LLM service."""
@@ -361,7 +400,7 @@ class VoicePipeline:
 
         logger.info(f"🔍 [Pipeline] Loading context for Lead #{lead_id}...")
 
-        # DB lead context (name, phone, history) — existing path
+        
         context = get_comprehensive_lead_context(self.session, lead_id)
         if context:
             self._apply_context_to_prompt(context)
@@ -391,7 +430,7 @@ class VoicePipeline:
                             "Prioritise demo booking and closing language."
                         )
                         self.llm_service.update_system_prompt(current + icp_hint)
-                    evict(company_id, lead_id)   # consume once
+                    evict(company_id, lead_id)
         except Exception as exc:
             logger.debug("[Pipeline] Pre-call cache read failed (non-blocking): %s", exc)
 
@@ -445,7 +484,7 @@ class VoicePipeline:
         greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
         if self.lead_context:
             try:
-                # Extract name from "[PROSPECT DATA]\nName: XYZ, Phone: ..." format or self.lead_context. Since lead_utils.py builds it as "Name: {lead.name}, Phone: {lead.phone}"
+                
                 name_line = [l for l in self.lead_context.split("\n") if "Name:" in l]
                 if name_line:
                     lead_name = name_line[0].split(",")[0].replace("Name: ", "").replace("[PROSPECT DATA]", "").strip()
@@ -493,7 +532,7 @@ class VoicePipeline:
             Runs parallel to STT. Detects speech onset from raw mulaw audio.
             Uses RMS energy — no API, no latency. Fires the moment customer speaks.
             """
-            import audioop, struct, math
+            import struct, math
             SPEECH_RMS = self.barge_rms_threshold
             SPEECH_FRAMES_NEEDED = self.barge_frames_needed
             SILENCE_RESET_FRAMES = self.barge_silence_reset_frames
@@ -542,7 +581,12 @@ class VoicePipeline:
                     speech_counter += 1
                     if speech_counter >= SPEECH_FRAMES_NEEDED:
                         if self.is_rio_speaking or not self.sentence_queue.empty():
-                            # Rio is mid-speech — real barge-in
+                            # Rio is mid-speech — confirm with Silero before raising.
+                            # RMS is cheap + catches silence; Silero is slow but rejects background noise / plosives / non-speech bursts.
+                            if self.use_silero_vad and not self._silero_confirms(chunk):
+                                logger.debug(f"🔕 [Barge-in] Silero rejected RMS spike (RMS:{rms:.0f}) — suppressing")
+                                speech_counter = 0
+                                continue
                             logger.info(f"⚡ [Barge-in] Interrupt while Rio speaking (RMS:{rms:.0f})")
                             if not self.interrupt_pending:
                                 self.interrupt_pending = True
@@ -837,6 +881,12 @@ class VoicePipeline:
                     sentence = await self.sentence_queue.get()
                     if sentence is None:
                         break
+
+                    # Track what we actually emit to TTS this turn.  On confirmed
+                    # barge-in this buffer feeds "you were saying X" into the next
+                    # LLM call so the agent can acknowledge being cut off.
+                    if isinstance(sentence, str) and sentence.strip():
+                        self.last_rio_spoken.append(sentence.strip())
 
                     if not self.communicator.stream_sid:
                         logger.warning("⚠️ Speaker loop waiting for stream_sid...")
@@ -1274,11 +1324,15 @@ class VoicePipeline:
     async def _process_llm_response(self, user_input, stt_latency):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
         llm_start_time = time.time()
-        
+
         # Only add user message if this is a fresh turn, not a tool recursion
         if user_input:
             self.current_turn_user_text = user_input
             self.llm_service.add_user_message(user_input)
+            # Fresh turn — clear the spoken-so-far buffer.  Tool-call recursion
+            # leaves it in place so an interruption mid-tool-output still sees
+            # what the agent was saying.
+            self.last_rio_spoken.clear()
         
         mistral_tools = get_mistral_tools()
         

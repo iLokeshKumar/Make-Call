@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Brain, Calendar, CheckCircle2, ChevronDown, ChevronUp, Edit3, FileText, Loader2, MapPin, Phone, Plus, RefreshCw, Save, Send, Target, TrendingUp, UserCheck, X, XCircle, Zap } from "lucide-react";
 
 import InteractionTimeline from "@/components/leads/interaction_timeline";
@@ -19,8 +20,24 @@ import CompetitorBadges from "@/components/leads/competitor_badges";
 import EnrichmentTrace from "@/components/leads/enrichment_trace";
 import SalesCoachPanel from "@/components/leads/sales_coach_panel";
 import BestCallTimes from "@/components/leads/best_call_times";
+import ExplainNextAction from "@/components/leads/explain_next_action";
+import AgentActionsTimeline from "@/components/leads/agent_actions_timeline";
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Button } from "@/components/ui/button";
+import { toast } from "sonner";
 import { useAuth } from "@/context/AuthContext";
 
+import { apiFetch } from "@/utils/apiFetch";
+import {
+  extractLatestQualification,
+  extractLatestRecommendation,
+  formatInteractionSubtitle,
+  formatNextActionLabel,
+  humanizeInteractionTitle,
+} from "@/utils/interaction_format";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 function cleanNotes(notes: string | null | undefined): string {
@@ -129,12 +146,7 @@ type DealEvent =
 // Collapsible section wrapper with built-in toggle and header styling
 
 function CollapsibleSection({
-  title,
-  icon: Icon,
-  defaultOpen = false,
-  children,
-  headerExtra,
-}: {
+  title, icon: Icon, defaultOpen = false, children, headerExtra }: {
   title: string;
   icon?: React.ElementType;
   defaultOpen?: boolean;
@@ -182,8 +194,7 @@ const ISM_STAGE_CONFIG: Record<string, { label: string; cls: string }> = {
   quote_sent:   { label: "Quote Sent",   cls: "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300" },
   negotiation:  { label: "Negotiation",  cls: "bg-orange-100 text-orange-700 dark:bg-orange-500/10 dark:text-orange-300" },
   closed_won:   { label: "Closed Won",   cls: "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300" },
-  closed_lost:  { label: "Closed Lost",  cls: "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300" },
-};
+  closed_lost:  { label: "Closed Lost",  cls: "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300" } };
 
 function IsmStagePill({ stage }: { stage: string }) {
   const config = ISM_STAGE_CONFIG[stage] ?? { label: stage, cls: "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-300" };
@@ -197,7 +208,7 @@ function IsmStagePill({ stage }: { stage: string }) {
 export default function LeadDetailPage() {
   const params = useParams<{ id: string }>();
   const leadId = Number(params?.id);
-  const { token, sessionTimeout } = useAuth();
+  const { user, sessionTimeout } = useAuth();
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -209,6 +220,8 @@ export default function LeadDetailPage() {
 
   const [nextActionDraft, setNextActionDraft] = useState<string>("");
   const [qualificationDraft, setQualificationDraft] = useState<string>("");
+  const [statusDraft, setStatusDraft] = useState<string>("");
+  const [ismStageDraft, setIsmStageDraft] = useState<string>("");
   const [updateNoteDraft, setUpdateNoteDraft] = useState<string>("");
   const [languageDraft, setLanguageDraft] = useState<string>("en");
   const [billingAddressDraft, setBillingAddressDraft] = useState<string>("");
@@ -216,6 +229,8 @@ export default function LeadDetailPage() {
   const [gstNumberDraft, setGstNumberDraft] = useState<string>("");
   const [updating, setUpdating] = useState(false);
   const [updateMessage, setUpdateMessage] = useState<string | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   const [dealTimeline, setDealTimeline] = useState<DealEvent[]>([]);
 
@@ -241,7 +256,7 @@ export default function LeadDetailPage() {
   // ICP Score actions
   const [rescoring, setRescoring] = useState(false);
   const [enriching, setEnriching] = useState(false);
-  const [enrichToast, setEnrichToast] = useState<string | null>(null);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   // Requirements editor
   const [reqEditMode, setReqEditMode] = useState(false);
@@ -262,63 +277,59 @@ export default function LeadDetailPage() {
   const [quoteMsg, setQuoteMsg] = useState<string | null>(null);
   const [quoteMsgError, setQuoteMsgError] = useState(false);
 
+  const queryClient = useQueryClient();
+  const contextQuery = useQuery({
+    queryKey: ["lead-context", leadId],
+    enabled: !!user && !!leadId,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/context`);
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+      if (!res.ok) throw new Error("Lead not found or you do not have access to it.");
+      return res.json();
+    },
+  });
+
   useEffect(() => {
-    async function fetchLeadDetail() {
-      if (!token || !leadId) {
-        setLoading(false);
-        return;
-      }
-
-      try {
-        const headers = { Authorization: `Bearer ${token}` };
-        const res = await fetch(`${API_BASE}/crm/leads/${leadId}/context`, { headers });
-
-        if (res.status === 401) { sessionTimeout(); return; }
-        if (!res.ok) throw new Error("Lead not found or you do not have access to it.");
-
-        const ctx = await res.json();
-
-        setLead(ctx.lead);
-
-        if (ctx.requirement) {
-          setRequirement(ctx.requirement);
-          setReqDraft(ctx.requirement);
-        }
-
-        setInteractions(Array.isArray(ctx.interactions) ? ctx.interactions : []);
-        setTasks(Array.isArray(ctx.tasks) ? ctx.tasks : []);
-
-        // Deal timeline: merge quotes + appointments from context
-        const dealEvents: DealEvent[] = [];
-        for (const q of ctx.quotes ?? []) {
-          dealEvents.push({ kind: "quote", ...q });
-        }
-        for (const a of ctx.appointments ?? []) {
-          dealEvents.push({
-            kind: "appointment", id: a.id,
-            date: a.appointment_time, status: a.status,
-            demo_type: "Demo", products: null, location: null,
-            notes: a.notes, meeting_link: null,
-          });
-        }
-        dealEvents.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-        setDealTimeline(dealEvents);
-
-        setFeedbackItems(Array.isArray(ctx.feedback) ? ctx.feedback : []);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load Lead 360.");
-      } finally {
-        setLoading(false);
-      }
+    if (!user || !leadId) { setLoading(false); return; }
+    if (contextQuery.isLoading) return;
+    if (contextQuery.error) {
+      setError(contextQuery.error instanceof Error ? contextQuery.error.message : "Failed to load Lead 360.");
+      setLoading(false);
+      return;
     }
+    const ctx = contextQuery.data;
+    if (!ctx) return;
+    setLead(ctx.lead);
+    if (ctx.requirement) {
+      setRequirement(ctx.requirement);
+      setReqDraft(ctx.requirement);
+    }
+    setInteractions(Array.isArray(ctx.interactions) ? ctx.interactions : []);
+    setTasks(Array.isArray(ctx.tasks) ? ctx.tasks : []);
 
-    fetchLeadDetail();
-  }, [leadId, token, sessionTimeout]);
+    const dealEvents: DealEvent[] = [];
+    for (const q of ctx.quotes ?? []) {
+      dealEvents.push({ kind: "quote", ...q });
+    }
+    for (const a of ctx.appointments ?? []) {
+      dealEvents.push({
+        kind: "appointment", id: a.id,
+        date: a.appointment_time, status: a.status,
+        demo_type: "Demo", products: null, location: null,
+        notes: a.notes, meeting_link: null });
+    }
+    dealEvents.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
+    setDealTimeline(dealEvents);
+    setFeedbackItems(Array.isArray(ctx.feedback) ? ctx.feedback : []);
+    setLoading(false);
+  }, [user, leadId, contextQuery.data, contextQuery.isLoading, contextQuery.error, sessionTimeout]);
 
   useEffect(() => {
     if (!lead) return;
     setNextActionDraft(lead.next_action || "");
     setQualificationDraft(lead.qualification_status || "");
+    setStatusDraft(lead.status || "");
+    setIsmStageDraft(lead.ism_stage || "");
     setUpdateNoteDraft(lead.notes || "");
     setLanguageDraft(lead.preferred_language || "en");
     setBillingAddressDraft(lead.billing_address || "");
@@ -326,65 +337,47 @@ export default function LeadDetailPage() {
     setGstNumberDraft(lead.gst_number || "");
   }, [lead]);
 
-  const fetchAiSummary = useCallback(async () => {
-    console.log("fetchAiSummary called - token:", !!token, "leadId:", leadId);
-    if (!token || !leadId) {
-      console.log("Missing token or leadId, aborting");
-      return;
-    }
+  const aiQuery = useQuery<{ summary: string }>({
+    queryKey: ["ai-insights", leadId],
+    enabled: !!user && !!leadId,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/ai-insights?lead_id=${leadId}`);
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+      if (!res.ok) throw new Error(`API returned status ${res.status}`);
+      return res.json();
+    },
+  });
 
-    setAiLoading(true);
-    setAiError(null);
-
-    try {
-      const url = `${API_BASE}/crm/ai-insights?lead_id=${leadId}`;
-      console.log("Fetching AI summary from:", url);
-
-      const response = await fetch(url, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-
-      console.log("AI insights response status:", response.status);
-
-      if (response.status === 401) {
-        sessionTimeout();
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error(`API returned status ${response.status}`);
-      }
-
-      const payload = await response.json();
-      console.log("AI insights payload:", payload);
-      setAiSummary(payload.summary || "No AI insight is available yet.");
-    } catch (err) {
-      console.error("Error fetching AI summary:", err);
-      setAiError(err instanceof Error ? err.message : "AI insights fetch failed.");
+  useEffect(() => {
+    if (aiQuery.isLoading) setAiLoading(true);
+    else setAiLoading(false);
+    if (aiQuery.error) {
+      setAiError(aiQuery.error instanceof Error ? aiQuery.error.message : "AI insights fetch failed.");
       setAiSummary("");
-    } finally {
-      setAiLoading(false);
+    } else {
+      setAiError(null);
+      if (aiQuery.data) setAiSummary(aiQuery.data.summary || "No AI insight is available yet.");
     }
-  }, [leadId, token, sessionTimeout]);
+  }, [aiQuery.data, aiQuery.isLoading, aiQuery.error]);
+
+  const fetchAiSummary = useCallback(() => {
+    aiQuery.refetch();
+  }, [aiQuery]);
 
   async function handleAddManualNote() {
-    if (!token || !leadId || !noteText.trim()) return;
+    if (!user || !leadId || !noteText.trim()) return;
     setNoteSaving(true);
     setNoteMessage(null);
 
     try {
-      const response = await fetch(`${API_BASE}/crm/interactions`, {
+      const response = await apiFetch(`${API_BASE}/crm/interactions`, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+          "Content-Type": "application/json" },
         body: JSON.stringify({
           lead_id: leadId,
           type: "note",
-          content: noteText.trim(),
-        }),
-      });
+          content: noteText.trim() }) });
 
       if (response.status === 401) {
         sessionTimeout();
@@ -406,17 +399,12 @@ export default function LeadDetailPage() {
     }
   }
 
-  useEffect(() => {
-    if (leadId && token) fetchAiSummary();
-  }, [leadId, token, fetchAiSummary]);
-
   async function handleRescore() {
-    if (!token || !leadId) return;
+    if (!user || !leadId) return;
     setRescoring(true);
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/rescore`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/rescore`, {
+        method: "POST"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Re-score failed");
@@ -430,39 +418,32 @@ export default function LeadDetailPage() {
   }
 
   async function handleEnrich() {
-    if (!token || !leadId) return;
+    if (!user || !leadId) return;
     setEnriching(true);
-    setEnrichToast(null);
     try {
-      const res = await fetch(`${API_BASE}/crm/leads/${leadId}/enrich`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
-      });
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/enrich`, { method: "POST" });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error("Enrichment failed");
       const payload = await res.json();
-      setEnrichToast(payload?.message || "Enrichment complete.");
-      // Refresh lead data
-      const leadRes = await fetch(`${API_BASE}/crm/leads/${leadId}`, { headers: { Authorization: `Bearer ${token}` } });
+      toast.success(payload?.message || "Enrichment complete.");
+      const leadRes = await apiFetch(`${API_BASE}/crm/leads/${leadId}`, {});
       if (leadRes.ok) setLead(await leadRes.json());
     } catch (err) {
-      setEnrichToast(err instanceof Error ? err.message : "Enrichment failed.");
+      toast.error(err instanceof Error ? err.message : "Enrichment failed.");
     } finally {
       setEnriching(false);
-      setTimeout(() => setEnrichToast(null), 4000);
     }
   }
 
   async function handleSaveRequirements() {
-    if (!token || !leadId) return;
+    if (!user || !leadId) return;
     setReqSaving(true);
     setReqMessage(null);
     try {
-      const res = await fetch(`${API_BASE}/requirements/${leadId}`, {
+      const res = await apiFetch(`${API_BASE}/requirements/${leadId}`, {
         method: "PUT",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify(reqDraft),
-      });
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(reqDraft) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
         const payload = await res.json();
@@ -495,18 +476,16 @@ export default function LeadDetailPage() {
         title: "Lead added to CRM",
         subtitle: cleanNotes(lead.notes) || "Lead record created and ready for outreach.",
         timestamp: lead.created_at,
-        tone: "violet",
-      });
+        tone: "violet" });
     }
 
     interactions.forEach((interaction) => {
       items.push({
         id: `interaction-${interaction.id}`,
-        title: `${interaction.type || "Interaction"} ${interaction.status || "logged"}`,
-        subtitle: interaction.content,
+        title: humanizeInteractionTitle(interaction.type, interaction.status),
+        subtitle: formatInteractionSubtitle(interaction.type, interaction.content),
         timestamp: interaction.started_at || interaction.created_at,
-        tone: interaction.status === "completed" ? "emerald" : "blue",
-      });
+        tone: interaction.status === "completed" ? "emerald" : "blue" });
     });
 
     tasks.forEach((task) => {
@@ -515,8 +494,7 @@ export default function LeadDetailPage() {
         title: `Call task ${task.status}`,
         subtitle: task.notes || `Task #${task.id} for this lead`,
         timestamp: task.completed_at || task.scheduled_at,
-        tone: task.status === "failed" ? "amber" : task.status === "completed" ? "emerald" : "blue",
-      });
+        tone: task.status === "failed" ? "amber" : task.status === "completed" ? "emerald" : "blue" });
     });
 
     feedbackItems.forEach((fb) => {
@@ -528,8 +506,7 @@ export default function LeadDetailPage() {
         title: `${sourceLabel}${ratingLabel ? ` — ${ratingLabel}` : ""}`,
         subtitle: fb.comment || undefined,
         timestamp: fb.created_at,
-        tone: fb.rating && fb.rating >= 4 ? "emerald" : fb.rating && fb.rating <= 2 ? "amber" : "blue",
-      });
+        tone: fb.rating && fb.rating >= 4 ? "emerald" : fb.rating && fb.rating <= 2 ? "amber" : "blue" });
     });
 
     return items.sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""));
@@ -543,44 +520,100 @@ export default function LeadDetailPage() {
         title: `Call interaction ${interaction.status || "logged"}`,
         subtitle: interaction.content || "Call performed",
         timestamp: interaction.started_at || interaction.created_at,
-        tone: interaction.status === "completed" ? "emerald" : interaction.status === "failed" ? "amber" : "blue",
-      }));
+        tone: interaction.status === "completed" ? "emerald" : interaction.status === "failed" ? "amber" : "blue" }));
 
     const callTasks = tasks.map((task) => ({
       id: `task-${task.id}`,
       title: `Call task ${task.status}`,
       subtitle: task.notes || `Scheduled ${task.scheduled_at || "unknown"}`,
       timestamp: task.completed_at || task.scheduled_at,
-      tone: task.status === "completed" ? "emerald" : task.status === "failed" ? "amber" : "blue",
-    }));
+      tone: task.status === "completed" ? "emerald" : task.status === "failed" ? "amber" : "blue" }));
 
     return [...callsFromInteractions, ...callTasks].sort((a, b) => (b.timestamp || "").localeCompare(a.timestamp || ""));
   }, [interactions, tasks]);
 
+  const effectiveNextAction = useMemo<{ label: string | null; dueAt: string | null }>(() => {
+    if (lead?.next_action) {
+      return { label: lead.next_action, dueAt: lead.next_action_due_at ?? null };
+    }
+    const rec = extractLatestRecommendation(interactions);
+    if (!rec?.next_action) return { label: null, dueAt: null };
+    let dueAt: string | null = null;
+    if (rec.follow_up_days && rec.follow_up_days > 0) {
+      const d = new Date();
+      d.setDate(d.getDate() + rec.follow_up_days);
+      dueAt = d.toISOString();
+    }
+    const label = rec.suggested_product
+      ? `${formatNextActionLabel(rec.next_action)} — ${rec.suggested_product}`
+      : formatNextActionLabel(rec.next_action);
+    return { label, dueAt };
+  }, [lead?.next_action, lead?.next_action_due_at, interactions]);
+
+  const mergedRequirement = useMemo<Requirement | null>(() => {
+    const fallback = extractLatestQualification(interactions);
+    const painFromCall = fallback?.pain_points?.filter(Boolean).join(", ") || null;
+    const productFromCall = fallback?.recommendations?.suggested_product || null;
+    const bant = fallback?.bant;
+    const hasReq = requirement && Object.values(requirement).some((v) => v);
+    if (!hasReq && !fallback) return requirement;
+    return {
+      use_case: requirement?.use_case || bant?.need || null,
+      budget_range: requirement?.budget_range || lead?.budget_range || bant?.budget || null,
+      timeline: requirement?.timeline || lead?.timeline || bant?.timeline || null,
+      decision_maker: requirement?.decision_maker || lead?.decision_maker || bant?.authority || null,
+      pain_points: requirement?.pain_points || painFromCall,
+      required_products: requirement?.required_products || lead?.product_interest || productFromCall,
+    };
+  }, [interactions, requirement, lead]);
+
   const manualNotes = useMemo(() => interactions.filter((interaction) => (interaction.type || "").toLowerCase() === "note"), [interactions]);
 
+  async function handleSaveProfile(fields: { city?: string | null; state?: string | null; country?: string | null; pincode?: string | null; industry?: string | null; website?: string | null }) {
+    if (!user || !lead) return;
+    setProfileSaving(true);
+    setProfileError(null);
+    try {
+      const response = await apiFetch(`${API_BASE}/crm/leads/${leadId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      });
+      if (response.status === 401) { sessionTimeout(); return; }
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to save profile");
+      }
+      const updated = await response.json();
+      setLead((prev) => (prev ? { ...prev, ...updated } : updated));
+    } catch (err) {
+      setProfileError(err instanceof Error ? err.message : "Save failed");
+      throw err;
+    } finally {
+      setProfileSaving(false);
+    }
+  }
+
   async function handleUpdateLead() {
-    if (!token || !lead) return;
+    if (!user || !lead) return;
     setUpdating(true);
     setUpdateMessage(null);
 
     try {
-      const response = await fetch(`${API_BASE}/crm/leads/${leadId}`, {
+      const response = await apiFetch(`${API_BASE}/crm/leads/${leadId}`, {
         method: "PATCH",
         headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
+          "Content-Type": "application/json" },
         body: JSON.stringify({
           qualification_status: qualificationDraft || null,
+          status: statusDraft || null,
+          ism_stage: ismStageDraft || null,
           next_action: nextActionDraft || null,
           notes: updateNoteDraft || null,
           preferred_language: languageDraft || "en",
           billing_address: billingAddressDraft || null,
           pincode: pincodeDraft || null,
-          gst_number: gstNumberDraft || null,
-        }),
-      });
+          gst_number: gstNumberDraft || null }) });
 
       if (response.status === 401) {
         sessionTimeout();
@@ -602,31 +635,22 @@ export default function LeadDetailPage() {
     }
   }
 
-  async function handleDeleteLead() {
-    if (!token || !leadId || !lead) return;
-    if (!window.confirm(`Are you sure you want to delete the lead "${lead.name}"? This action cannot be undone.`)) {
-      return;
-    }
-
+  async function performDeleteLead() {
+    if (!user || !leadId || !lead) return;
     try {
-      const response = await fetch(`${API_BASE}/crm/leads/${leadId}`, {
-        method: "DELETE",
-        headers: { Authorization: `Bearer ${token}` },
+      const response = await apiFetch(`${API_BASE}/crm/leads/${leadId}`, {
+        method: "DELETE"
       });
-
-      if (response.status === 401) {
-        sessionTimeout();
-        return;
-      }
-
-      if (!response.ok) {
-        throw new Error("Failed to delete lead");
-      }
-
+      if (response.status === 401) { sessionTimeout(); return; }
+      if (!response.ok) throw new Error("Failed to delete lead");
       window.location.href = "/leads";
     } catch (err) {
-      alert(err instanceof Error ? err.message : "Delete failed");
+      toast.error(err instanceof Error ? err.message : "Delete failed");
     }
+  }
+
+  function handleDeleteLead() {
+    setShowDeleteConfirm(true);
   }
 
   const CALL_STATUS_LABELS: Record<string, string> = {
@@ -637,16 +661,14 @@ export default function LeadDetailPage() {
     "no-answer":  "No answer",
     busy:         "Line busy",
     failed:       "Call failed",
-    canceled:     "Call canceled",
-  };
+    canceled:     "Call canceled" };
   const TERMINAL_STATUSES = new Set(["completed", "no-answer", "busy", "failed", "canceled"]);
 
   useEffect(() => {
-    if (!callInteractionId || !token) return;
+    if (!callInteractionId ) return;
     const interval = setInterval(async () => {
       try {
-        const res = await fetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
-          headers: { Authorization: `Bearer ${token}` },
+        const res = await apiFetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
         });
         if (!res.ok) return;
         const data = await res.json();
@@ -659,7 +681,7 @@ export default function LeadDetailPage() {
       } catch { /* ignore */ }
     }, 2000);
     return () => clearInterval(interval);
-  }, [callInteractionId, token]);
+  }, [callInteractionId, user]);
 
   function openQuoteDrawer() {
     // Pre-populate one item from requirement.required_products if available
@@ -678,29 +700,24 @@ export default function LeadDetailPage() {
   }
 
   async function handleQuickSendQuote(send: boolean) {
-    if (!token || !lead) return;
+    if (!user || !lead) return;
     const validItems = quoteItems.filter(i => i.product_name_snapshot.trim() && i.unit_price);
     if (!validItems.length) { setQuoteMsg("Add at least one item with a name and price."); setQuoteMsgError(true); return; }
     setQuoteSaving(true); setQuoteMsg(null);
     try {
-      const h = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
-      const createRes = await fetch(`${API_BASE}/quotes`, {
-        method: "POST", headers: h,
-        body: JSON.stringify({
+      const h = { "Content-Type": "application/json" };
+      const createRes = await apiFetch(`${API_BASE}/quotes`, {
+        method: "POST",        body: JSON.stringify({
           lead_id: lead.id, currency: quoteCurrency,
           valid_until: quoteValidUntil || null,
           notes: quoteNotes || null,
-          items: validItems.map(i => ({ ...i, quantity: Number(i.quantity), unit_price: parseFloat(i.unit_price) || 0, discount_percent: parseFloat(i.discount_percent) || 0 })),
-        }),
-      });
+          items: validItems.map(i => ({ ...i, quantity: Number(i.quantity), unit_price: parseFloat(i.unit_price) || 0, discount_percent: parseFloat(i.discount_percent) || 0 })) }) });
       if (createRes.status === 401) { sessionTimeout(); return; }
       if (!createRes.ok) throw new Error((await createRes.json().catch(() => ({}))).detail || "Failed to create quote");
       const quote = await createRes.json();
       if (send) {
-        const sendRes = await fetch(`${API_BASE}/quotes/${quote.id}/send`, {
-          method: "POST", headers: h,
-          body: JSON.stringify({ channels: ["email"], subject: `Quote for ${lead.name}`, message: "" }),
-        });
+        const sendRes = await apiFetch(`${API_BASE}/quotes/${quote.id}/send`, {
+          method: "POST",          body: JSON.stringify({ channels: ["email"], subject: `Quote for ${lead.name}`, message: "" }) });
         if (!sendRes.ok) throw new Error("Quote created but failed to send");
         setQuoteMsg(`Quote ${quote.quote_number} sent to ${lead.email || lead.name}`);
       } else {
@@ -713,17 +730,16 @@ export default function LeadDetailPage() {
   }
 
   async function handleCall() {
-    if (!token || !lead?.normalized_phone) return;
+    if (!user || !lead?.normalized_phone) return;
 
     setCallMessage(null);
     setCallInteractionId(null);
     setCallStatus(null);
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${API_BASE}/make-call?to=${encodeURIComponent(lead.normalized_phone)}&lead_id=${lead.id}`,
         {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
+          method: "POST"
         }
       );
 
@@ -742,18 +758,16 @@ export default function LeadDetailPage() {
   }
 
   async function handleWarmTransfer() {
-    if (!token || !callInteractionId || !transferTo.trim()) return;
+    if (!user || !callInteractionId || !transferTo.trim()) return;
     setTransferring(true);
     setTransferResult(null);
     try {
       const params = new URLSearchParams({
         interaction_id: String(callInteractionId),
-        transfer_to: transferTo.trim(),
-      });
+        transfer_to: transferTo.trim() });
       if (isrName.trim()) params.set("isr_name", isrName.trim());
-      const res = await fetch(`${API_BASE}/warm-transfer?${params}`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}` },
+      const res = await apiFetch(`${API_BASE}/warm-transfer?${params}`, {
+        method: "POST"
       });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) {
@@ -870,55 +884,68 @@ export default function LeadDetailPage() {
       )}
 
       {/* Warm Transfer */}
-      {showTransferModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 backdrop-blur-sm p-4">
-          <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-6 shadow-2xl space-y-4">
-            <div className="flex items-center gap-2">
+      <Dialog open={showTransferModal} onOpenChange={setShowTransferModal}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
               <UserCheck className="h-5 w-5 text-amber-500" />
-              <h3 className="text-lg font-bold text-slate-900 dark:text-white">Transfer to Human ISR</h3>
-            </div>
-            <p className="text-sm text-slate-500 dark:text-slate-400">
+              Transfer to Human ISR
+            </DialogTitle>
+            <DialogDescription>
               The AI will be bridged into a conference. The ISR will join immediately.
-            </p>
-            <div className="space-y-3">
-              <input
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <div className="space-y-1">
+              <Label htmlFor="isr-phone">ISR phone</Label>
+              <Input
+                id="isr-phone"
                 value={transferTo}
                 onChange={(e) => setTransferTo(e.target.value)}
-                placeholder="ISR phone number (e.g. +919876543210)"
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-amber-400 dark:border-white/10 dark:bg-slate-800/50"
+                placeholder="+919876543210"
               />
-              <input
+            </div>
+            <div className="space-y-1">
+              <Label htmlFor="isr-name">ISR name (optional)</Label>
+              <Input
+                id="isr-name"
                 value={isrName}
                 onChange={(e) => setIsrName(e.target.value)}
-                placeholder="ISR name (optional)"
-                className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-amber-400 dark:border-white/10 dark:bg-slate-800/50"
               />
             </div>
-            <div className="flex gap-2 pt-1">
-              <button
-                onClick={() => setShowTransferModal(false)}
-                className="flex-1 rounded-xl border border-slate-200 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50 dark:border-white/10 dark:text-slate-300"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={handleWarmTransfer}
-                disabled={!transferTo.trim() || transferring}
-                className="flex-1 rounded-xl bg-amber-500 py-2 text-sm font-semibold text-white hover:bg-amber-600 disabled:opacity-50 flex items-center justify-center gap-2"
-              >
-                {transferring ? <Loader2 className="h-4 w-4 animate-spin" /> : <UserCheck className="h-4 w-4" />}
-                Transfer Now
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setShowTransferModal(false)}>
+              Cancel
+            </Button>
+            <Button
+              onClick={handleWarmTransfer}
+              disabled={!transferTo.trim() || transferring}
+              className="bg-amber-500 hover:bg-amber-600"
+            >
+              {transferring ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <UserCheck className="mr-2 h-4 w-4" />}
+              Transfer Now
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
-      {enrichToast && (
-        <div className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-700 dark:border-emerald-500/20 dark:bg-emerald-500/10 dark:text-emerald-200 animate-in fade-in slide-in-from-top-2">
-          {enrichToast}
-        </div>
-      )}
+      <AlertDialog open={showDeleteConfirm} onOpenChange={setShowDeleteConfirm}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Delete lead?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Are you sure you want to delete &quot;{lead.name}&quot;? This action cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={performDeleteLead} className="bg-red-600 hover:bg-red-700">
+              Delete
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Stage Card */}
       {(lead.ism_stage || lead.next_action || lead.next_action_due_at) && (
@@ -1005,7 +1032,9 @@ export default function LeadDetailPage() {
                     <div className="rounded-xl border border-slate-200 dark:border-white/10 bg-white/70 dark:bg-slate-900/40 p-3 space-y-1.5">
                       <div className="flex items-center justify-between gap-2">
                         <span className="text-sm font-semibold text-slate-900 dark:text-white">
-                          {ev.demo_type} Demo Scheduled
+                          {ev.demo_type && ev.demo_type.toLowerCase() !== "demo"
+                            ? `${ev.demo_type} Demo Scheduled`
+                            : "Demo Scheduled"}
                         </span>
                         <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${
                           ev.status === "completed"
@@ -1118,13 +1147,51 @@ export default function LeadDetailPage() {
           >
             <option value="">Qualification status</option>
             <option value="new">New</option>
+            <option value="unqualified">Unqualified</option>
             <option value="contacted">Contacted</option>
             <option value="qualified">Qualified</option>
+            <option value="follow_up">Follow up</option>
             <option value="proposal">Proposal</option>
             <option value="won">Won</option>
             <option value="lost">Lost</option>
+            <option value="not_interested">Not interested</option>
+            <option value="disqualified">Disqualified</option>
           </select>
 
+          <select
+            value={statusDraft}
+            onChange={(event) => setStatusDraft(event.target.value)}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            title="Lead lifecycle status — gates call-now (closed_* blocks calls)"
+          >
+            <option value="">Lead status</option>
+            <option value="new">New</option>
+            <option value="contacted">Contacted</option>
+            <option value="engaged">Engaged</option>
+            <option value="closed_won">Closed won</option>
+            <option value="closed_lost">Closed lost</option>
+            <option value="do_not_call">Do not call</option>
+          </select>
+
+          <select
+            value={ismStageDraft}
+            onChange={(event) => setIsmStageDraft(event.target.value)}
+            className="rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            title="ISM automation stage — drives outreach channel picks"
+          >
+            <option value="">ISM stage</option>
+            <option value="new">New</option>
+            <option value="contacted">Contacted</option>
+            <option value="engaged">Engaged</option>
+            <option value="quoted">Quoted</option>
+            <option value="negotiation">Negotiation</option>
+            <option value="closed_won">Closed won</option>
+            <option value="closed_lost">Closed lost</option>
+            <option value="nurture_pause">Nurture pause</option>
+          </select>
+        </div>
+
+        <div className="mt-3 grid grid-cols-1 gap-4 md:grid-cols-2">
           <input
             value={nextActionDraft}
             onChange={(event) => setNextActionDraft(event.target.value)}
@@ -1205,17 +1272,32 @@ export default function LeadDetailPage() {
             city={lead.city}
             state={lead.state}
             country={lead.country}
+            pincode={lead.pincode}
             industry={lead.industry}
             website={lead.website}
             notes={cleanNotes(lead.notes)}
+            saving={profileSaving}
+            saveError={profileError}
+            onSave={handleSaveProfile}
           />
-          <NextActionCard nextAction={lead.next_action} dueAt={lead.next_action_due_at} />
+          <NextActionCard nextAction={effectiveNextAction.label} dueAt={effectiveNextAction.dueAt} />
+
+          <CollapsibleSection title="Explain Next Action" icon={Zap}>
+            <ExplainNextAction
+              leadId={leadId}
+              fallbackRecommendation={extractLatestRecommendation(interactions)}
+              onSessionTimeout={sessionTimeout}
+            />
+          </CollapsibleSection>
+
+          <CollapsibleSection title="Agent Actions Timeline" icon={Brain}>
+            <AgentActionsTimeline leadId={leadId} onSessionTimeout={sessionTimeout} />
+          </CollapsibleSection>
 
           {/* Waterfall enrichment pipeline */}
           <CollapsibleSection title="Enrichment Trace" icon={Zap}>
             <EnrichmentTrace
               leadId={leadId}
-              token={token!}
               onSessionTimeout={sessionTimeout}
             />
           </CollapsibleSection>
@@ -1224,7 +1306,6 @@ export default function LeadDetailPage() {
           <CollapsibleSection title="Best Call Times" icon={RefreshCw}>
             <BestCallTimes
               leadId={leadId}
-              token={token!}
               onSessionTimeout={sessionTimeout}
             />
           </CollapsibleSection>
@@ -1258,7 +1339,7 @@ export default function LeadDetailPage() {
 
         <div className="space-y-6 xl:col-span-2">
           <CollapsibleSection title="Qualification" icon={UserCheck}>
-            <QualificationCard qualificationStatus={lead.qualification_status} requirement={requirement} />
+            <QualificationCard qualificationStatus={lead.qualification_status} requirement={mergedRequirement} />
           </CollapsibleSection>
 
           {/* Enhanced ICP Score Card */}
@@ -1607,7 +1688,8 @@ export default function LeadDetailPage() {
                 }
               }
               if (best && best.id != null && !summaryByCallId.has(best.id)) {
-                summaryByCallId.set(best.id, summary.content!);
+                const formatted = formatInteractionSubtitle(summary.type, summary.content);
+                summaryByCallId.set(best.id, formatted || summary.content!);
               }
             }
             if (!callInteractions.length) return null;
@@ -1655,7 +1737,6 @@ export default function LeadDetailPage() {
                             {ci.recording_url ? (
                               <WaveformPlayer
                                 interactionId={ci.id}
-                                token={token!}
                                 transcript={ci.transcript}
                                 duration={ci.recording_duration}
                               />
@@ -1665,7 +1746,6 @@ export default function LeadDetailPage() {
                             }
                             <SalesCoachPanel
                               interactionId={ci.id}
-                              token={token!}
                               onSessionTimeout={sessionTimeout}
                             />
                           </div>
@@ -1682,7 +1762,6 @@ export default function LeadDetailPage() {
           <CollapsibleSection title="Competitor Signals" icon={Target}>
             <CompetitorBadges
               leadId={leadId}
-              token={token!}
               onSessionTimeout={sessionTimeout}
             />
           </CollapsibleSection>
@@ -1691,7 +1770,6 @@ export default function LeadDetailPage() {
           <CollapsibleSection title="WhatsApp Thread" icon={UserCheck}>
             <WhatsAppThread
               leadId={leadId}
-              token={token!}
               onSessionTimeout={sessionTimeout}
             />
           </CollapsibleSection>
@@ -1700,7 +1778,6 @@ export default function LeadDetailPage() {
           <CollapsibleSection title="Email Thread" icon={UserCheck}>
             <EmailThread
               leadId={leadId}
-              token={token!}
               leadEmail={lead?.email}
               onSessionTimeout={sessionTimeout}
             />

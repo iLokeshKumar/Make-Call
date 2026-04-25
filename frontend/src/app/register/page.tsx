@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { Building2, Eye, EyeOff, Loader2, Lock, Mail, User } from "lucide-react";
 
+import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 export default function RegisterPage() {
@@ -30,7 +31,7 @@ export default function RegisterPage() {
         setError("");
         setIsLoading(true);
         try {
-            const res = await fetch(`${API_BASE}/companies/register`, {
+            const res = await apiFetch(`${API_BASE}/companies/register`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
@@ -48,8 +49,9 @@ export default function RegisterPage() {
                 const errData = await res.json();
                 throw new Error(errData.detail || "Registration failed");
             }
-            const data = await res.json();
-            if (data.access_token) localStorage.setItem("token", data.access_token);
+            // The server set the session cookie on a successful register, so
+            // navigating to / triggers fetchUser() in AuthContext and the user
+            // is logged in. No client-side token storage required.
             router.push("/");
         } catch (err: any) {
             setError(err.message);

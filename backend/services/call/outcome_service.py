@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import timedelta
 from decimal import Decimal
 from typing import Any
@@ -30,20 +31,75 @@ OUTCOME_CALLBACK_REQUESTED = "answered_callback_requested"
 OUTCOME_FOLLOW_UP = "answered_follow_up_needed"
 OUTCOME_VOICEMAIL = "voicemail"
 
-# Signal detection patterns
+# Signal detection patterns.
+#
+# Matching rules (see _term_in_text):
+#   * Multi-word terms match when the full phrase appears as-is (substring OK,
+#     they're long enough to avoid false positives).
+#   * Single-word terms match only on word boundaries (\bword\b) so "no"
+#     doesn't match "number" and "call" doesn't match "recall".
+#
+# STRONG negatives: single unambiguous rejection → classify NOT_INTERESTED
+#   immediately.
+# WEAK negatives: timing / mild concerns — require at least two hits across
+#   STRONG+WEAK to trip NOT_INTERESTED, otherwise the call is treated as
+#   follow-up / neutral.
 POSITIVE_SIGNALS = {
     "interested", "yes", "tell me", "send", "share", "proposal",
     "pricing", "demo", "meeting", "call", "available", "excited",
     "let's do", "sounds good", "schedule demo", "send quote"
 }
-NEGATIVE_SIGNALS = {
-    "not interested", "no", "stop", "remove", "unsubscribe", "not now",
-    "later", "busy", "wrong", "no thanks", "not good", "don't call"
+STRONG_NEGATIVE_SIGNALS = {
+    "not interested", "no thanks", "don't call", "do not call",
+    "stop calling", "unsubscribe", "remove me", "lose my number",
+    "never call", "leave me alone",
 }
+WEAK_NEGATIVE_SIGNALS = {
+    "not now", "later", "busy", "wrong number", "wrong person",
+    "no time", "too expensive", "can't afford", "not a good time",
+    "not ready",
+}
+# Back-compat alias: the rest of the codebase (ism rules, inbound flows) still
+# imports NEGATIVE_SIGNALS.  Keep it as the union of strong + weak so existing
+# consumers see the same surface.
+NEGATIVE_SIGNALS = STRONG_NEGATIVE_SIGNALS | WEAK_NEGATIVE_SIGNALS
 CALLBACK_SIGNALS = {
     "call back", "callback", "call me", "speak", "ring me", "later",
     "call me back", "call me later", "later today", "later tomorrow"
 }
+
+# Pre-compiled regexes for single-word terms.  Multi-word terms use plain
+# substring match since the phrase length makes false positives unlikely.
+def _compile_word_regex(terms: set[str]) -> dict[str, re.Pattern[str]]:
+    out: dict[str, re.Pattern[str]] = {}
+    for term in terms:
+        if " " in term or "'" in term:
+            continue
+        out[term] = re.compile(rf"\b{re.escape(term)}\b", re.IGNORECASE)
+    return out
+
+
+_POS_WORD_REGEX = _compile_word_regex(POSITIVE_SIGNALS)
+_STRONG_NEG_WORD_REGEX = _compile_word_regex(STRONG_NEGATIVE_SIGNALS)
+_WEAK_NEG_WORD_REGEX = _compile_word_regex(WEAK_NEGATIVE_SIGNALS)
+_CALLBACK_WORD_REGEX = _compile_word_regex(CALLBACK_SIGNALS)
+
+
+def _term_in_text(term: str, text: str, word_regex_map: dict[str, re.Pattern[str]]) -> bool:
+    """Match *term* inside *text*.
+
+    Single-word terms use word-boundary regex (no false positive on
+    "number" vs "no").  Multi-word terms fall back to plain lowercase
+    substring.
+    """
+    pattern = word_regex_map.get(term)
+    if pattern is not None:
+        return bool(pattern.search(text))
+    return term in text
+
+
+def _count_matches(terms: set[str], text: str, word_regex_map: dict[str, re.Pattern[str]]) -> int:
+    return sum(1 for t in terms if _term_in_text(t, text, word_regex_map))
 
 ANSWERED_OUTCOMES = {
     OUTCOME_INTERESTED,
@@ -82,11 +138,21 @@ def normalize_call_outcome(
 
     # Analyze based on answered status + transcript
     if lowered_status in {"completed", "answered", "in_progress"} and lowered_transcript:
-        if any(term in lowered_transcript for term in NEGATIVE_SIGNALS):
+        # Strong negative (explicit rejection) → classify NOT_INTERESTED immediately.
+        for term in STRONG_NEGATIVE_SIGNALS:
+            if _term_in_text(term, lowered_transcript, _STRONG_NEG_WORD_REGEX):
+                return OUTCOME_NOT_INTERESTED
+
+        # Weak negatives: require ≥2 hits across weak + strong to avoid a
+        # single "busy" or "later" tipping a lead to closed_lost.  Remaining
+        # single-weak cases fall through to callback/positive/follow_up.
+        weak_hits = _count_matches(WEAK_NEGATIVE_SIGNALS, lowered_transcript, _WEAK_NEG_WORD_REGEX)
+        if weak_hits >= 2:
             return OUTCOME_NOT_INTERESTED
-        if any(term in lowered_transcript for term in CALLBACK_SIGNALS):
+
+        if any(_term_in_text(t, lowered_transcript, _CALLBACK_WORD_REGEX) for t in CALLBACK_SIGNALS):
             return OUTCOME_CALLBACK_REQUESTED
-        if any(term in lowered_transcript for term in POSITIVE_SIGNALS):
+        if any(_term_in_text(t, lowered_transcript, _POS_WORD_REGEX) for t in POSITIVE_SIGNALS):
             return OUTCOME_INTERESTED
         return OUTCOME_FOLLOW_UP
 
@@ -346,7 +412,7 @@ def _update_campaign_recipient_for_outcome(
             recipient.last_interaction_id = task.interaction_id
         session.add(recipient)
         session.commit()
-        from campaign.campaign_service import schedule_campaign_recipient_next_step
+        from services.campaign.campaign_service import schedule_campaign_recipient_next_step
 
         schedule_campaign_recipient_next_step(
             session=session,
@@ -368,6 +434,71 @@ def _update_campaign_recipient_for_outcome(
         recipient.status = "active"  # ← ADD THIS so the worker picks it up again
     session.add(recipient)
     session.commit()
+
+
+def apply_lead_only_outcome(
+    session: Session,
+    company_id: int,
+    actor_user_id: int,
+    lead_id: int,
+    interaction_id: int | None,
+    raw_status: str | None,
+    transcript: str | None,
+) -> dict[str, Any]:
+    """
+    Lead-only outcome processing for manual 'Call now' calls where no CallTask exists.
+
+    Mirrors the lead + interaction side of apply_call_outcome but skips task updates
+    and campaign recipient tracking. Used by the Twilio status-callback when
+    call_task_id is absent or zero.
+    """
+    interaction = session.get(Interaction, interaction_id) if interaction_id is not None else None
+    normalized_outcome = normalize_call_outcome(raw_status, transcript, interaction)
+    now = utc_now()
+
+    if interaction is not None:
+        interaction.metadata_json = {
+            **(interaction.metadata_json or {}),
+            "normalized_outcome": normalized_outcome,
+            "provider_status": raw_status,
+        }
+        interaction.updated_at = now
+        interaction.updated_by = actor_user_id
+        session.add(interaction)
+
+    lead = session.exec(
+        select(Lead).where(
+            Lead.id == lead_id,
+            Lead.company_id == company_id,
+        )
+    ).first()
+    if not lead:
+        return {"error": "Lead not found", "normalized_outcome": normalized_outcome}
+
+    patch = derive_lead_status_patch(normalized_outcome)
+    for key, value in patch.items():
+        setattr(lead, key, value)
+
+    target_ism = _OUTCOME_ISM_STAGE.get(normalized_outcome)
+    advanced = False
+    if target_ism:
+        advanced = advance_ism_stage(lead, target_ism)
+
+    lead.last_outreach_at = now
+    lead.updated_at = now
+    lead.updated_by = actor_user_id
+
+    session.add(lead)
+    session.commit()
+    session.refresh(lead)
+
+    return {
+        "lead_id": lead.id,
+        "normalized_outcome": normalized_outcome,
+        "ism_stage": lead.ism_stage,
+        "stage_advanced": advanced,
+        "status": lead.status,
+    }
 
 
 def apply_call_outcome(
@@ -470,7 +601,7 @@ def apply_call_outcome(
 
     # Invalidate predictive dialer cache so next prediction uses fresh data
     try:
-        from call.predictive_dialer_service import invalidate_model_cache
+        from services.call.predictive_dialer_service import invalidate_model_cache
         invalidate_model_cache(company_id)
     except Exception:
         pass
@@ -478,7 +609,7 @@ def apply_call_outcome(
     # Auto-CSAT: send feedback request after positive call outcomes
     if normalized_outcome in {OUTCOME_INTERESTED, OUTCOME_CALLBACK_REQUESTED}:
         try:
-            from feedback.auto_csat_service import maybe_send_auto_csat
+            from services.feedback.auto_csat_service import maybe_send_auto_csat
             maybe_send_auto_csat(
                 session=session,
                 company_id=company_id,
@@ -494,7 +625,7 @@ def apply_call_outcome(
     # Auto-CSAT: send a "we missed you" feedback email for no-answer / voicemail
     elif normalized_outcome in {OUTCOME_NO_ANSWER, OUTCOME_VOICEMAIL}:
         try:
-            from feedback.auto_csat_service import maybe_send_auto_csat
+            from services.feedback.auto_csat_service import maybe_send_auto_csat
             maybe_send_auto_csat(
                 session=session,
                 company_id=company_id,
