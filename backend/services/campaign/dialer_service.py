@@ -162,7 +162,6 @@ def get_next_queued_task(session: Session, company_id: int) -> CallTask | None:
 
 
 def _resolve_callback_base(session: Session, company_id: int) -> str:
-    # DOMAIN env always wins — it is the ngrok/public URL Twilio can reach. company.website / company.domain are branding fields, not webhook endpoints.
     if env_domain := os.getenv("DOMAIN"):
         return normalize_base_url(env_domain, "https://localhost:8000")
     company = session.get(Company, company_id)
@@ -189,35 +188,52 @@ def initiate_outbound_call(
 
     normalized_to = normalize_phone(to)
 
-    # Pre-call workflow via orchestrator (knowledge search + enrichment + ICP score).
-    # Result is stored in precall_cache so voice_pipeline can inject KB context.
-    # Can be disabled for low-latency call paths via ENABLE_PRECALL_RESEARCHER=0.
+    # Pre-call workflow via orchestrator (knowledge search + enrichment + ICP score).  Result is stored in precall_cache so voice_pipeline can inject KB context at call start.  Can be disabled for low-latency call paths via ENABLE_PRECALL_RESEARCHER=0.
+
+    # Run synchronously with a budget — `asyncio.create_task` was both racy (Twilio dial fired before precall finished, voice pipeline read empty cache) AND silently no-op'd in worker contexts that have no running event loop.  Sync-wait with a hard timeout guarantees the cache is populated when present, and bounds the dial-start delay if precall is slow / the LLM rate-limits.
     enable_precall_researcher = os.getenv("ENABLE_PRECALL_RESEARCHER", "1").lower() in {"1", "true", "yes", "on"}
     if lead_id and enable_precall_researcher:
+        precall_timeout_s = float(os.getenv("PRECALL_TIMEOUT_S", "4.0"))
+
         async def _run_precall():
-            try:
-                from agents.orchestrator import run_pre_call
-                from utils.precall_cache import put as cache_put
-                result = await run_pre_call(
+            from agents.orchestrator import run_pre_call
+            from utils.precall_cache import put as cache_put
+            result = await asyncio.wait_for(
+                run_pre_call(
                     lead_id=lead_id,
                     company_id=company_id,
                     actor_user_id=actor_user_id,
-                )
-                cache_put(company_id, lead_id, result)
-                logger.info(
-                    "[Dialer] Pre-call complete for lead %s: icp=%.2f, kb_chunks=%d",
-                    lead_id,
-                    result.get("icp_score", 0.0),
-                    len(result.get("kb_context", [])),
-                )
-            except Exception as exc:
-                logger.warning("[Dialer] Pre-call workflow failed (non-blocking): %s", exc)
+                ),
+                timeout=precall_timeout_s,
+            )
+            cache_put(company_id, lead_id, result)
+            logger.info(
+                "[Dialer] Pre-call complete for lead %s: icp=%.2f, kb_chunks=%d",
+                lead_id,
+                result.get("icp_score", 0.0),
+                len(result.get("kb_context", [])),
+            )
 
         try:
             import asyncio
-            asyncio.create_task(_run_precall())
-        except Exception:
-            pass
+            import concurrent.futures
+            import contextvars
+            try:
+                asyncio.get_running_loop()
+                # Worker invoked from FastAPI loop — offload to a thread with its own loop.  ContextVars (request_id, trace_id) cross via copy_context so logging stays coherent.
+                ctx = contextvars.copy_context()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                    pool.submit(ctx.run, asyncio.run, _run_precall()).result()
+            except RuntimeError:
+                # Sync worker context — no running loop.  Run directly.
+                asyncio.run(_run_precall())
+        except asyncio.TimeoutError:
+            logger.warning(
+                "[Dialer] Pre-call exceeded %.1fs budget for lead %s — dialing without KB context",
+                precall_timeout_s, lead_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Dialer] Pre-call workflow failed (non-blocking): %s", exc)
 
     lead = None
     if lead_id:

@@ -1043,9 +1043,7 @@ class EmailOutbox(AuditMixin, table=True):
     sent_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     last_issue: Optional[str] = None
 
-    # Distributed tracing — request_id_var (or worker trace_id) at enqueue time.
-    # Lets a support ticket → outbound email → backend log walk work in either
-    # direction.  Indexed for fast lookup when a customer cites the
+    # Distributed tracing — request_id_var (or worker trace_id) at enqueue time. Lets a support ticket → outbound email → backend log walk work in either direction.  Indexed for fast lookup when a customer cites the
     # X-Request-Id header from their copy of the email.
     request_id: Optional[str] = Field(default=None, max_length=64, index=True)
 
@@ -1193,10 +1191,7 @@ class AgentTask(AuditMixin, table=True):
     # Deduplication
     idempotency_key: Optional[str] = Field(default=None, max_length=200, index=True)
 
-    # Distributed tracing — inherited from request_id_var when the task is
-    # created inside an HTTP request, or from the parent task's trace when
-    # an executor enqueues a sub-task.  See
-    # services/agent/agent_task_service.create_agent_task.
+    # Distributed tracing — inherited from request_id_var when the task is created inside an HTTP request, or from the parent task's trace when an executor enqueues a sub-task. See services/agent/agent_task_service.create_agent_task.
     trace_id: Optional[str] = Field(default=None, max_length=64, index=True)
 
     # Retry
@@ -1427,7 +1422,6 @@ class CampaignStepUpdate(SQLModel):
 
 
 class CampaignStepsReorder(SQLModel):
-    # Ordered list of step IDs — backend assigns step_order 1, 2, 3...
     step_ids: list[int]
 
 

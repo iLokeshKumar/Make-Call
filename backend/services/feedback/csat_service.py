@@ -44,27 +44,24 @@ def get_or_create_pending_csat(
     window_hours = dedupe_window_hours or get_csat_dedupe_window_hours()
     window_start = now - timedelta(hours=window_hours)
 
+    # Dedupe by (lead, interaction) — same call shouldn't get two rows, but different calls within the window MUST each get their own feedback request (otherwise outbox dedupes and the customer never sees it). When called with no interaction_id, fall back to lead-level dedup.
+    base_filters = [
+        Feedback.company_id == company_id,
+        Feedback.lead_id == lead_id,
+        Feedback.feedback_type == "csat",
+        Feedback.source == "customer",
+        Feedback.status == "pending",
+        Feedback.token.isnot(None),
+        Feedback.token_expires_at.isnot(None),
+        Feedback.token_expires_at > now,
+        Feedback.created_at >= window_start,
+    ]
+    if interaction_id is not None:
+        base_filters.append(Feedback.interaction_id == interaction_id)
     pending = session.exec(
-        select(Feedback).where(
-            Feedback.company_id == company_id,
-            Feedback.lead_id == lead_id,
-            Feedback.feedback_type == "csat",
-            Feedback.source == "customer",
-            Feedback.status == "pending",
-            Feedback.token.isnot(None),
-            Feedback.token_expires_at.isnot(None),
-            Feedback.token_expires_at > now,
-            Feedback.created_at >= window_start,
-        ).order_by(Feedback.created_at.desc())
+        select(Feedback).where(*base_filters).order_by(Feedback.created_at.desc())
     ).first()
     if pending:
-        if interaction_id and not pending.interaction_id:
-            pending.interaction_id = interaction_id
-            pending.updated_at = now
-            pending.updated_by = actor_user_id
-            session.add(pending)
-            session.commit()
-            session.refresh(pending)
         return pending, False
 
     expires_at = now + timedelta(hours=max(1, expires_hours))

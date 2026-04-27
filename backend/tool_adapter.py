@@ -1,8 +1,63 @@
 import asyncio
 import logging
+import re
 from typing import Any
 
 from sqlmodel import Session
+
+
+# LLM tool-call argument coercion.  Different LLMs handle the same
+# function-schema field types differently:
+#   - Mistral / GPT-class: clean int or numeric string ("110", 110)
+#   - Cerebras Llama 3.1 8B: free-form English ("less than 10", "lead 110", "10%")
+#
+# Strategy: try the fast path (int()/float()), fall back to regex extraction
+# from the string form.  Never reject — pass the result downstream so the
+# real tool decides what "valid" means (lead-not-found, etc.).  Keeps the
+# original behavior intact for compliant LLMs while catching the messy ones.
+
+def _safe_int_arg(raw: Any, default: int = 0) -> int:
+    """Tolerant int coercion for LLM tool args.  Tries int() first; on
+    failure, regex-extracts the first integer from the string form.  Returns
+    `default` only when nothing numeric is present at all.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        m = re.search(r"-?\d+", s)
+        return int(m.group(0)) if m else default
+
+
+def _safe_float_arg(raw: Any, default: float = 0.0) -> float:
+    """Tolerant float coercion.  Strips '%', '$', whitespace; extracts the
+    first numeric token from strings like '10.5%' or 'discount 15'.  Returns
+    `default` only when nothing numeric is present.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return float(raw)
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip().replace("%", "").replace("$", "").strip()
+    if not s:
+        return default
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        return float(m.group(0)) if m else default
 
 from database import engine
 from services.agent.agent_tool_service import (
@@ -211,7 +266,7 @@ async def _execute_with_session(
         return check_icp_qualification(
             company_size=arguments.get("company_size", ""),
             industry=arguments.get("industry", ""),
-            employee_count=int(arguments.get("employee_count", 0) or 0),
+            employee_count=_safe_int_arg(arguments.get("employee_count")),
         )
 
     if not user_id:
@@ -232,7 +287,7 @@ async def _execute_with_session(
 
     if tool_name == "check_guardrails":
         return check_guardrails(
-            requested_discount_percent=float(arguments.get("requested_discount_percent", 0) or 0),
+            requested_discount_percent=_safe_float_arg(arguments.get("requested_discount_percent")),
         )
 
     if tool_name == "book_meeting":
@@ -240,7 +295,7 @@ async def _execute_with_session(
             session=session,
             company_id=company_id,
             actor_user_id=user.id,
-            lead_id=int(arguments.get("lead_id")),
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
             proposed_time=arguments.get("proposed_time", ""),
             meeting_type=arguments.get("meeting_type", "demo"),
             lead_email=arguments.get("lead_email"),
@@ -248,7 +303,7 @@ async def _execute_with_session(
 
     if tool_name == "get_call_latency_summary":
         return get_call_latency_summary(
-            interaction_id=int(arguments.get("interaction_id")),
+            interaction_id=_safe_int_arg(arguments.get("interaction_id")),
         )
 
     if tool_name == "get_or_create_lead":
@@ -272,7 +327,7 @@ async def _execute_with_session(
             session=session,
             company_id=company_id,
             actor_user_id=user.id,
-            lead_id=int(arguments.get("lead_id")),
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
             name=arguments.get("name", ""),
             phone=arguments.get("phone", ""),
             city=arguments.get("city"),
@@ -290,7 +345,7 @@ async def _execute_with_session(
             session=session,
             company_id=company_id,
             actor_user_id=user.id,
-            lead_id=int(arguments.get("lead_id")),
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
             channels=list(arguments.get("channels") or []),
             content=arguments.get("content", ""),
             subject=arguments.get("subject"),

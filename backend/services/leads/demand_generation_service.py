@@ -409,10 +409,7 @@ def trigger_new_lead_outreach(session: Session, company_id: int, actor_user_id: 
         result["reason"] = "AUTO_TRIGGER_NEW_LEADS disabled"
         return result
 
-    # Week 7 — three-agent split. Enqueue a researcher task that will handle
-    # deeper enrichment, LeadRequirement persistence, and either qualify +
-    # hand off to the outreacher, or disqualify the lead. Idempotent by
-    # lead_id so repeated create_lead calls don't flood the queue.
+    # three-agent split. Enqueue a researcher task that will handle deeper enrichment, LeadRequirement persistence, and either qualify + hand off to the outreacher, or disqualify the lead. Idempotent by lead_id so repeated create_lead calls don't flood the queue.
     try:
         from services.agent.agent_task_service import create_agent_task
         create_agent_task(

@@ -59,17 +59,14 @@ WEAK_NEGATIVE_SIGNALS = {
     "no time", "too expensive", "can't afford", "not a good time",
     "not ready",
 }
-# Back-compat alias: the rest of the codebase (ism rules, inbound flows) still
-# imports NEGATIVE_SIGNALS.  Keep it as the union of strong + weak so existing
-# consumers see the same surface.
+# Back-compat alias: the rest of the codebase (ism rules, inbound flows) still imports NEGATIVE_SIGNALS.  Keep it as the union of strong + weak so existing consumers see the same surface.
 NEGATIVE_SIGNALS = STRONG_NEGATIVE_SIGNALS | WEAK_NEGATIVE_SIGNALS
 CALLBACK_SIGNALS = {
     "call back", "callback", "call me", "speak", "ring me", "later",
     "call me back", "call me later", "later today", "later tomorrow"
 }
 
-# Pre-compiled regexes for single-word terms.  Multi-word terms use plain
-# substring match since the phrase length makes false positives unlikely.
+# Pre-compiled regexes for single-word terms.  Multi-word terms use plain substring match since the phrase length makes false positives unlikely.
 def _compile_word_regex(terms: set[str]) -> dict[str, re.Pattern[str]]:
     out: dict[str, re.Pattern[str]] = {}
     for term in terms:
@@ -143,9 +140,7 @@ def normalize_call_outcome(
             if _term_in_text(term, lowered_transcript, _STRONG_NEG_WORD_REGEX):
                 return OUTCOME_NOT_INTERESTED
 
-        # Weak negatives: require ≥2 hits across weak + strong to avoid a
-        # single "busy" or "later" tipping a lead to closed_lost.  Remaining
-        # single-weak cases fall through to callback/positive/follow_up.
+        # Weak negatives: require ≥2 hits across weak + strong to avoid a single "busy" or "later" tipping a lead to closed_lost. Remaining single-weak cases fall through to callback/positive/follow_up.
         weak_hits = _count_matches(WEAK_NEGATIVE_SIGNALS, lowered_transcript, _WEAK_NEG_WORD_REGEX)
         if weak_hits >= 2:
             return OUTCOME_NOT_INTERESTED
@@ -422,13 +417,6 @@ def _update_campaign_recipient_for_outcome(
         )
         return
 
-    # if retry_after_hours is not None:
-    #     from datetime import timedelta
-
-    #     recipient.next_run_at = utc_now() + timedelta(hours=retry_after_hours)
-    # session.add(recipient)
-    # session.commit()
-
     if retry_after_hours is not None:
         recipient.next_run_at = utc_now() + timedelta(hours=retry_after_hours)
         recipient.status = "active"  # ← ADD THIS so the worker picks it up again
@@ -543,15 +531,6 @@ def apply_call_outcome(
         task.status = "completed"
         task.completed_at = now
         task.retry_after = None
-    # elif retry_policy["should_retry"]:
-    #     task.status = "retry_scheduled"
-    #     task.retry_after = now if retry_policy["retry_after_hours"] is None else now.replace()
-    #     if retry_policy["retry_after_hours"] is not None:
-    #         from datetime import timedelta
-
-    #         task.retry_after = now + timedelta(hours=retry_policy["retry_after_hours"])
-    #     task.scheduled_at = task.retry_after
-    #     task.completed_at = None
 
     elif retry_policy["should_retry"]:
         task.status = "retry_scheduled"

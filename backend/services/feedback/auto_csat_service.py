@@ -1,13 +1,3 @@
-"""
-Auto-CSAT Service
-=================
-Fires a CSAT email automatically after:
-  - A call ends with a positive disposition (interested / callback_requested)
-  - A quote is accepted
-
-All failures are logged and swallowed - never block the caller.
-"""
-
 from __future__ import annotations
 
 import logging
@@ -36,9 +26,7 @@ MISSED_CALL_OUTCOMES = {
 DEFAULT_EXPIRY_HOURS = 72
 
 # Outcomes where the customer was actually engaged enough to give feedback.
-# Broader than POSITIVE_OUTCOMES — includes neutral and negative dispositions
-# because qualitative feedback from an unhappy caller is more valuable than
-# silence.  Excludes no_answer / voicemail (no conversation happened).
+# Broader than POSITIVE_OUTCOMES — includes neutral and negative dispositions because qualitative feedback from an unhappy caller is more valuable than silence.  Excludes no_answer / voicemail (no conversation happened).
 ENGAGED_OUTCOMES = {
     "answered_interested",
     "answered_callback_requested",
@@ -91,14 +79,24 @@ def maybe_send_auto_csat(
       - Falls back to whichever channel actually has a contact value.
     """
     if not lead_id:
+        logger.info("[AutoCSAT] skip: no lead_id (trigger=%s)", trigger)
         return
 
     if trigger == "call":
         if normalized_outcome and normalized_outcome not in ENGAGED_OUTCOMES:
+            logger.info(
+                "[AutoCSAT] skip lead=%s: outcome=%s not in ENGAGED_OUTCOMES",
+                lead_id, normalized_outcome,
+            )
             return
         if _has_verbal_feedback(session, company_id, interaction_id):
-            logger.info("[AutoCSAT] Skipping lead=%s — verbal feedback already captured", lead_id)
+            logger.info("[AutoCSAT] skip lead=%s: verbal feedback already captured", lead_id)
             return
+
+    logger.info(
+        "[AutoCSAT] dispatch lead=%s trigger=%s outcome=%s channel=%s",
+        lead_id, trigger, normalized_outcome, channel,
+    )
 
     try:
         lead = session.get(Lead, lead_id)
@@ -201,8 +199,7 @@ def maybe_send_auto_csat(
                 sent_channels.append("whatsapp")
             except Exception as ex:
                 logger.warning("[AutoCSAT] whatsapp send failed lead=%s: %s", lead_id, ex)
-                # WhatsApp failed (feature flag, opt-out, no creds) — fall back to email
-                # if we haven't already sent it.
+                # WhatsApp failed (feature flag, opt-out, no creds) — fall back to email if we haven't already sent it.
                 if "email" not in sent_channels and has_email and channel == "auto":
                     try:
                         html = get_styled_html(

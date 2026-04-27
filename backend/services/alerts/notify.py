@@ -36,6 +36,11 @@ async def _post_slack(subject: str, body: str) -> bool:
     url = os.getenv("SLACK_WEBHOOK_URL", "").strip()
     if not url:
         return False
+    if not url.startswith(("http://", "https://")):
+        # Common misconfig: pasted hooks.slack.com/... without the scheme.
+        # Don't burn an httpx call + crash; warn once per breach.
+        logger.warning("[alerts] SLACK_WEBHOOK_URL lacks http(s) scheme; ignoring (got %r)", url[:40])
+        return False
     try:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.post(url, json={"text": f"*{subject}*\n```{body}```"})

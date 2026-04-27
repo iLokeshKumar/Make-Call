@@ -97,3 +97,6 @@ docs/SCALING.md
 docs/SLOs.md
 docs/VOICE_TUNING.md
 tools/claude-usage/
+
+**/CLAUDE.md
+**/.gitignore

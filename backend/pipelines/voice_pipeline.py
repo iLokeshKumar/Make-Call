@@ -149,6 +149,14 @@ class VoicePipeline:
         # Rolling buffer of sentences actually emitted to TTS this turn — used to seed the next LLM prompt with "you were saying X" context on confirmed barge-in, so the agent does not restart cold.
         self.last_rio_spoken: deque[str] = deque(maxlen=5)
 
+        # End-of-call feedback enforcement: smaller LLMs sometimes drop the
+        # rare "ask for 1-5 rating before goodbye" instruction.  We track
+        # whether (a) Rio has actually asked, and (b) the customer has given
+        # a 1-5 in their speech, so the speaker layer can force-prepend the
+        # question if the LLM is about to say goodbye without having asked.
+        self.feedback_asked_this_call = False
+        self.user_gave_rating_this_call = False
+
         llm_api_key = _resolve_setting(
             all_settings,
             [f"{self.llm_provider.upper()}_API_KEY", "LLM_API_KEY"],
@@ -307,8 +315,7 @@ class VoicePipeline:
             return
         if self.current_llm_task and not self.current_llm_task.done():
             self.current_llm_task.cancel()
-        # Inject "you were saying X" context ONCE before the user turn lands.
-        # Must fire before _process_llm_response adds the user message.
+        # Inject "you were saying X" context ONCE before the user turn lands. Must fire before _process_llm_response adds the user message.
         if interrupted_context:
             try:
                 self.llm_service.add_system_message(
@@ -380,6 +387,33 @@ class VoicePipeline:
         if not text:
             return ""
         return re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
+
+    # Forced end-of-call feedback enforcement helpers.
+    _RATING_IN_USER_RE = re.compile(
+        r"\b(rat(?:e|ed|ing)|i(?:'d|'ll| would| will)?\s+say|give|out\s+of\s+(?:5|five)|stars?)\b[^.!?]{0,30}?\b(one|two|three|four|five|[1-5])\b",
+        re.IGNORECASE,
+    )
+    _GOODBYE_RE = re.compile(
+        r"\b(goodbye|good\s*bye|bye(?:\s*bye)?|take\s+care|have\s+a\s+(?:great|wonderful|good|nice)\s+day|"
+        r"talk\s+to\s+you\s+(?:soon|later)|see\s+you\s+(?:soon|later)|wrap\s+up|thanks\s+for\s+chatting)\b",
+        re.IGNORECASE,
+    )
+    _FEEDBACK_ASK_RE = re.compile(
+        r"(scale\s+of\s+1\s+to\s+5|rate\s+your\s+experience|how\s+would\s+you\s+rate)",
+        re.IGNORECASE,
+    )
+    _FORCED_FEEDBACK_PHRASE = (
+        "Before we wrap up — on a scale of 1 to 5, how would you rate your experience speaking with me today?"
+    )
+
+    def _customer_uttered_rating(self, transcript: str) -> bool:
+        return bool(transcript and self._RATING_IN_USER_RE.search(transcript))
+
+    def _sentence_says_goodbye(self, sentence: str) -> bool:
+        return bool(sentence and self._GOODBYE_RE.search(sentence))
+
+    def _sentence_asks_feedback(self, sentence: str) -> bool:
+        return bool(sentence and self._FEEDBACK_ASK_RE.search(sentence))
 
     def _is_echo_transcript(self, transcript: str) -> bool:
         normalized = self._normalize_text(transcript)
@@ -468,8 +502,14 @@ class VoicePipeline:
                         except (ValueError, TypeError):
                             pass
                             
-                    if stream_int_id:
+                    # Only adopt stream-supplied interaction_id when we don't already have one from main.py's pre-validated session. An attacker-controlled or stale stream parameter could otherwise re-attach transcript writes to a different DB row, splitting a single call across records.
+                    if stream_int_id and not self.interaction_id:
                         self.interaction_id = stream_int_id
+                    elif stream_int_id and str(stream_int_id) != str(self.interaction_id):
+                        logger.warning(
+                            "[Pipeline] stream_int_id=%s differs from session interaction_id=%s — keeping session value",
+                            stream_int_id, self.interaction_id,
+                        )
 
                     logger.info(f"🚀 [Telephony] Stream started. Sid: {self.communicator.stream_sid} | Interaction: {self.interaction_id}")
                     break
@@ -507,17 +547,33 @@ class VoicePipeline:
                 elif event == "stop":
                     break
 
-        # Two consumers of audio: barge-in detector + STT. We can't use the same generator twice, so we fan-out via a second queue
+        # Two consumers of audio: barge-in detector + STT. We can't use the same generator twice, so we fan-out via a second queue.  The barge queue is bounded so a long call with DISABLE_BARGE_IN=1 (or a detector that briefly stalls) cannot grow it without limit. 200 chunks @ 20ms ≈ 4s of audio — plenty of headroom; OOM bound.
         stt_queue = asyncio.Queue()
-        barge_queue = asyncio.Queue()
+        barge_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
 
         async def _fan_out():
             """Read raw audio once, copy to both queues."""
             async for chunk in _audio_gen_from_queue():
                 await stt_queue.put(chunk)
-                await barge_queue.put(chunk)
+                # Drop-oldest on barge_queue to keep memory bounded when the detector lags (e.g., DISABLE_BARGE_IN=1).  STT side stays unbounded — losing STT audio would silently drop turns.
+                try:
+                    barge_queue.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    try:
+                        barge_queue.get_nowait()
+                        barge_queue.put_nowait(chunk)
+                    except Exception:  # noqa: BLE001
+                        pass
             await stt_queue.put(None)   # sentinel
-            await barge_queue.put(None)
+            try:
+                barge_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                # Drop one to make room for the sentinel.
+                try:
+                    barge_queue.get_nowait()
+                    barge_queue.put_nowait(None)
+                except Exception:  # noqa: BLE001
+                    pass
 
         async def _stt_gen():
             """Feed STT from stt_queue."""
@@ -636,17 +692,37 @@ class VoicePipeline:
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
                         continue
 
-                    # Gate: discard echo while Rio is speaking. Skip when interrupt_pending=True — user spoke during/after barge-in and that speech must NOT be echo-gated (queue may still have stale items).
+                    # distinguish *real* echo (STT picked up Rio's own voice) from a legitimate user turn that happens during Rio's playback.  The previous blanket "Rio speaking → drop" rule silenced customers whose speech the barge detector failed to catch (e.g. RMS below threshold during back-to-back TTS guard windows).  Now we drop only when the transcript matches one of the last 3 Rio sentences (prefix / exact match).  Fresh content is treated as a confirmed barge-in: pause Rio, raise interrupt_pending so downstream logic processes the turn properly.
                     if not self.interrupt_pending and (self.is_rio_speaking or not self.sentence_queue.empty()):
-                        logger.info(f"🔇 Echo ignored: '{current_turn_transcript}'")
-                        current_turn_transcript = ""
-                        continue
+                        if self._is_echo_transcript(current_turn_transcript):
+                            logger.info(f"🔇 Echo ignored: '{current_turn_transcript}'")
+                            current_turn_transcript = ""
+                            continue
+                        # New content from the user mid-playback — promote to confirmed interrupt so the rest of this loop treats it as a real turn.  Pause playback + clear audio so Rio's voice doesn't talk over the customer.
+                        logger.info(f"⚡ [Mid-playback turn] '{current_turn_transcript}' (no barge fired) — treating as interrupt")
+                        self.interrupt_pending = True
+                        self.pending_interrupt_reason = "stt_caught_user_speaking"
+                        try:
+                            self._pause_playback_for_interrupt()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            await self.communicator.clear_audio_buffer()
+                        except Exception:  # noqa: BLE001
+                            pass
 
                     last_final_transcript = current_turn_transcript
                     logger.info(f"🎤 [STT] FINAL: {current_turn_transcript}")
                     self.last_customer_speech_time = time.time()
+                    # Track whether the customer named a 1-5 — used by the
+                    # forced-feedback-ask gate so we don't pester someone
+                    # who already gave a rating.
+                    if self._customer_uttered_rating(current_turn_transcript):
+                        self.user_gave_rating_this_call = True
                     logger.info(f"⏰ [VoicePipeline] Last customer speech time: {self.last_customer_speech_time}")
-                    latency = time.time() - stt_start_time
+                    # Latency for THIS turn — measured from when listening for the next user turn began.  Capture it now, then immediately reset so the interrupt path's `continue` below cannot leak the clock across turns (which made stt_ms grow linearly with call duration).  Sanity-cap at 30s so a stuck pipeline doesn't poison percentile aggregates downstream.
+                    latency = min(time.time() - stt_start_time, 30.0)
+                    stt_start_time = time.time()
 
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
 
@@ -707,12 +783,17 @@ class VoicePipeline:
                         continue
 
                     self._schedule_llm_dispatch(latency)
-                    stt_start_time = time.time()
+                    # stt_start_time already reset above (immediately after capturing latency).  No reset needed here.
                     current_turn_transcript = ""
 
         except Exception as e:
             logger.error(f"❌ [VoicePipeline] STT loop error: {e}")
         finally:
+            # Defensive: ensure speaker is not stuck in pause-mode wait when we drop the shutdown sentinel.  resume_event.set() wakes any pending resume waiter so the queue.get() can read the None.
+            try:
+                self.resume_event.set()
+            except Exception:  # noqa: BLE001
+                pass
             await self.sentence_queue.put(None)
             await speaker_task
             fan_out_task.cancel()
@@ -748,9 +829,6 @@ class VoicePipeline:
             # How long since customer last spoke?
             silence_since_customer_spoke = time.time() - self.last_customer_speech_time
 
-            # Only fire if:
-            # - Rio finished speaking > threshold ago
-            # - Customer hasn't spoken since Rio finished (customer spoke BEFORE Rio finished)
             if (silence_since_rio_finished > SILENCE_THRESHOLD 
                     and self.last_customer_speech_time < self.last_rio_speech_end_time):
 
@@ -768,37 +846,6 @@ class VoicePipeline:
                 self.last_rio_speech_end_time = time.time()
                 self.last_context_type = "general"
 
-    # async def _silence_watcher(self):
-    #     """Re-engages customer after prolonged silence with context-aware phrases."""
-    #     SILENCE_THRESHOLD = 15  # seconds - reduced for proactive selling
-    #     CHECK_INTERVAL = 10     # check frequently for high responsiveness
-
-    #     while True:
-    #         await asyncio.sleep(CHECK_INTERVAL)
-    #         silence_duration = time.time() - self.last_customer_speech_time
-
-    #         # Only fire if: customer is silent, Rio is NOT speaking, queue is empty
-    #         if (silence_duration > SILENCE_THRESHOLD 
-    #                 and not self.is_rio_speaking 
-    #                 and self.sentence_queue.empty()):
-            
-    #             # Select phrase based on the last action context
-    #             if self.last_context_type == "pricing":
-    #                 phrase = "Take your time — that's a big decision and I'm happy to walk through it."
-    #             elif self.last_context_type == "demo":
-    #                 phrase = "Does that answer your question, or would you like me to go deeper on any part?"
-    #             else:
-    #                 phrase = "Still there? Happy to answer anything."
-                
-    #             logger.info(f"🔔 [Silence Watcher] {silence_duration:.1f}s of silence in '{self.last_context_type}' context — re-engaging")
-    #             await self.sentence_queue.put(phrase)
-            
-    #             # Reset timer so we don't spam immediately again
-    #             self.last_customer_speech_time = time.time()
-                
-    #             # Reset context after re-engaging to avoid repetitive phrases
-    #             self.last_context_type = "general"
-
 
     async def _speaker_loop(self):
         """Continuously pulls sentences from the queue and speaks them."""
@@ -810,7 +857,7 @@ class VoicePipeline:
             sv_ws = None
             
             try:
-                # 1. Setup persistent connections if needed
+                # Setup persistent connections if needed
                 if self.tts_provider == "deepgram":
                     dg_api_key = self.integration_keys.get("DEEPGRAM_API_KEY")
                     if not dg_api_key:
@@ -868,23 +915,37 @@ class VoicePipeline:
                             sv_config = SarvamTTS.ws_config_frame_static(
                                 model=self.tts_service.model,
                                 speaker=self.tts_service.speaker,
+                                language=self.lead_language,
                             )
                             await sv_ws.send_str(sv_config)
-                            logger.info("🎯 Sarvam TTS Persistent WebSocket Connected")
+                            logger.info(f"🎯 Sarvam TTS Persistent WebSocket Connected (language={self.lead_language})")
                         except Exception as exc:
                             sv_ws = None
                             logger.error(f"❌ Sarvam TTS WebSocket connect failed: {exc}")
 
-            # 2. Main Speaker Loop
+            # Main Speaker Loop.  Race resume_event against the queue so a shutdown sentinel (None) puts during pause-mode hang-up wakes this loop immediately.  Without the race, hang-up during an active barge-in pause would leave the speaker blocked on resume_event.wait() forever, stalling teardown until the outer timeout fires (and post-call flush with it).
                 while True:
-                    await self.resume_event.wait()
-                    sentence = await self.sentence_queue.get()
-                    if sentence is None:
-                        break
+                    resume_task = asyncio.create_task(self.resume_event.wait())
+                    sentence_task = asyncio.create_task(self.sentence_queue.get())
+                    done, pending = await asyncio.wait(
+                        {resume_task, sentence_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for p in pending:
+                        p.cancel()
 
-                    # Track what we actually emit to TTS this turn.  On confirmed
-                    # barge-in this buffer feeds "you were saying X" into the next
-                    # LLM call so the agent can acknowledge being cut off.
+                    if sentence_task in done:
+                        sentence = sentence_task.result()
+                        if sentence is None:
+                            break
+                        # Delivery still gated — wait for resume if paused.
+                        if not self.resume_event.is_set():
+                            await self.resume_event.wait()
+                    else:
+                        # resume signaled with empty queue — loop back.
+                        continue
+
+                    # Track what we actually emit to TTS this turn.  On confirmed barge-in this buffer feeds "you were saying X" into the next LLM call so the agent can acknowledge being cut off.
                     if isinstance(sentence, str) and sentence.strip():
                         self.last_rio_spoken.append(sentence.strip())
 
@@ -957,9 +1018,10 @@ class VoicePipeline:
                                     sv_config = SarvamTTS.ws_config_frame_static(
                                         model=self.tts_service.model,
                                         speaker=self.tts_service.speaker,
+                                        language=self.lead_language,
                                     )
                                     await sv_ws.send_str(sv_config)
-                                    logger.info("🎯 Sarvam TTS Persistent WebSocket (Re)Connected")
+                                    logger.info(f"🎯 Sarvam TTS Persistent WebSocket (Re)Connected (language={self.lead_language})")
                                 except Exception as exc:
                                     sv_ws = None
                                     logger.error(f"❌ Sarvam TTS WebSocket reconnect failed: {exc}")
@@ -1133,54 +1195,9 @@ class VoicePipeline:
         except Exception as e:
             logger.error(f"❌ Error saving latency: {e}")
 
-    
-    # def save_transcript(self, engine_name="voice_call"):
-    #     """Saves transcript to Interaction table. Upserts if record exists."""
-    #     try:
-    #         full_transcript = "\n".join(self.transcript_accumulator)
-    #         if not full_transcript.strip():
-    #             return
-
-    #         try:
-    #             interaction_id_int = int(self.interaction_id)
-    #         except (ValueError, TypeError):
-    #             interaction_id_int = None
-
-    #         db_i = None
-    #         if interaction_id_int:
-    #             db_i = self.session.get(Interaction, interaction_id_int)
-            
-    #         if not db_i:
-    #             # Try to find a lead if we have a phone number (not implemented in VoicePipeline but good pattern)
-    #             # For now, create a new Interaction record
-    #             db_i = Interaction(
-    #                 lead_id=0, # Anonymous lead
-    #                 type="call",
-    #                 content=f"Voice Interaction ({engine_name})",
-    #                 transcript=full_transcript,
-    #                 timestamp=datetime.now(timezone.utc),
-    #                 source="Voice Call",
-    #                 created_by="Rio AI"
-    #             )
-    #             self.session.add(db_i)
-    #             self.session.commit()
-    #             self.session.refresh(db_i)
-    #             # If we're now assigning an ID, update our internal reference
-    #             if not interaction_id_int:
-    #                 self.interaction_id = str(db_i.id)
-    #         else:
-    #             db_i.transcript = full_transcript
-    #             self.session.add(db_i)
-    #             self.session.commit()
-                
-    #         logger.debug(f"📜 [Transcript Saved] ID: {db_i.id} | Length: {len(full_transcript)} chars")
-    #     except Exception as e:
-    #         logger.error(f"❌ Error saving transcript: {e}")
-
     def save_transcript(self, engine_name="voice_call"):
         """During call: just mark dirty. DB write is deferred to flush_transcript()."""
         self._transcript_dirty = True
-        # No DB write here. transcript_accumulator already has the data in memory.
 
     def _build_transcript_content(self) -> str:
         return "\n".join(line for line in self.transcript_accumulator if line and line.strip())
@@ -1329,9 +1346,7 @@ class VoicePipeline:
         if user_input:
             self.current_turn_user_text = user_input
             self.llm_service.add_user_message(user_input)
-            # Fresh turn — clear the spoken-so-far buffer.  Tool-call recursion
-            # leaves it in place so an interruption mid-tool-output still sees
-            # what the agent was saying.
+            # Fresh turn — clear the spoken-so-far buffer.  Tool-call recursion leaves it in place so an interruption mid-tool-output still sees what the agent was saying.
             self.last_rio_spoken.clear()
         
         mistral_tools = get_mistral_tools()
@@ -1342,8 +1357,6 @@ class VoicePipeline:
         async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
                 sentence = chunk["content"]
-
-                # strip JSON fragments out of an otherwise valid sentence
 
                 stripped = self._strip_json_fragments(sentence)
 
@@ -1366,6 +1379,24 @@ class VoicePipeline:
                 if not clean_sentence or len(clean_sentence.strip()) < 2:
                     continue
 
+                if (
+                    self._sentence_says_goodbye(clean_sentence)
+                    and not self.feedback_asked_this_call
+                    and not self.user_gave_rating_this_call
+                ):
+                    logger.info(
+                        "[Pipeline] LLM was about to say goodbye without asking for "
+                        "feedback — forcing the 1-5 rating question."
+                    )
+                    self.feedback_asked_this_call = True
+                    self.last_rio_sentences.append(self._FORCED_FEEDBACK_PHRASE)
+                    self.last_rio_spoken.append(self._FORCED_FEEDBACK_PHRASE)
+                    await self.sentence_queue.put(self._FORCED_FEEDBACK_PHRASE)
+
+                
+                if self._sentence_asks_feedback(clean_sentence):
+                    self.feedback_asked_this_call = True
+
                 logger.info("📤 [%s -> Queue] Sentence: %r", self.llm_provider, clean_sentence)
                 await self.sentence_queue.put(clean_sentence)
             elif chunk["type"] == "error":
@@ -1384,33 +1415,11 @@ class VoicePipeline:
                 self.llm_error_count = 0
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
-            #     error_msg = chunk.get("content", "Unknown LLM Error")
-            #     logger.error(f"❌ [{self.llm_provider}] Stream Error in Pipeline: {error_msg}")
-                
-            #     # FALLBACK: Inform the user of the connection trouble instead of staying silent
-            #     self.llm_error_count += 1
-                
-            #     if self.llm_error_count >= 3:
-            #         fallback_sentence = "I'm sorry, I'm experiencing persistent technical difficulties. Please try calling back in a few minutes."
-            #         logger.warning(f"🚨 [Smart Fallback] 3 consecutive failures. Queuing final error message.")
-            #     else:
-            #         fallback_sentence = "I'm sorry, I'm having a bit of trouble with my connection. Could you repeat that?"
-            #         logger.info(f"🔄 [Smart Fallback] Failure #{self.llm_error_count}. Queuing retry message.")
-                
-            #     await self.sentence_queue.put(fallback_sentence)
-            #     return
-            # elif chunk["type"] == "finished":
-            #     # Success! Reset consecutive error count
-            #     self.llm_error_count = 0
-                
-            #     full_reply = chunk["full_reply"]
-            #     tool_calls = chunk["tool_calls"]
+
                 reasoning_details = chunk.get("reasoning_details")
                 llm_end_time = time.time()
                 llm_latency = llm_end_time - llm_start_time
                 
-                # CRITICAL: Add assistant message ONCE with both content AND tool_calls
-                # This follows OpenAI/Llama specs and prevents sequence errors
                 self.llm_service.add_assistant_message(
                     full_reply, 
                     tool_calls=tool_calls, 
@@ -1533,12 +1542,9 @@ class VoicePipeline:
         """
         if not text:
             return text
-        # Remove { ... } JSON objects (handles one level of nesting via two passes)
         for _ in range(3):
             text = re.sub(r'\{[^{}]*\}', '', text)
-        # Remove [ ... ] arrays
         text = re.sub(r'\[[^\[\]]*\]', '', text)
-        # Remove bare "key": "value"  /  "key": number  /  "key": true|false|null
         text = re.sub(
             r'"[a-z_]{2,24}"\s*:\s*(?:"[^"]*"|\d+(?:\.\d+)?|true|false|null)',
             '', text,

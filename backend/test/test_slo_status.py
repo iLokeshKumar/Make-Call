@@ -230,6 +230,28 @@ def test_slack_posts_when_env_set(monkeypatch):
     assert "subj" in captured["json"]["text"]
 
 
+def test_slack_skips_when_url_lacks_scheme(monkeypatch):
+    """Common misconfig: pasted hooks.slack.com/... without https:// prefix.
+    Must no-op rather than letting httpx raise mid-breach."""
+    monkeypatch.setenv("SLACK_WEBHOOK_URL", "hooks.slack.com/services/foo/bar")
+    from services.alerts import notify as notify_mod
+
+    posted = {"called": False}
+
+    class _ExplodingClient:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, *a, **kw):
+            posted["called"] = True
+            raise RuntimeError("should never be called when URL has no scheme")
+
+    monkeypatch.setattr(notify_mod, "httpx", types.SimpleNamespace(AsyncClient=_ExplodingClient))
+    ok = asyncio.run(notify_mod._post_slack("subj", "body"))
+    assert ok is False
+    assert posted["called"] is False
+
+
 # Worker dedupe + soft-launch
 
 def test_slo_alerts_disabled_until_enabled_at(monkeypatch):

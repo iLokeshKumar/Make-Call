@@ -28,7 +28,17 @@ from typing import Literal, Optional
 
 from sqlmodel import Session, select
 
-from models.models import CallTask, Campaign, CampaignRecipient, Lead, LeadRequirement, utc_now
+from models.models import (
+    Appointment,
+    CallTask,
+    Campaign,
+    CampaignRecipient,
+    Feedback,
+    Lead,
+    LeadRequirement,
+    Quote,
+    utc_now,
+)
 from services.communication.communication_service import get_company_setting_value
 from services.message_render_service import render_template_by_id
 from services.next_action_service import dispatch_next_action, handle_inbound_quote_request
@@ -492,6 +502,122 @@ def _advance_stage(lead: Lead, actor_user_id: int, session: Session) -> str:
     return next_stage
 
 
+def _set_terminal_stage(lead: Lead, actor_user_id: int, session: Session, terminal: str) -> str:
+    """Transition lead directly to a terminal stage (closed_won / closed_lost)."""
+    lead.ism_stage = terminal
+    lead.updated_at = utc_now()
+    lead.updated_by = actor_user_id
+    session.add(lead)
+    session.commit()
+    return terminal
+
+
+def _decide_exhaustion_outcome(
+    session: Session,
+    company_id: int,
+    lead: Lead,
+) -> tuple[str, str]:
+    """
+    When all dispatch channels are exhausted, pick a terminal outcome based on
+    customer-side signals collected so far.  No human in the loop unless
+    signals genuinely conflict.
+
+    Signals consulted:
+      - Verbal CSAT rating from the call (Feedback rows, customer source).
+      - Latest Quote status.
+      - Future Appointment booked (demo).
+      - Lead.qualification_status (set by post-call extractor).
+      - Days since last outreach (silent ghost detector).
+
+    Returns (decision, reason) where decision ∈ {"closed_won", "closed_lost", "handoff"}.
+    """
+    now = utc_now()
+    pos_score = 0
+    neg_score = 0
+    reasons: list[str] = []
+
+    # Verbal CSAT — strongest individual signal because it's customer voice.
+    fb = session.exec(
+        select(Feedback)
+        .where(
+            Feedback.company_id == company_id,
+            Feedback.lead_id == lead.id,
+            Feedback.source == "customer",
+            Feedback.feedback_type == "csat",
+            Feedback.rating.is_not(None),
+        )
+        .order_by(Feedback.created_at.desc())
+        .limit(1)
+    ).first()
+    if fb and fb.rating is not None:
+        if fb.rating >= 4:
+            pos_score += 2
+            reasons.append(f"verbal_csat={fb.rating}")
+        elif fb.rating <= 2:
+            neg_score += 2
+            reasons.append(f"verbal_csat={fb.rating}")
+
+    # Future appointment / demo booked = strong commit-to-buy signal.
+    appt = session.exec(
+        select(Appointment)
+        .where(
+            Appointment.company_id == company_id,
+            Appointment.lead_id == lead.id,
+            Appointment.appointment_time > now,
+            Appointment.status.in_(["scheduled", "confirmed"]),
+        )
+        .limit(1)
+    ).first()
+    if appt:
+        pos_score += 1
+        reasons.append("future_demo_booked")
+
+    # Latest quote status.
+    quote = session.exec(
+        select(Quote)
+        .where(Quote.company_id == company_id, Quote.lead_id == lead.id)
+        .order_by(Quote.id.desc())
+        .limit(1)
+    ).first()
+    if quote:
+        qstatus = (quote.status or "").lower()
+        if qstatus == "accepted":
+            pos_score += 2
+            reasons.append("quote_accepted")
+        elif qstatus in ("rejected", "expired"):
+            neg_score += 1
+            reasons.append(f"quote_{qstatus}")
+
+    # Qualification verdict from post-call LLM extractor.
+    qual = (lead.qualification_status or "").lower()
+    if qual == "not_interested":
+        neg_score += 2
+        reasons.append("qualification=not_interested")
+    elif qual in ("qualified", "proposal"):
+        pos_score += 1
+        reasons.append(f"qualification={qual}")
+
+    # Silent ghost: no outreach activity for a long time AND no positive signal —
+    # the customer simply went dark.  Default to closed_lost so the queue doesn't
+    # hold stale leads forever.
+    silent_days: int | None = None
+    if lead.last_outreach_at:
+        silent_days = (now - lead.last_outreach_at).days
+
+    # Decision.  Require a clear winner; ties go to handoff so a human breaks them.
+    if pos_score >= 2 and pos_score > neg_score:
+        return "closed_won", ",".join(reasons) or "positive_signals"
+    if neg_score >= 2 and neg_score > pos_score:
+        return "closed_lost", ",".join(reasons) or "negative_signals"
+    if silent_days is not None and silent_days >= 14 and pos_score == 0:
+        return "closed_lost", f"silent_{silent_days}d"
+    if pos_score == 0 and neg_score == 0:
+        # No signals at all — customer never engaged after first touch.
+        # Treat as closed_lost rather than parking forever.
+        return "closed_lost", "no_engagement_signals"
+    return "handoff", ",".join(reasons) or "ambiguous_signals"
+
+
 def _update_lead_after_dispatch(
     session: Session,
     lead: Lead,
@@ -691,18 +817,61 @@ def run_ism_cycle(
     else:
         channel = _pick_channel(session, company_id, lead, stage)
     if channel is None:
-        # All channels blocked → advance stage so we don't spin forever, then give up.
-        new_stage = _advance_stage(lead, actor_user_id, session)
+        # All dispatchable channels exhausted.  Decide the outcome from
+        # customer-side signals (verbal CSAT, quote status, appointment,
+        # qualification, silence duration).  Only fall back to a human
+        # handoff when signals genuinely conflict — automation-first.
+        decision, reason = _decide_exhaustion_outcome(session, company_id, lead)
+
+        if decision in ("closed_won", "closed_lost"):
+            new_stage = _set_terminal_stage(lead, actor_user_id, session, decision)
+            logger.info(
+                "ISM: lead=%d channels exhausted at stage=%s → auto-%s (signals: %s)",
+                lead_id, stage, new_stage, reason,
+            )
+            return {
+                "lead_id": lead_id,
+                "stage": stage,
+                "skipped": True,
+                "skip_reason": "all_channels_blocked",
+                "advanced_to_stage": new_stage,
+                "decision_reason": reason,
+            }
+
+        # Genuinely ambiguous — emit handoff for human review.  Idempotency
+        # key prevents flooding: one task per (lead, stage) while non-terminal.
+        try:
+            from services.agent.agent_task_service import create_agent_task
+            create_agent_task(
+                session=session,
+                company_id=company_id,
+                task_type="handoff",
+                assigned_agent="closer",
+                input_json={
+                    "lead_id": lead_id,
+                    "stage": stage,
+                    "reason": "ambiguous_signals",
+                    "signal_summary": reason,
+                    "summary": f"Lead {lead_id} channels exhausted at stage={stage}; signals conflict ({reason}) — needs human review.",
+                },
+                lead_id=lead_id,
+                actor_user_id=actor_user_id,
+                idempotency_key=f"ism-exhausted:{lead_id}:{stage}",
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ISM: failed to create handoff task for lead=%d: %s", lead_id, exc)
+
         logger.info(
-            "ISM: lead=%d all channels exhausted at stage=%s → advanced to %s",
-            lead_id, stage, new_stage,
+            "ISM: lead=%d channels exhausted at stage=%s → handoff (ambiguous: %s)",
+            lead_id, stage, reason,
         )
         return {
             "lead_id": lead_id,
             "stage": stage,
             "skipped": True,
             "skip_reason": "all_channels_blocked",
-            "advanced_to_stage": new_stage,
+            "handoff_created": True,
+            "decision_reason": reason,
         }
 
     # Dispatch.

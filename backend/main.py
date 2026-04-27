@@ -7,7 +7,6 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env before any other imports so os.getenv() works everywhere
 _env_path = Path(__file__).parent / ".env"
 load_dotenv(_env_path, override=False)
 
@@ -57,13 +56,13 @@ class _RequestContextMiddleware(BaseHTTPMiddleware):
             request_id_var.reset(token)
         duration_ms = int((time.monotonic() - start) * 1000)
         response.headers["X-Request-ID"] = req_id
-        # SLO #1 (API availability) feed.  In-process counter; OPTIONS skipped.
+
         try:
             from services.observability import record_response as _rec
             _rec(request.method, response.status_code)
         except Exception:  # noqa: BLE001
             pass
-        # Skip noisy health-check / static paths from the summary log
+
         if not request.url.path.startswith("/uploads"):
             logger.info(
                 "%s %s → %d (%dms)",
@@ -88,7 +87,7 @@ class _RLSMiddleware(BaseHTTPMiddleware):
     ContextVar as None, which the RLS policy treats as "bypass" — all rows visible.
     """
 
-    # Paths that never carry a tenant Bearer token — skip JWT decode entirely.
+
     _BYPASS_PREFIXES = ("/health", "/docs", "/openapi", "/redoc", "/uploads", "/static")
 
     async def dispatch(self, request: Request, call_next):
@@ -108,7 +107,7 @@ class _RLSMiddleware(BaseHTTPMiddleware):
 
     @staticmethod
     def _extract_company_id(request: Request) -> int | None:
-        # Cookie first (httpOnly session), then bearer header (legacy + bots).
+
         from auth import SESSION_COOKIE_NAME
         token = request.cookies.get(SESSION_COOKIE_NAME)
         if not token:
@@ -173,6 +172,15 @@ def get_company_setting_value(session: Session, company_id: int, key: str) -> st
 
 
 def resolve_call_context(session: Session, user_id: str | None, lead_id: str | None) -> tuple[User | None, Lead | None]:
+    """Resolve the User + Lead bound to a voice call.
+
+    Resolution order:
+      1. Explicit user_id wins.
+      2. Else fall back to the lead's owner_user_id (same tenant guaranteed).
+
+    Never picks an arbitrary first User — that would cross tenants.  Callers
+    are expected to reject the WebSocket when target_user is None.
+    """
     target_user = None
     lead = None
 
@@ -184,8 +192,13 @@ def resolve_call_context(session: Session, user_id: str | None, lead_id: str | N
         if lead and not target_user and lead.owner_user_id:
             target_user = session.get(User, lead.owner_user_id)
 
-    if not target_user:
-        target_user = session.exec(select(User).order_by(User.id.asc())).first()
+
+    if target_user and lead and target_user.company_id != lead.company_id:
+        logger.warning(
+            "[Pipeline] tenant mismatch user.company=%s lead.company=%s — dropping lead",
+            target_user.company_id, lead.company_id,
+        )
+        lead = None
 
     return target_user, lead
 
@@ -251,10 +264,73 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
     raw_interaction_id = websocket.query_params.get("interaction_id")
     call_task_id = websocket.query_params.get("call_task_id")
 
+    # Twilio Media Streams strips query parameters from the wss:// URL. Context arrives in the `start` event's customParameters.  Twilio frame order is `connected` → `start` → `media` → … so we keep reading until `start` (or timeout / `media` arrives, meaning we missed it).  Buffer consumed frames so the pipeline still sees them.
+    replayed_frames: list[str] = []
+    if any(v in (None, "", "0") for v in (user_id, lead_id, raw_interaction_id)):
+        import asyncio as _asyncio
+        import json as _json
+        try:
+            for _ in range(5):  # cap on frames consumed
+                raw = await _asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+                replayed_frames.append(raw)
+                try:
+                    data = _json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    continue
+                event = data.get("event")
+                if event == "start":
+                    custom = (data.get("start") or {}).get("customParameters") or {}
+                    user_id = user_id or str(custom.get("user_id") or "") or None
+                    lead_id = lead_id or str(custom.get("lead_id") or "") or None
+                    raw_interaction_id = raw_interaction_id or str(custom.get("interaction_id") or "") or None
+                    call_task_id = call_task_id or str(custom.get("call_task_id") or "") or None
+                    break
+                if event == "media":
+                    # Already past start without seeing customParameters — shouldn't happen with current TwiML, but bail to avoid eating audio frames into the buffer.
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Pipeline] failed to read start event for context: %s", exc)
+
+    # Replay-aware wrapper so consumed frames still reach the pipeline in order.
+    if replayed_frames:
+        class _ReplayWS:
+            """Minimal proxy that yields buffered frames first, then delegates
+            to the real websocket.  Only iter_text() is overridden; everything
+            else (send_*, accept, close, query_params, headers, client_state,
+            application_state) passes through to the real ws.
+            """
+            def __init__(self, real, frames):
+                self._real = real
+                self._frames = list(frames)
+
+            async def iter_text(self):
+                while self._frames:
+                    yield self._frames.pop(0)
+                async for msg in self._real.iter_text():
+                    yield msg
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        websocket = _ReplayWS(websocket, replayed_frames)
+
     with Session(engine) as session:
         target_user, lead = resolve_call_context(session, user_id, lead_id)
-        if not target_user and not lead:
-            await websocket.close()
+        # If still no user but we have an interaction_id, recover from the already-persisted Interaction row (created by /make-call in an authenticated context — same-tenant guarantee).
+        if not target_user and raw_interaction_id and raw_interaction_id.isdigit() and int(raw_interaction_id) != 0:
+            db_interaction = session.get(Interaction, int(raw_interaction_id))
+            if db_interaction and db_interaction.user_id:
+                target_user = session.get(User, db_interaction.user_id)
+                if target_user and not lead and db_interaction.lead_id:
+                    lead = session.get(Lead, db_interaction.lead_id)
+
+        # We require a target_user to attribute the call to (audit, RLS, billing).  Reject with 4401 (custom: "unauthorized call context") rather than silently picking an arbitrary user — that would cross tenant boundaries.
+        if not target_user:
+            logger.warning(
+                "[Pipeline] rejecting call: no target_user resolvable (user_id=%s lead_id=%s interaction_id=%s source=%s)",
+                user_id, lead_id, raw_interaction_id, source,
+            )
+            await websocket.close(code=4401)
             return
 
         interaction_id = ensure_interaction(session, target_user, lead, raw_interaction_id, source)
@@ -413,13 +489,14 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 session.add(db_interaction)
                 session.commit()
 
-            if call_task_id and call_task_id.isdigit() and target_user:
+            # Skip task-update path when call_task_id is the sentinel "0" (no real CallTask — manual /make-call).  classify_outcome_from_transcript is sync (returns dict), do NOT await it.
+            if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and target_user:
                 try:
                     transcript = db_interaction.transcript if db_interaction else None
                     raw_status = "completed" if call_status == "completed" else "failed"
                     outcome_confidence = None
                     if call_status == "completed" and transcript:
-                        classification = await classify_outcome_from_transcript(None, transcript)
+                        classification = classify_outcome_from_transcript(None, transcript)
                         raw_status = classification["normalized_outcome"]
                         outcome_confidence = classification.get("confidence")
 
@@ -612,17 +689,7 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """
-    Load-balancer / uptime-monitor health check.
-    Returns 200 when all systems are healthy, 503 when degraded.
-
-    Response fields
-    ---------------
-    status          : "healthy" | "degraded"
-    db              : "ok" | "error:<msg>"
-    worker_*        : forwarded from automation_worker_service.get_worker_health()
-    uptime_seconds  : seconds since this process started
-    """
+    
     from fastapi.responses import JSONResponse
     from database import engine
     from services.automation_worker_service import get_worker_health
@@ -631,7 +698,7 @@ async def health_check():
     result: dict = {}
     degraded = False
 
-    # DB connectivity
+
     try:
         with Session(engine) as s:
             s.exec(select(1))
@@ -659,8 +726,6 @@ async def health_check():
         # partial_failure is a warning, not hard degraded — leave status as healthy
         pass
 
-    # Mistral rate-limit signal — sliding 15-min counter, in-process.
-    # Surfaces drained free-tier buckets without going degraded (yet).
     try:
         from services.observability import get_rate_limit_hits_last_15min
         result["mistral_429_last_15min"] = get_rate_limit_hits_last_15min()

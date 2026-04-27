@@ -106,9 +106,7 @@ def generate_quote_pdf(
     story = []
     inner_w = PAGE_W - 2 * M
 
-    # HEADER BAND.  strftime("%-d") is GNU-only; on Windows it raises
-    # ValueError.  Use "%d" (zero-padded) and strip the leading 0 manually
-    # so the format works on Linux, macOS, and Windows.
+    # HEADER BAND.  strftime("%-d") is GNU-only; on Windows it raises ValueError.  Use "%d" (zero-padded) and strip the leading 0 manually so the format works on Linux, macOS, and Windows.
     def _fmt_date(dt):
         if not hasattr(dt, "strftime"):
             return str(dt)[:10]

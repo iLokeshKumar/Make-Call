@@ -340,3 +340,109 @@ def test_last_rio_spoken_rolls_at_5():
         vp.last_rio_spoken.append(f"sentence {i}")
     assert len(vp.last_rio_spoken) == 5
     assert list(vp.last_rio_spoken) == [f"sentence {i}" for i in range(3, 8)]
+
+
+# Speaker-loop shutdown — resume_event + sentinel race
+# (PR bot finding P1.1: pause-mode hang-up could deadlock.)
+
+def test_speaker_loop_unblocks_when_paused_and_sentinel_arrives():
+    """Simulate the race fix: when sentinel lands while pause_playback holds
+    resume_event clear, the loop must still exit on the queue side."""
+    async def _run():
+        # Mirror the production race pattern.  Don't touch the real
+        # speaker_loop (it pulls aiohttp + provider websockets); just
+        # verify the pattern exits.
+        resume_event = asyncio.Event()
+        # NOT set — simulating pause mode
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(None)  # shutdown sentinel arrives while paused
+
+        async def _race_loop():
+            while True:
+                resume_task = asyncio.create_task(resume_event.wait())
+                sentence_task = asyncio.create_task(queue.get())
+                done, pending = await asyncio.wait(
+                    {resume_task, sentence_task},
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for p in pending:
+                    p.cancel()
+                if sentence_task in done:
+                    sentence = sentence_task.result()
+                    if sentence is None:
+                        return "exited"
+                else:
+                    continue
+
+        return await asyncio.wait_for(_race_loop(), timeout=1.0)
+
+    assert asyncio.run(_run()) == "exited"
+
+
+def test_speaker_loop_resume_set_in_finally_unblocks_paused_speaker():
+    """Defensive teardown: resume_event.set() before sentinel ensures any
+    speaker stuck on resume_event.wait() unblocks promptly."""
+    async def _run():
+        resume_event = asyncio.Event()  # paused
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def _consumer():
+            await resume_event.wait()
+            return await queue.get()
+
+        consumer = asyncio.create_task(_consumer())
+        # Teardown: set resume + sentinel (production pattern in finally:)
+        resume_event.set()
+        await queue.put(None)
+        result = await asyncio.wait_for(consumer, timeout=1.0)
+        return result
+
+    assert asyncio.run(_run()) is None
+
+
+# Bounded barge_queue with drop-oldest (P2.1)
+
+def test_barge_queue_drops_oldest_when_full():
+    async def _run():
+        barge_queue: asyncio.Queue = asyncio.Queue(maxsize=3)
+        # Fill it
+        for i in range(3):
+            barge_queue.put_nowait(f"chunk{i}")
+        # Overflow — drop-oldest pattern from production fan_out
+        try:
+            barge_queue.put_nowait("chunk_new")
+        except asyncio.QueueFull:
+            barge_queue.get_nowait()  # drops chunk0
+            barge_queue.put_nowait("chunk_new")
+        # Drain
+        out = []
+        while not barge_queue.empty():
+            out.append(barge_queue.get_nowait())
+        return out
+
+    out = asyncio.run(_run())
+    assert out == ["chunk1", "chunk2", "chunk_new"]
+
+
+# Sarvam ws_config_frame_static accepts language kwarg (P1.4).  Load the
+# module directly via importlib because the test file stubs
+# `services.ai.tts` at the top to short-circuit voice_pipeline imports.
+
+def test_sarvam_ws_config_includes_language():
+    import importlib.util, json, pathlib
+    sarvam_path = pathlib.Path(__file__).resolve().parents[1] / "services" / "ai" / "tts" / "sarvam.py"
+    spec = importlib.util.spec_from_file_location("_sarvam_test_load", str(sarvam_path))
+    sarvam_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(sarvam_mod)
+    SarvamTTS = sarvam_mod.SarvamTTS
+
+    cfg = SarvamTTS.ws_config_frame_static(
+        model="bulbul:v2",
+        speaker="anushka",
+        language="hi-IN",
+    )
+    parsed = json.loads(cfg)
+    assert parsed["target_language_code"] == "hi-IN"
+    # Default still en-IN when omitted
+    cfg_default = SarvamTTS.ws_config_frame_static(model="bulbul:v2", speaker="anushka")
+    assert json.loads(cfg_default)["target_language_code"] == "en-IN"

@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+import re
 
 from sqlmodel import Session, select
 
@@ -41,11 +42,98 @@ Rules:
 "unqualified", "qualified", "proposal", "follow_up", "not_interested"
 - next_action should be one of:
 "send_quote", "send_brochure", "schedule_demo", "follow_up_call", "follow_up_email", "close_lost", "none"
-- verbal_rating: if the customer gave an UNAMBIGUOUS 1-5 rating during the call (e.g. "I'd say a 4"), extract the integer. If they gave two numbers ("one or five"), ranges, or refused — return null and put the raw phrase into verbal_comment instead.
-- verbal_comment: any qualitative feedback the customer gave about the call experience itself ("good", "needs improvement", "loved it", "you were rude", or the raw ambiguous rating phrase). Otherwise null. NOT product/business comments — only feedback ABOUT the call/agent.
+- verbal_rating: if the customer gave an UNAMBIGUOUS 1-5 rating during the call (e.g. "I'd say a 4"), extract the integer. If they gave two numbers ("one or five"), ranges, or refused — return null.  Spoken-form numbers (one, two, three, four, five) count.
+- verbal_comment: a SHORT (1-2 sentence) summary of the customer's qualitative feedback AND the reason they gave that rating, drawn from phrases the customer actually used.  Examples:
+  * Rating 1 + "you didn't listen, you kept interrupting" → "Didn't listen / kept interrupting."
+  * Rating 5 + "everything was clear and the agent was helpful" → "Clear and helpful."
+  * Just qualitative ("good service") with no number → "Good service." (rating still null)
+  * Ambiguous numeric ("one or five") → "Said one or five — unclear."
+  Limit to 200 chars.  ONLY the customer's feedback ABOUT the call / agent — NOT product or business comments.
 - Do not include markdown.
 - Do not include explanation text.
 """
+
+
+_WORD_TO_NUM = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+    "1": 1, "2": 2, "3": 3, "4": 4, "5": 5,
+}
+
+# Patterns the customer typically uses when stating a rating in response to
+# "on a scale of 1 to 5...".  Order matters: more specific cue words first
+# so "rate" trumps a stray digit elsewhere.
+_RATING_PATTERNS = [
+    # "rate it (as) X", "rated as X", "rating is X"
+    re.compile(r"\brat(?:e|ed|ing)\b[^.!?]{0,30}?\b(one|two|three|four|five|[1-5])\b", re.IGNORECASE),
+    # "I'd say (a|an) X", "I'll say X", "I would say X"
+    re.compile(r"\bi(?:'d|'ll| would| will)?\s+say\b[^.!?]{0,15}?\b(one|two|three|four|five|[1-5])\b", re.IGNORECASE),
+    # "give it (a) X", "give X out of 5"
+    re.compile(r"\bgive\b[^.!?]{0,15}?\b(one|two|three|four|five|[1-5])\b", re.IGNORECASE),
+    # "X out of 5"
+    re.compile(r"\b(one|two|three|four|five|[1-5])\s+out\s+of\s+(?:five|5)\b", re.IGNORECASE),
+    # bare "five star", "4 stars"
+    re.compile(r"\b(one|two|three|four|five|[1-5])\s+star", re.IGNORECASE),
+    # just a number/word in a User: line that comes right after the feedback ask
+    # (caller scopes to the last 1500 chars so this doesn't false-fire elsewhere)
+    re.compile(r"\bUser:\s*(?:it'?s\s+(?:a|an)\s+)?(one|two|three|four|five|[1-5])\b\.?\s*$", re.IGNORECASE | re.MULTILINE),
+]
+
+
+def _regex_extract_verbal_rating(transcript: str | None) -> int | None:
+    """Best-effort regex pull of a 1-5 rating from the call transcript tail.
+
+    Returns the LAST match found, since customers sometimes self-correct
+    ("one... or maybe a five — let's say five").  Scans only the last 1500
+    characters: the SLO #2 question always sits near the end of the call.
+    """
+    if not transcript:
+        return None
+    tail = transcript[-1500:]
+    last_match: int | None = None
+    for pattern in _RATING_PATTERNS:
+        for m in pattern.finditer(tail):
+            token = m.group(1).lower()
+            value = _WORD_TO_NUM.get(token)
+            if value and 1 <= value <= 5:
+                last_match = value
+    return last_match
+
+
+# Cue words customers use when explaining a rating.  Used by the regex
+# comment-extraction fallback.
+_REASON_CUES = re.compile(
+    r"\b(because|since|didn'?t|wasn'?t|too|kept|never|always|you (?:didn'?t|did not)|"
+    r"you (?:were|are)|terrible|awful|bad|poor|frustrat|annoying|interrupt|listen|"
+    r"clear|helpful|great|excellent|amazing|awesome|love[d]?|like[d]?|good|nice)\b",
+    re.IGNORECASE,
+)
+
+
+def _regex_extract_verbal_reason(transcript: str | None) -> str | None:
+    """When the LLM extractor returns a null verbal_comment but the customer
+    clearly stated WHY they gave a rating, pull a 1-2 sentence summary
+    from the User: lines closest to the rating moment.
+
+    Strategy: scan last 1500 chars for User: lines containing reason cues,
+    take the most-recent up-to-2 short lines, join with ' / '.
+    """
+    if not transcript:
+        return None
+    tail = transcript[-1500:]
+    lines = [ln.strip() for ln in tail.split("\n") if ln.strip().lower().startswith("user:")]
+    matches: list[str] = []
+    for ln in reversed(lines):
+        body = ln.split(":", 1)[1].strip() if ":" in ln else ""
+        if not body or len(body) < 4:
+            continue
+        if _REASON_CUES.search(body):
+            matches.append(body[:120])
+            if len(matches) >= 2:
+                break
+    if not matches:
+        return None
+    matches.reverse()
+    return (" / ".join(matches))[:200]
 
 
 def _safe_parse_json(text: str) -> dict | None:
@@ -128,9 +216,7 @@ async def extract_and_save_requirements(
             data=payload,
         )
 
-        # Save verbal feedback (rating and/or qualitative comment) if the customer
-        # gave any during the call.  Save ONE row per (interaction, customer-source)
-        # to prevent duplicates when post_call retries.
+        # Save verbal feedback (rating and/or qualitative comment) if the customer gave any during the call.  Save ONE row per (interaction, customer-source) to prevent duplicates when post_call retries.
         verbal_rating = structured.get("verbal_rating")
         try:
             verbal_rating = int(verbal_rating) if verbal_rating is not None else None
@@ -141,6 +227,31 @@ async def extract_and_save_requirements(
 
         verbal_comment_raw = structured.get("verbal_comment")
         verbal_comment = (str(verbal_comment_raw).strip() or None) if verbal_comment_raw else None
+
+        # Regex fallback: smaller LLMs (Cerebras Llama 3.1 8B) sometimes miss
+        # spoken-form ratings like "rate it as one" or "I'd say a 4".  If the
+        # extractor returned null but the customer clearly named a 1-5, capture
+        # it from the transcript tail.  Scans only the last 1500 chars (where
+        # the closing feedback ask lives) to avoid catching unrelated numbers.
+        if verbal_rating is None:
+            verbal_rating = _regex_extract_verbal_rating(transcript)
+            if verbal_rating is not None:
+                logger.info(
+                    "[PostCall] Regex fallback caught verbal_rating=%s for lead %s",
+                    verbal_rating, lead_id,
+                )
+
+        # Reason fallback: when LLM returned no comment but we have a rating
+        # (from LLM or regex), grab the customer's stated reason from nearby
+        # User: lines so the feedback row carries WHY they rated that way.
+        if verbal_comment is None and verbal_rating is not None:
+            reason = _regex_extract_verbal_reason(transcript)
+            if reason:
+                verbal_comment = reason
+                logger.info(
+                    "[PostCall] Regex fallback pulled reason for lead %s: %s",
+                    lead_id, reason[:60],
+                )
 
         if verbal_rating is not None or verbal_comment:
             try:
@@ -154,7 +265,10 @@ async def extract_and_save_requirements(
                         Feedback.feedback_type == "csat",
                     ).limit(1)
                 ).first()
-                comment_text = verbal_comment or "Verbal rating given on call"
+                # If we have a real customer reason, use it.  Only fall back
+                # to the boilerplate when the customer truly said nothing
+                # qualitative (just a bare number).
+                comment_text = verbal_comment or "Verbal rating given on call (no reason captured)"
                 if existing:
                     existing.rating = verbal_rating if verbal_rating is not None else existing.rating
                     existing.comment = comment_text
@@ -201,15 +315,11 @@ async def extract_and_save_requirements(
             except Exception as vq_exc:
                 logger.warning("[PostCall] Voice quote dispatch failed: %s", vq_exc)
 
-        # Throttle between LLM calls — free-tier Mistral caps at ~1 req/sec.
-        # Without this delay the worker fires 5 back-to-back calls per
-        # post-call job and burns through the quota in seconds.
+        # Throttle between LLM calls — free-tier Mistral caps at ~1 req/sec. Without this delay the worker fires 5 back-to-back calls per post-call job and burns through the quota in seconds.
         _THROTTLE_SECONDS = 1.2
 
         await asyncio.sleep(_THROTTLE_SECONDS)
-        # Fire-and-forget objection extraction using the same LLM service
-        # (the LLM message history is already reset by the new prompt above,
-        # so we re-instantiate a lightweight version via the same instance)
+        # Fire-and-forget objection extraction using the same LLM service (the LLM message history is already reset by the new prompt above, so we re-instantiate a lightweight version via the same instance)
         try:
             from services.ai.llm import get_llm_service
             objection_llm = get_llm_service(
@@ -302,9 +412,6 @@ async def extract_and_save_requirements(
         except Exception as comp_exc:
             logger.warning("Competitor extraction failed: %s", comp_exc)
 
-        # CSAT feedback request — only fires when the customer did NOT give
-        # verbal feedback during the call.  Channel="auto" prefers WhatsApp
-        # (better CTR in IN), email fallback.  See auto_csat_service.
         try:
             from services.feedback.auto_csat_service import maybe_send_auto_csat
             qual = structured.get("qualification_status") or ""
@@ -327,21 +434,19 @@ async def extract_and_save_requirements(
         except Exception as csat_exc:
             logger.warning("[PostCall] CSAT dispatch failed: %s", csat_exc)
 
-        # Orchestrator post-call workflow: save summary → ISM advance → follow-up
         try:
             from agents.orchestrator import run_post_call
             from models.models import Lead as _Lead
 
             lead_obj = session.get(_Lead, lead_id)
 
-            # Map LLM-extracted fields → orchestrator inputs
             raw_pain = structured.get("pain_points") or ""
             pain_list = [p.strip() for p in raw_pain.split(",") if p.strip()] if raw_pain else []
             raw_use = structured.get("use_case") or ""
             q_list = [raw_use] if raw_use else []
 
             qual = structured.get("qualification_status") or "neutral"
-            # Normalise qualification_status → call_outcome expected by agents
+
             _OUTCOME_MAP = {
                 "qualified":      "positive",
                 "proposal":       "positive",

@@ -49,12 +49,21 @@ async def outgoing_call(
     response = VoiceResponse()
     response.say(f"Connected to {company_name}. Please start speaking.")
     connect = Connect()
-    connect.stream(
+    # Twilio Media Streams strips query params from the wss:// URL — pass
+    # context via <Parameter> tags inside <Stream>.  Twilio surfaces them in
+    # the `start` event under `start.customParameters`.  Keep the query
+    # params on the URL too for back-compat with self-hosted dev that
+    # accepts them and for ngrok/local introspection.
+    stream = connect.stream(
         url=(
             f"wss://{request.url.netloc}/media-stream"
             f"?user_id={user_id or 0}&lead_id={lead_id or 0}&interaction_id={interaction_id or ''}&call_task_id={call_task_id}"
         )
     )
+    stream.parameter(name="user_id", value=str(user_id or 0))
+    stream.parameter(name="lead_id", value=str(lead_id or 0))
+    stream.parameter(name="interaction_id", value=str(interaction_id or ""))
+    stream.parameter(name="call_task_id", value=str(call_task_id))
     response.append(connect)
     return HTMLResponse(content=str(response), media_type="application/xml")
 
@@ -166,6 +175,20 @@ async def twilio_status_callback(
     TERMINAL = {"completed", "busy", "no-answer", "failed", "canceled"}
     if CallStatus not in TERMINAL:
         return {"status": "tracked", "call_status": CallStatus}
+
+    # Defensive: mark interaction as ended for any terminal state, regardless
+    # of whether actor_user is resolved or apply_call_outcome later raises.
+    # Previously, a webhook with no actor_user OR a partial outcome failure
+    # left the interaction permanently 'active'.  Idempotent — last-write
+    # wins; downstream apply_call_outcome may set additional fields but
+    # 'ended' status is what unblocks UI + cleanup tasks.
+    if db_interaction and db_interaction.status != "ended":
+        db_interaction.status = "ended"
+        db_interaction.ended_at = utc_now()
+        db_interaction.updated_at = utc_now()
+        session.add(db_interaction)
+        session.commit()
+
     if not actor_user:
         return {"status": "tracked", "call_status": CallStatus}
 
