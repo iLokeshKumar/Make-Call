@@ -25,7 +25,9 @@ const COMPANY_SETTING_KEYS = {
     bizHoursStart: ["BUSINESS_HOURS_START", "business_hours_start"],
     bizHoursEnd: ["BUSINESS_HOURS_END", "business_hours_end"],
     bizSundayBlocked: ["BUSINESS_SUNDAY_BLOCKED", "business_sunday_blocked"],
-    bizHoursDisabled: ["DISABLE_BUSINESS_HOURS_GUARD", "disable_business_hours_guard"] } as const;
+    bizHoursDisabled: ["DISABLE_BUSINESS_HOURS_GUARD", "disable_business_hours_guard"],
+    silenceThreshold: ["SILENCE_THRESHOLD_S", "silence_threshold_s"],
+    silenceCheckInterval: ["SILENCE_CHECK_INTERVAL_S", "silence_check_interval_s"] } as const;
 
 const INTEGRATION_KEY_ALIASES: Record<string, string> = {
     PHONE_NUMBER_FROM: "TWILIO_PHONE_NUMBER",
@@ -83,6 +85,10 @@ export default function SettingsPage() {
     const [bizHoursEnd, setBizHoursEnd] = useState("22");
     const [bizSundayBlocked, setBizSundayBlocked] = useState("1");
     const [bizHoursDisabled, setBizHoursDisabled] = useState("0");
+    // Silence-watcher tunables — voice agent re-engages after this many
+    // seconds of silence post-Rio-utterance.
+    const [silenceThreshold, setSilenceThreshold] = useState("6");
+    const [silenceCheckInterval, setSilenceCheckInterval] = useState("3");
 
     // API Keys State
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
@@ -161,6 +167,8 @@ export default function SettingsPage() {
                     setBizHoursEnd(readSettingValue(data, COMPANY_SETTING_KEYS.bizHoursEnd, "22"));
                     setBizSundayBlocked(readSettingValue(data, COMPANY_SETTING_KEYS.bizSundayBlocked, "1"));
                     setBizHoursDisabled(readSettingValue(data, COMPANY_SETTING_KEYS.bizHoursDisabled, "0"));
+                    setSilenceThreshold(readSettingValue(data, COMPANY_SETTING_KEYS.silenceThreshold, "6"));
+                    setSilenceCheckInterval(readSettingValue(data, COMPANY_SETTING_KEYS.silenceCheckInterval, "3"));
                     if (data.COMPETITOR_NAMES) setCompetitorNames(data.COMPETITOR_NAMES);
                 }
 
@@ -313,6 +321,8 @@ export default function SettingsPage() {
                     { key: "BUSINESS_HOURS_END", value: bizHoursEnd, is_secret: false },
                     { key: "BUSINESS_SUNDAY_BLOCKED", value: bizSundayBlocked, is_secret: false },
                     { key: "DISABLE_BUSINESS_HOURS_GUARD", value: bizHoursDisabled, is_secret: false },
+                    { key: "SILENCE_THRESHOLD_S", value: silenceThreshold, is_secret: false },
+                    { key: "SILENCE_CHECK_INTERVAL_S", value: silenceCheckInterval, is_secret: false },
                 ] };
 
               const normalizedIntegrationValues = Object.entries(apiKeys).reduce<Record<string, string>>((acc, [rawKey, rawValue]) => {
@@ -878,6 +888,52 @@ export default function SettingsPage() {
                                 />
                                 Disable the guard entirely (dev use only)
                             </label>
+                        </div>
+                    </div>
+                )}
+
+                {/* Voice agent — silence re-engage */}
+                {hasAdminAccess && (
+                    <div className="mt-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 p-6">
+                        <div className="mb-4">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-white">Voice Silence Re-engage</h3>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                After Rio finishes speaking, if the customer is silent for this many seconds,
+                                Rio re-engages with a context-aware nudge (&ldquo;Take your time…&rdquo; / &ldquo;Still there?&rdquo;).
+                                Lower = more proactive but talks over thinking pauses. Higher = more patient.
+                            </p>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">
+                                    Silence threshold (seconds)
+                                </label>
+                                <input
+                                    type="number"
+                                    min={2}
+                                    max={60}
+                                    step={0.5}
+                                    value={silenceThreshold}
+                                    onChange={(e) => setSilenceThreshold(e.target.value)}
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Default 6s. Range 2-60s.</p>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">
+                                    Check interval (seconds)
+                                </label>
+                                <input
+                                    type="number"
+                                    min={1}
+                                    max={30}
+                                    step={0.5}
+                                    value={silenceCheckInterval}
+                                    onChange={(e) => setSilenceCheckInterval(e.target.value)}
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Default 3s. How often the watcher polls.</p>
+                            </div>
                         </div>
                     </div>
                 )}

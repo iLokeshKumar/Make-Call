@@ -30,6 +30,7 @@ const navItems = [
   { name: "Knowledge", href: "/knowledge", icon: Database },
   { name: "Agent Tasks", href: "/agent-tasks", icon: Bot },
   { name: "Approvals", href: "/agents/approvals", icon: Inbox },
+  { name: "Activity", href: "/agents/activity", icon: Activity },
   { name: "Admin", href: "/admin", icon: ShieldCheck, adminOnly: true },
   { name: "Profile", href: "/profile", icon: UserCog },
   { name: "Company", href: "/company-profile", icon: Building2, adminOnly: true },

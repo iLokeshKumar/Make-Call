@@ -228,74 +228,81 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
         )}
       </div>
 
-      <div className="p-5 space-y-4">
-        {/* Audio element */}
-        {effectiveUrl && (
-          <audio
-            ref={audioRef}
-            src={effectiveUrl}
-            onLoadedMetadata={handleLoadedMetadata}
-            onTimeUpdate={handleTimeUpdate}
-            onEnded={() => setPlaying(false)}
-            preload="metadata"
-          />
-        )}
-
-        {fetchError && (
-          <p className="text-xs text-amber-500 font-medium">{fetchError}</p>
-        )}
-
-        {/* Waveform canvas */}
-        <div className="relative">
-          {loading && (
-            <div className="absolute inset-0 flex items-center justify-center text-slate-400">
-              <Loader2 className="h-5 w-5 animate-spin" />
-            </div>
-          )}
-          <canvas
-            ref={canvasRef}
-            width={600}
-            height={64}
-            onClick={handleSeek}
-            className="w-full h-16 cursor-pointer rounded-xl bg-slate-50 dark:bg-slate-900/40"
-          />
-        </div>
-
-        {/* Controls */}
-        <div className="flex items-center gap-3">
-          <button
-            onClick={togglePlay}
-            disabled={loading}
-            className="flex h-10 w-10 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition"
-          >
-            {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
-          </button>
-
-          <span className="text-xs font-mono text-slate-500 dark:text-slate-400 w-20">
-            {formatTime(currentTime)} / {formatTime(totalDuration)}
-          </span>
-
-          <div className="flex items-center gap-1.5 ml-auto">
-            <Volume2 className="h-3.5 w-3.5 text-slate-400" />
-            <input
-              type="range"
-              min={0}
-              max={1}
-              step={0.05}
-              value={volume}
-              onChange={(e) => {
-                const v = parseFloat(e.target.value);
-                setVolume(v);
-                if (audioRef.current) audioRef.current.volume = v;
-              }}
-              className="w-20 accent-violet-500"
+      {/* Side-by-side on lg+: audio controls left, transcript right.
+          Stacks vertically on smaller screens. */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 p-5">
+        {/* LEFT: audio + waveform + controls */}
+        <div className="space-y-4 min-w-0">
+          {effectiveUrl && (
+            <audio
+              ref={audioRef}
+              src={effectiveUrl}
+              onLoadedMetadata={handleLoadedMetadata}
+              onTimeUpdate={handleTimeUpdate}
+              onEnded={() => setPlaying(false)}
+              preload="metadata"
             />
+          )}
+
+          {fetchError && (
+            <p className="text-xs text-amber-500 font-medium">{fetchError}</p>
+          )}
+
+          {/* Waveform canvas */}
+          <div className="relative">
+            {loading && (
+              <div className="absolute inset-0 flex items-center justify-center text-slate-400">
+                <Loader2 className="h-5 w-5 animate-spin" />
+              </div>
+            )}
+            <canvas
+              ref={canvasRef}
+              width={600}
+              height={64}
+              onClick={handleSeek}
+              className="w-full h-16 cursor-pointer rounded-xl bg-slate-50 dark:bg-slate-900/40"
+            />
+          </div>
+
+          {/* Controls */}
+          <div className="flex items-center gap-3">
+            <button
+              onClick={togglePlay}
+              disabled={loading}
+              className="flex h-10 w-10 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition"
+            >
+              {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
+            </button>
+
+            <span className="text-xs font-mono text-slate-500 dark:text-slate-400 w-20">
+              {formatTime(currentTime)} / {formatTime(totalDuration)}
+            </span>
+
+            <div className="flex items-center gap-1.5 ml-auto">
+              <Volume2 className="h-3.5 w-3.5 text-slate-400" />
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.05}
+                value={volume}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  setVolume(v);
+                  if (audioRef.current) audioRef.current.volume = v;
+                }}
+                className="w-20 accent-violet-500"
+              />
+            </div>
           </div>
         </div>
 
-        {/* Transcript sync panel */}
-        {annotatedLines.length > 0 && (
-          <div className="max-h-56 overflow-y-auto space-y-1 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-900/30 p-3">
+        {/* RIGHT: transcript sync panel */}
+        {annotatedLines.length > 0 ? (
+          <div className="max-h-[400px] lg:max-h-[300px] overflow-y-auto space-y-1 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-50 dark:bg-slate-900/30 p-3 min-w-0">
+            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 dark:text-slate-400 mb-2 sticky top-0 bg-slate-50 dark:bg-slate-900/30 py-1 -mx-3 px-3">
+              Transcript ({annotatedLines.length} lines)
+            </p>
             {annotatedLines.map((line, i) => {
               const isAI = /ai|rio|agent/i.test(line.speaker);
               const isActive = i === activeLineIndex;
@@ -317,7 +324,7 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
                   >
                     {line.speaker}:
                   </span>
-                  <span className="text-slate-700 dark:text-slate-300 leading-relaxed">
+                  <span className="text-slate-700 dark:text-slate-300 leading-relaxed break-words">
                     {line.text}
                   </span>
                   <span className="ml-auto flex-shrink-0 text-slate-400 dark:text-slate-500 font-mono">
@@ -326,6 +333,10 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
                 </div>
               );
             })}
+          </div>
+        ) : (
+          <div className="flex items-center justify-center rounded-xl border border-dashed border-slate-200 dark:border-white/10 p-6">
+            <p className="text-xs text-slate-500 italic">No transcript available</p>
           </div>
         )}
       </div>

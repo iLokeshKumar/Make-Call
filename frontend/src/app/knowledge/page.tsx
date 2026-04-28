@@ -103,6 +103,33 @@ export default function KnowledgePage() {
   const [askLoading, setAskLoading] = useState(false);
   const [askResult, setAskResult] = useState<AskResult | null>(null);
 
+  // RAG preview — raw retrieval (no LLM), shows top chunks + scores so admins
+  // can verify what the agent will actually see for a given query.
+  const [ragQuery, setRagQuery] = useState("");
+  const [ragLoading, setRagLoading] = useState(false);
+  const [ragResults, setRagResults] = useState<Array<{ content: string; collection?: string; score?: number; metadata?: Record<string, unknown> }>>([]);
+  const [ragError, setRagError] = useState<string | null>(null);
+
+  async function handleRagPreview(e: React.FormEvent) {
+    e.preventDefault();
+    if (!user || !ragQuery.trim()) return;
+    setRagLoading(true);
+    setRagError(null);
+    setRagResults([]);
+    try {
+      const params = new URLSearchParams({ q: ragQuery.trim(), n: "5", collection: filterCollection });
+      const res = await apiFetch(`${API_BASE}/crm/knowledge/search?${params}`);
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setRagResults(data.results || []);
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : "Search failed");
+    } finally {
+      setRagLoading(false);
+    }
+  }
+
   // Fetch documents
 
   const fetchDocs = useCallback(async () => {
@@ -392,6 +419,64 @@ export default function KnowledgePage() {
               <p className="text-xs text-slate-400">Agents used: {askResult.agents_run.join(", ")}</p>
             )}
           </div>
+        )}
+      </div>
+
+      {/* RAG retrieval preview — what the agent will actually retrieve for a query */}
+      <div className="rounded-2xl border border-blue-200 bg-blue-50/50 p-5 dark:border-blue-500/20 dark:bg-blue-500/5 space-y-4">
+        <div>
+          <h2 className="flex items-center gap-2 text-sm font-bold uppercase tracking-widest text-blue-600 dark:text-blue-300">
+            <Sparkles className="h-4 w-4" />
+            RAG Retrieval Preview
+          </h2>
+          <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+            Raw chunks the agent will see for a given query. No LLM — just the vector search.
+            Filters by the &ldquo;{filterCollection}&rdquo; collection above.
+          </p>
+        </div>
+        <form onSubmit={handleRagPreview} className="flex gap-3">
+          <input
+            value={ragQuery}
+            onChange={(e) => setRagQuery(e.target.value)}
+            placeholder="e.g. pricing tier for enterprise customers"
+            className="flex-1 rounded-xl border border-blue-200 bg-white px-4 py-2.5 text-sm outline-none focus:border-blue-400 dark:border-blue-500/30 dark:bg-slate-900/40"
+          />
+          <button
+            type="submit"
+            disabled={ragLoading || !ragQuery.trim()}
+            className="inline-flex items-center gap-2 rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            {ragLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+            Search
+          </button>
+        </form>
+        {ragError && (
+          <p className="text-xs font-medium text-amber-600 dark:text-amber-300">{ragError}</p>
+        )}
+        {ragResults.length > 0 && (
+          <ol className="space-y-2">
+            {ragResults.map((r, i) => (
+              <li key={i} className="rounded-xl border border-blue-200 bg-white p-3 dark:border-blue-500/20 dark:bg-slate-900/50">
+                <div className="mb-1.5 flex items-center gap-2 text-[10px] uppercase tracking-widest">
+                  <span className="font-bold text-blue-600 dark:text-blue-300">#{i + 1}</span>
+                  {r.collection && (
+                    <span className="rounded-full bg-blue-100 px-2 py-0.5 font-semibold text-blue-700 dark:bg-blue-500/15 dark:text-blue-300">
+                      {r.collection}
+                    </span>
+                  )}
+                  {typeof r.score === "number" && (
+                    <span className="ml-auto font-mono text-slate-500">score {r.score.toFixed(3)}</span>
+                  )}
+                </div>
+                <p className="text-xs text-slate-700 dark:text-slate-300 whitespace-pre-wrap">{r.content}</p>
+              </li>
+            ))}
+          </ol>
+        )}
+        {!ragLoading && ragQuery.trim() && ragResults.length === 0 && !ragError && (
+          <p className="text-xs italic text-slate-500 dark:text-slate-400">
+            No matches. Either the query is too narrow, the collection is empty, or RAG isn&rsquo;t configured.
+          </p>
         )}
       </div>
 

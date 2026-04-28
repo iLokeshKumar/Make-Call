@@ -9,6 +9,7 @@ import MetricCard from "@/components/dashboard/metric_card";
 import RecentActivity from "@/components/dashboard/recent_activity";
 import TodaysCallTask from "@/components/dashboard/todays_call_task";
 import AnalyticsSummary from "@/components/dashboard/analytics_summary";
+import IsmLiveWidget from "@/components/dashboard/ism_live_widget";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
@@ -255,6 +256,7 @@ export default function Home() {
         </div>
 
         <div className="space-y-6">
+          <IsmLiveWidget />
           <AIRecommendation items={recommendations} loading={loading} />
 
           <div className="rounded-2xl glass border border-white/40 p-6 dark:border-white/10">

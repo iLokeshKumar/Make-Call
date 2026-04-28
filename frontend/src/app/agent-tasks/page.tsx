@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   Bot, CheckCircle, XCircle, Clock, AlertCircle, AlertTriangle, Loader2,
   ChevronDown, ChevronUp, RefreshCw, Plus, Ban, ExternalLink, Code2 } from "lucide-react";
@@ -102,37 +103,36 @@ const STATUS_FILTERS = ["all", "pending", "running", "awaiting_approval", "done"
 
 function TaskQueue() {
   const { user } = useAuth();
-  const [tasks, setTasks] = useState<AgentTask[]>([]);
-  const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
   const [statusFilter, setStatusFilter] = useState("all");
-  const [cancelling, setCancelling] = useState<number | null>(null);
 
-  const fetchTasks = useCallback(async () => {
-    setLoading(true);
-    try {
+  const tasksQuery = useQuery<AgentTask[]>({
+    queryKey: ["agent-tasks", statusFilter],
+    enabled: !!user,
+    refetchInterval: 15_000,
+    queryFn: async () => {
       const params = new URLSearchParams({ limit: "100" });
       if (statusFilter !== "all") params.set("status", statusFilter);
-      const res = await apiFetch(`${API_BASE}/crm/agent-tasks?${params}`, {
-      });
-      if (res.ok) setTasks(await res.json());
-    } finally {
-      setLoading(false);
-    }
-  }, [user, statusFilter]);
+      const res = await apiFetch(`${API_BASE}/crm/agent-tasks?${params}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+  });
 
-  useEffect(() => { fetchTasks(); }, [fetchTasks]);
+  const tasks = tasksQuery.data ?? [];
+  const loading = tasksQuery.isLoading;
 
-  const cancelTask = async (taskId: number) => {
-    setCancelling(taskId);
-    try {
-      await apiFetch(`${API_BASE}/crm/agent-tasks/${taskId}/cancel`, {
-        method: "POST"
-      });
-      fetchTasks();
-    } finally {
-      setCancelling(null);
-    }
-  };
+  const cancelMutation = useMutation<void, Error, number>({
+    mutationFn: async (taskId) => {
+      const res = await apiFetch(`${API_BASE}/crm/agent-tasks/${taskId}/cancel`, { method: "POST" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    },
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["agent-tasks"] }),
+  });
+
+  const cancelling = cancelMutation.isPending ? cancelMutation.variables ?? null : null;
+  const cancelTask = (taskId: number) => cancelMutation.mutate(taskId);
+  const fetchTasks = () => qc.invalidateQueries({ queryKey: ["agent-tasks"] });
 
   return (
     <div className="space-y-4">
@@ -411,21 +411,22 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
 
 function ReviewQueue() {
   const { user } = useAuth();
-  const [approvals, setApprovals] = useState<Approval[]>([]);
-  const [loading, setLoading] = useState(true);
+  const qc = useQueryClient();
 
-  const fetchApprovals = useCallback(async () => {
-    setLoading(true);
-    try {
-      const res = await apiFetch(`${API_BASE}/crm/agent-tasks/approvals`, {
-      });
-      if (res.ok) setApprovals(await res.json());
-    } finally {
-      setLoading(false);
-    }
-  }, [user]);
+  const approvalsQuery = useQuery<Approval[]>({
+    queryKey: ["agent-task-approvals"],
+    enabled: !!user,
+    refetchInterval: 10_000,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/agent-tasks/approvals`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+  });
 
-  useEffect(() => { fetchApprovals(); }, [fetchApprovals]);
+  const approvals = approvalsQuery.data ?? [];
+  const loading = approvalsQuery.isLoading;
+  const fetchApprovals = () => qc.invalidateQueries({ queryKey: ["agent-task-approvals"] });
 
   return (
     <div className="space-y-4">

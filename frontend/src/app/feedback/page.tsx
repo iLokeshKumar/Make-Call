@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { CheckCircle, MessageSquare, RefreshCw, Send, Star, Trash2, X } from "lucide-react";
 import clsx from "clsx";
 import { useRouter } from "next/navigation";
@@ -567,105 +568,69 @@ export default function FeedbackPage() {
 
   const [tab, setTab] = useState<Tab>("All");
   const [summary, setSummary] = useState<Summary | null>(null);
-  const [items, setItems] = useState<FeedbackItem[]>([]);
-  const [total, setTotal] = useState(0);
+  const qc = useQueryClient();
   const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(true);
   const [showCsatModal, setShowCsatModal] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [deleting, setDeleting] = useState<number | null>(null);
   const [expandedId, setExpandedId] = useState<number | null>(null);
-  const [users, setUsers] = useState<CompanyUser[]>([]);
 
-  useEffect(() => {
-    if (!user) return;
-    let cancelled = false;
-    void (async () => {
+  // Summary — refresh when tab changes (cached separately)
+  useQuery<unknown>({
+    queryKey: ["feedback-summary"],
+    enabled: !!user,
+    queryFn: async () => {
       const res = await apiFetch(`${API_BASE}/feedback/summary`, {
-        headers: {"Content-Type": "application/json" } });
-      if (res.status === 401) {
-        sessionTimeout();
-        return;
-      }
-      if (!cancelled && res.ok) {
-        setSummary(await res.json());
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [user, sessionTimeout]);
-
-  useEffect(() => {
-    if (!user) return;
-    let cancelled = false;
-    void (async () => {
-      const res = await apiFetch(`${API_BASE}/admin/users`, {
+        headers: { "Content-Type": "application/json" },
       });
-      if (res.status === 401) {
-        sessionTimeout();
-        return;
-      }
-      if (!cancelled && res.ok) {
-        setUsers((await res.json()) as CompanyUser[]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [user, sessionTimeout]);
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setSummary(data);
+      return data;
+    },
+  });
 
-  useEffect(() => {
-    if (!user) return;
-    let cancelled = false;
-    void (async () => {
-      setLoading(true);
+  // Company users (for filter dropdowns)
+  const usersQuery = useQuery<CompanyUser[]>({
+    queryKey: ["company-users"],
+    enabled: !!user,
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/admin/users`);
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return (await res.json()) as CompanyUser[];
+    },
+  });
+  const users = usersQuery.data ?? [];
+
+  // Feedback list — server-paginated, refetch on tab/page change
+  type FeedbackPayload = { items: FeedbackItem[]; total: number };
+  const listQuery = useQuery<FeedbackPayload>({
+    queryKey: ["feedback-list", tab, page],
+    enabled: !!user,
+    refetchInterval: 30_000,
+    queryFn: async () => {
       const type = TAB_TYPE[tab];
       const params = new URLSearchParams({ page: String(page), limit: "15" });
       if (type) params.set("feedback_type", type);
       const res = await apiFetch(`${API_BASE}/feedback?${params}`, {
-        headers: {"Content-Type": "application/json" } });
-      if (res.status === 401) {
-        sessionTimeout();
-        return;
-      }
-      if (!cancelled && res.ok) {
-        const d = await res.json();
-        setItems(d.items);
-        setTotal(d.total);
-      }
-      if (!cancelled) setLoading(false);
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [user, tab, page, sessionTimeout]);
+        headers: { "Content-Type": "application/json" },
+      });
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      return res.json();
+    },
+  });
+  const items = listQuery.data?.items ?? [];
+  const total = listQuery.data?.total ?? 0;
+  const loading = listQuery.isLoading;
 
-  async function refreshData(targetPage: number = page) {
-    if (!user) return;
-
-    const [summaryRes, itemsRes] = await Promise.all([
-      apiFetch(`${API_BASE}/feedback/summary`, {
-        headers: {"Content-Type": "application/json" } }),
-      (async () => {
-        const type = TAB_TYPE[tab];
-        const params = new URLSearchParams({ page: String(targetPage), limit: "15" });
-        if (type) params.set("feedback_type", type);
-        return apiFetch(`${API_BASE}/feedback?${params}`, {
-          headers: {"Content-Type": "application/json" } });
-      })(),
-    ]);
-
-    if (summaryRes.status === 401 || itemsRes.status === 401) {
-      sessionTimeout();
-      return;
-    }
-    if (summaryRes.ok) setSummary(await summaryRes.json());
-    if (itemsRes.ok) {
-      const d = await itemsRes.json();
-      setItems(d.items);
-      setTotal(d.total);
-    }
+  async function refreshData(_targetPage: number = page) {
+    // Invalidate cached queries — TanStack Query refetches both list + summary.
+    void qc.invalidateQueries({ queryKey: ["feedback-summary"] });
+    void qc.invalidateQueries({ queryKey: ["feedback-list"] });
   }
 
   async function handleDelete(id: number) {

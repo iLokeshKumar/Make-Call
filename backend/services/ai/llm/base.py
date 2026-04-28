@@ -13,6 +13,33 @@ class BaseLLM(ABC):
         self.system_prompt = system_prompt
         self.messages = [{"role": "system", "content": system_prompt}]
         self.provider = "Unknown"
+
+    def _prune_history(self, max_non_system: int = 14, max_ephemeral_system: int = 4):
+        if len(self.messages) <= 1:
+            return
+
+        base_system = self.messages[0]
+        remaining = self.messages[1:]
+        indexed_remaining = list(enumerate(remaining))
+
+        system_idxs = [idx for idx, msg in indexed_remaining if msg.get("role") == "system"]
+        keep_system_idxs = set(system_idxs[-max_ephemeral_system:])
+
+        other_msgs = [(idx, msg) for idx, msg in indexed_remaining if msg.get("role") != "system"]
+        kept_other = other_msgs[-max_non_system:]
+
+        if kept_other:
+            first_kept_pos = next(
+                (pos for pos, (idx, _msg) in enumerate(other_msgs) if idx == kept_other[0][0]),
+                None,
+            )
+            while kept_other and kept_other[0][1].get("role") == "tool" and first_kept_pos and first_kept_pos > 0:
+                first_kept_pos -= 1
+                kept_other = [other_msgs[first_kept_pos], *kept_other]
+
+        keep_idxs = keep_system_idxs | {idx for idx, _msg in kept_other}
+        self.messages = [base_system] + [remaining[idx] for idx in sorted(keep_idxs)]
+
     def update_system_prompt(self, new_prompt: str):
         """Updates the system prompt and the first message in the history."""
         self.system_prompt = new_prompt
@@ -24,6 +51,7 @@ class BaseLLM(ABC):
 
     def add_user_message(self, content: str):
         self.messages.append({"role": "user", "content": content})
+        self._prune_history()
 
     def add_system_message(self, content: str):
         """Append a one-shot system note to the history (in addition to the
@@ -34,6 +62,7 @@ class BaseLLM(ABC):
         if not content:
             return
         self.messages.append({"role": "system", "content": content})
+        self._prune_history()
 
     def add_assistant_message(self, content: str, tool_calls: Optional[List] = None, reasoning_details: Optional[str] = None):
         if not content and not tool_calls:
@@ -67,6 +96,7 @@ class BaseLLM(ABC):
                         sanitized_calls.append(tc)
             msg["tool_calls"] = sanitized_calls
         self.messages.append(msg)
+        self._prune_history()
 
     def add_tool_message(self, tool_call_id: str, name: str, content: str):
         self.messages.append({
@@ -75,6 +105,7 @@ class BaseLLM(ABC):
             "content": content,
             "tool_call_id": tool_call_id
         })
+        self._prune_history()
 
     def clean_interrupted_tool_calls(self):
         """

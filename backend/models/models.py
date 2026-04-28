@@ -669,6 +669,33 @@ class SentimentEvent(SQLModel, table=True):
     )
 
 
+class IsmActivityEvent(SQLModel, table=True):
+    """Real-time ISM agent decision feed for the live activity dashboard.
+
+    One row per ISM action — dispatched email/whatsapp/call, handoff,
+    auto-close decision, exhaustion outcome.  Consumed by the
+    /ws/ism-activity/{company_id} WebSocket endpoint.  Cleaned up by the
+    automation worker after 4 hours (same retention as CallStatusEvent).
+    """
+    __tablename__ = "ism_activity_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    lead_name: Optional[str] = Field(default=None, max_length=200)
+    stage: Optional[str] = Field(default=None, max_length=40)
+    # "dispatched_email" | "dispatched_whatsapp" | "dispatched_call" |
+    # "handoff" | "auto_closed_won" | "auto_closed_lost" | "skipped"
+    action: str = Field(max_length=60)
+    # Short human-readable reason, surfaced in the dashboard feed.
+    reason: Optional[str] = Field(default=None, max_length=400)
+    metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
 class CallStatusEvent(SQLModel, table=True):
     """Real-time call lifecycle events for the live call monitor dashboard.
 

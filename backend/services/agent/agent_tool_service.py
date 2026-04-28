@@ -530,6 +530,12 @@ def send_communication(
     phone: str | None = None,
 ) -> dict[str, Any]:
     lead = get_lead_or_404(session, company_id, lead_id)
+    normalized_channels: list[str] = []
+    for channel in channels or []:
+        channel_name = str(channel or "").strip().lower()
+        if channel_name in {"email", "whatsapp"} and channel_name not in normalized_channels:
+            normalized_channels.append(channel_name)
+
     if email:
         lead.email = email.strip().lower()
     if phone:
@@ -542,7 +548,7 @@ def send_communication(
         session.refresh(lead)
 
     results: list[dict[str, Any]] = []
-    if "email" in channels:
+    if "email" in normalized_channels:
         results.append(
             send_email_to_lead(
                 session=session,
@@ -553,7 +559,7 @@ def send_communication(
                 body=content,
             )
         )
-    if "whatsapp" in channels:
+    if "whatsapp" in normalized_channels:
         results.append(
             send_whatsapp_to_lead(
                 session=session,
@@ -564,10 +570,49 @@ def send_communication(
             )
         )
 
+    completed_channels = [
+        item.get("channel")
+        for item in results
+        if item.get("success") and not item.get("queued")
+    ]
+    queued_channels = [
+        item.get("channel")
+        for item in results
+        if item.get("success") and item.get("queued")
+    ]
+    failed_channels = [
+        item.get("channel")
+        for item in results
+        if not item.get("success")
+    ]
+
+    channel_status: dict[str, str] = {}
+    for item in results:
+        channel_name = item.get("channel")
+        if not channel_name:
+            continue
+        if item.get("success") and item.get("queued"):
+            channel_status[channel_name] = "queued"
+        elif item.get("success"):
+            channel_status[channel_name] = "sent"
+        else:
+            channel_status[channel_name] = "failed"
+
     return {
         "success": any(item.get("success") for item in results),
         "lead_id": lead.id,
+        "requested_channels": normalized_channels,
+        "completed_channels": completed_channels,
+        "queued_channels": queued_channels,
+        "failed_channels": failed_channels,
+        "channel_status": channel_status,
         "results": results,
+        "message": (
+            f"Queued via {', '.join(queued_channels)}; sent via {', '.join(completed_channels)}; "
+            f"failed via {', '.join(failed_channels)}."
+            if results
+            else "No valid communication channels were requested."
+        ),
     }
 
 

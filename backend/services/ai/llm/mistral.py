@@ -44,10 +44,11 @@ class MistralLLM(BaseLLM):
 
                 # Clean up any unfulfilled tool calls from previous (interrupted) turns
                 self.clean_interrupted_tool_calls()
+                final_history = self.get_safe_history(limit=10)
 
                 stream = await self.client.chat.stream_async(
                     model=self.model,
-                    messages=self.messages,
+                    messages=final_history,
                     tools=tools,
                     max_tokens=2048,
                     temperature=0.7

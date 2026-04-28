@@ -773,6 +773,12 @@ def run_ism_cycle(
     if not lead:
         return {"lead_id": lead_id, "skipped": True, "skip_reason": "lead_not_found"}
 
+    # Skip soft-deleted leads — no dispatch, no auto-close, no handoff,
+    # no activity event.  A deleted lead must not influence anything
+    # downstream (analytics, CSAT, billing, kanban).
+    if lead.deleted_at is not None:
+        return {"lead_id": lead_id, "skipped": True, "skip_reason": "lead_deleted"}
+
     stage = lead.ism_stage or "new"
 
     # Skip terminal / DNC leads.
@@ -829,6 +835,18 @@ def run_ism_cycle(
                 "ISM: lead=%d channels exhausted at stage=%s → auto-%s (signals: %s)",
                 lead_id, stage, new_stage, reason,
             )
+            try:
+                from services.call import ism_broadcaster
+                ism_broadcaster.publish(
+                    company_id=company_id,
+                    lead_id=lead_id,
+                    lead_name=lead.name,
+                    stage=new_stage,
+                    action=f"auto_{decision}",
+                    reason=f"channels exhausted at {stage}; signals: {reason}",
+                )
+            except Exception:  # noqa: BLE001
+                pass
             return {
                 "lead_id": lead_id,
                 "stage": stage,
@@ -865,6 +883,18 @@ def run_ism_cycle(
             "ISM: lead=%d channels exhausted at stage=%s → handoff (ambiguous: %s)",
             lead_id, stage, reason,
         )
+        try:
+            from services.call import ism_broadcaster
+            ism_broadcaster.publish(
+                company_id=company_id,
+                lead_id=lead_id,
+                lead_name=lead.name,
+                stage=stage,
+                action="handoff",
+                reason=f"channels exhausted; ambiguous signals: {reason}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "lead_id": lead_id,
             "stage": stage,
@@ -884,6 +914,18 @@ def run_ism_cycle(
             result = _dispatch_email(session, company_id, actor_user_id, lead, stage)
     except Exception as exc:
         logger.error("ISM dispatch failed: lead=%d stage=%s channel=%s error=%s", lead_id, stage, channel, exc)
+        try:
+            from services.call import ism_broadcaster
+            ism_broadcaster.publish(
+                company_id=company_id,
+                lead_id=lead_id,
+                lead_name=lead.name,
+                stage=stage,
+                action="dispatch_failed",
+                reason=f"{channel}: {exc}",
+            )
+        except Exception:  # noqa: BLE001
+            pass
         return {
             "lead_id": lead_id,
             "stage": stage,
@@ -891,6 +933,22 @@ def run_ism_cycle(
             "skipped": True,
             "skip_reason": f"dispatch_error: {exc}",
         }
+
+    # Live activity feed — publish a one-line summary the dashboard can render.
+    try:
+        from services.call import ism_broadcaster
+        rule_note = f" (rule: {matched_rule.name})" if matched_rule else ""
+        ism_broadcaster.publish(
+            company_id=company_id,
+            lead_id=lead_id,
+            lead_name=lead.name,
+            stage=stage,
+            action=f"dispatched_{channel}",
+            reason=f"stage={stage}{rule_note}",
+            metadata={"channel": channel, "result": result},
+        )
+    except Exception:  # noqa: BLE001
+        pass
 
     # Advance stage after first-touch on a new stage.
     if stage == "new":

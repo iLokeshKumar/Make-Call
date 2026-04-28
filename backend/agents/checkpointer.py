@@ -34,13 +34,29 @@ def get_checkpointer():
 
     if mode == "postgres":
         db_url = os.getenv("DATABASE_URL", "")
-        if not db_url:
-            logger.warning("[Checkpointer] DATABASE_URL not set, falling back to MemorySaver")
+        if not db_url or db_url.startswith("sqlite"):
+            logger.warning(
+                "[Checkpointer] DATABASE_URL is not Postgres (got %s), falling back to MemorySaver",
+                "missing" if not db_url else "sqlite",
+            )
         else:
             try:
+                # Modern langgraph-checkpoint-postgres returns a context
+                # manager from from_conn_string — but we want a long-lived
+                # singleton.  Build a ConnectionPool + PostgresSaver
+                # directly so the saver lives across cycles.
+                from psycopg_pool import ConnectionPool
+                from psycopg.rows import dict_row
                 from langgraph.checkpoint.postgres import PostgresSaver
-                _checkpointer = PostgresSaver.from_conn_string(db_url)
-                _checkpointer.setup()   # creates checkpoint tables if missing
+
+                pool = ConnectionPool(
+                    conninfo=db_url,
+                    max_size=10,
+                    kwargs={"autocommit": True, "prepare_threshold": 0, "row_factory": dict_row},
+                )
+                saver = PostgresSaver(pool)
+                saver.setup()  # creates checkpoint_* tables if missing (idempotent)
+                _checkpointer = saver
                 logger.info("[Checkpointer] Using PostgresSaver (persistent memory)")
                 return _checkpointer
             except Exception as exc:

@@ -235,6 +235,8 @@ async def get_latency_analytics(
     total_calls = len(set(r.interaction_id for r in interaction_rows))
 
     # CSAT-by-LLM-provider — joins customer-source Feedback rows for each interaction back to the engine that handled it.  Lets the user see not just "which provider is fastest" but "which provider customers actually rated highest".  Tenant-scoped by company_id.
+    # LEFT JOIN leads so soft-deleted leads' feedback is excluded from the
+    # provider CSAT roll-up.  Allow null lead_id (legacy / unattached rows).
     csat_rows = session.execute(
         text("""
             SELECT
@@ -244,6 +246,8 @@ async def get_latency_analytics(
             FROM feedback fb
             JOIN latencylog ll
               ON ll.interaction_id = fb.interaction_id
+            LEFT JOIN leads l
+              ON l.id = fb.lead_id
             WHERE fb.company_id = :company_id
               AND fb.source = 'customer'
               AND fb.feedback_type = 'csat'
@@ -251,6 +255,7 @@ async def get_latency_analytics(
               AND fb.created_at >= :cutoff_start
               AND fb.created_at <  :cutoff_end
               AND ll.llm_provider IS NOT NULL
+              AND (fb.lead_id IS NULL OR l.deleted_at IS NULL)
             GROUP BY ll.llm_provider
             ORDER BY csat_avg DESC NULLS LAST
         """),

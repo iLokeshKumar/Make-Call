@@ -58,6 +58,92 @@ async def add_campaign_step_route(
     return add_campaign_step(session, current_user.company_id, campaign_id, current_user.id, data)
 
 
+@router.post("/{campaign_id}/suggest-sequence")
+async def suggest_sequence_route(
+    campaign_id: int,
+    body: dict,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    """LLM-suggested multi-step sequence for a given lead segment.
+
+    Body: {"segment": "enterprise SaaS leads who downloaded the whitepaper"}
+    Returns: {"suggestion": [{"channel": "email", "delay_hours": 0, "rationale": "..."}, ...]}
+
+    Channels limited to: call, whatsapp, email.  No DB writes — frontend
+    decides whether to commit each step via the existing /steps endpoint.
+    """
+    import json
+    import re
+    from credentials_service import get_company_setting_value
+    from services.ai.llm import get_llm_service
+
+    segment = (body or {}).get("segment", "").strip()
+    if not segment:
+        raise HTTPException(status_code=400, detail="segment is required")
+
+    api_key = get_company_setting_value(session, current_user.company_id, "MISTRAL_API_KEY")
+    llm = get_llm_service(
+        "mistral",
+        "You are a B2B sales sequence designer.  Output ONLY valid JSON.",
+        api_key=api_key,
+    )
+
+    prompt = (
+        f"Lead segment: {segment}\n\n"
+        "Design a 4-6 step outbound sequence to convert this segment.  Each step uses one of "
+        "channels: call, whatsapp, email.  delay_hours is hours to wait BEFORE this step "
+        "(0 for first).  Keep rationales short (<60 chars).\n\n"
+        "Return ONLY a JSON object:\n"
+        '{"suggestion": [{"channel": "email", "delay_hours": 0, "rationale": "..."}, ...]}\n'
+        "No markdown, no explanation outside JSON."
+    )
+
+    llm.add_user_message(prompt)
+    raw = ""
+    try:
+        async for chunk in llm.stream():
+            if chunk.get("type") == "finished":
+                raw = chunk.get("full_reply", raw)
+                break
+            elif chunk.get("type") == "token":
+                raw += chunk.get("content", "")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"LLM stream failed: {exc}")
+
+    # Tolerant parse — strip code fences, find first {...}
+    parsed = None
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        m = re.search(r"\{[\s\S]*\}", raw)
+        if m:
+            try:
+                parsed = json.loads(m.group(0))
+            except Exception:
+                parsed = None
+
+    if not parsed or "suggestion" not in parsed:
+        raise HTTPException(status_code=502, detail=f"Could not parse LLM JSON. Raw: {raw[:300]}")
+
+    # Defensive: clamp channels + delays
+    cleaned = []
+    for s in parsed.get("suggestion", [])[:8]:
+        ch = (s.get("channel") or "").lower()
+        if ch not in ("call", "whatsapp", "email"):
+            continue
+        try:
+            delay = max(0, min(int(s.get("delay_hours", 24)), 24 * 30))
+        except (TypeError, ValueError):
+            delay = 24
+        cleaned.append({
+            "channel": ch,
+            "delay_hours": delay,
+            "rationale": (s.get("rationale") or "")[:200],
+        })
+    return {"suggestion": cleaned, "campaign_id": campaign_id}
+
+
 @router.get("/{campaign_id}/steps")
 async def list_campaign_steps_route(
     campaign_id: int,

@@ -101,6 +101,9 @@ def maybe_send_auto_csat(
         lead = session.get(Lead, lead_id)
         if not lead or lead.company_id != company_id:
             return
+        if lead.deleted_at is not None:
+            logger.info("[AutoCSAT] skip lead=%s: lead is soft-deleted", lead_id)
+            return
 
         has_email = bool(lead.email)
         has_phone = bool(getattr(lead, "normalized_phone", None) or getattr(lead, "phone", None))

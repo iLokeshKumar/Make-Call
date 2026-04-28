@@ -85,6 +85,64 @@ function SequenceBuilder({ campaignId, steps, loading, onRefresh }: SequenceBuil
   const [addSaving, setAddSaving] = useState<string | null>(null); // channel being added
   const [stepMsg, setStepMsg] = useState<string | null>(null);
 
+  // AI sequence-suggest state
+  const [suggestOpen, setSuggestOpen] = useState(false);
+  const [suggestSegment, setSuggestSegment] = useState("");
+  const [suggesting, setSuggesting] = useState(false);
+  const [suggestResult, setSuggestResult] = useState<Array<{ channel: string; delay_hours: number; rationale: string }>>([]);
+  const [suggestErr, setSuggestErr] = useState<string | null>(null);
+  const [applying, setApplying] = useState(false);
+
+  async function runSuggest() {
+    if (!suggestSegment.trim()) return;
+    setSuggesting(true);
+    setSuggestErr(null);
+    setSuggestResult([]);
+    try {
+      const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/suggest-sequence`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ segment: suggestSegment.trim() }),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || `HTTP ${res.status}`);
+      const data = await res.json();
+      setSuggestResult(data.suggestion || []);
+    } catch (e) {
+      setSuggestErr(e instanceof Error ? e.message : "Suggest failed");
+    } finally {
+      setSuggesting(false);
+    }
+  }
+
+  async function applySuggestion() {
+    if (suggestResult.length === 0) return;
+    setApplying(true);
+    try {
+      const startOrder = steps.length + 1;
+      for (let i = 0; i < suggestResult.length; i++) {
+        const s = suggestResult[i];
+        const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/steps`, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            channel: s.channel,
+            delay_hours: s.delay_hours,
+            step_order: startOrder + i,
+          }),
+        });
+        if (!res.ok) throw new Error(`Step ${i + 1} failed`);
+      }
+      setSuggestResult([]);
+      setSuggestSegment("");
+      setSuggestOpen(false);
+      onRefresh();
+    } catch (e) {
+      setSuggestErr(e instanceof Error ? e.message : "Apply failed");
+    } finally {
+      setApplying(false);
+    }
+  }
+
   function openEdit(step: CampaignStep) {
     setEditId(step.id);
     setEditChannel(step.channel);
@@ -300,7 +358,73 @@ function SequenceBuilder({ campaignId, steps, loading, onRefresh }: SequenceBuil
             {meta.label}
           </button>
         ))}
+        <button
+          onClick={() => setSuggestOpen((v) => !v)}
+          className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-violet-300 bg-violet-50 px-3 py-1.5 text-xs font-semibold text-violet-700 transition hover:bg-violet-100 dark:border-violet-500/30 dark:bg-violet-500/10 dark:text-violet-300 dark:hover:bg-violet-500/15"
+        >
+          ✨ AI suggest sequence
+        </button>
       </div>
+
+      {/* AI sequence-suggest panel */}
+      {suggestOpen && (
+        <div className="mt-2 rounded-xl border border-violet-200 bg-gradient-to-br from-violet-50 to-blue-50 p-4 dark:border-violet-500/20 dark:from-violet-500/5 dark:to-blue-500/5 space-y-3">
+          <div>
+            <p className="text-[11px] font-bold uppercase tracking-widest text-violet-700 dark:text-violet-300">
+              Describe the lead segment
+            </p>
+            <p className="mt-0.5 text-[11px] text-slate-500 dark:text-slate-400">
+              e.g. &ldquo;mid-market manufacturers in IN who downloaded our pricing PDF&rdquo;
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <input
+              value={suggestSegment}
+              onChange={(e) => setSuggestSegment(e.target.value)}
+              placeholder="enterprise SaaS leads who replied to a competitor mention..."
+              className="flex-1 rounded-lg border border-violet-200 bg-white px-3 py-2 text-xs outline-none focus:border-violet-400 dark:border-violet-500/30 dark:bg-slate-900/40"
+            />
+            <button
+              onClick={runSuggest}
+              disabled={suggesting || !suggestSegment.trim()}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-gradient-to-r from-violet-600 to-blue-600 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+            >
+              {suggesting ? <Loader2 className="h-3 w-3 animate-spin" /> : "Suggest"}
+            </button>
+          </div>
+          {suggestErr && <p className="text-[11px] text-amber-600 dark:text-amber-300">{suggestErr}</p>}
+          {suggestResult.length > 0 && (
+            <>
+              <ol className="space-y-1.5">
+                {suggestResult.map((s, i) => {
+                  const meta = CHANNEL_META[s.channel as keyof typeof CHANNEL_META];
+                  return (
+                    <li key={i} className="flex items-center gap-2 rounded-lg bg-white/80 px-3 py-2 text-xs dark:bg-slate-900/40">
+                      <span className="font-mono text-slate-400">#{i + 1}</span>
+                      <span className="font-semibold text-slate-900 dark:text-white">
+                        {meta?.label ?? s.channel}
+                      </span>
+                      <span className="text-slate-500">·</span>
+                      <span className="text-slate-600 dark:text-slate-300">
+                        wait {s.delay_hours}h
+                      </span>
+                      <span className="ml-auto truncate text-slate-500 dark:text-slate-400">{s.rationale}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+              <button
+                onClick={applySuggestion}
+                disabled={applying}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-600 px-3 py-2 text-xs font-semibold text-white hover:bg-emerald-700 disabled:opacity-50"
+              >
+                {applying ? <Loader2 className="h-3 w-3 animate-spin" /> : "✓"}
+                Apply ({suggestResult.length} steps)
+              </button>
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }

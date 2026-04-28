@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useState } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
 import { Phone, Clock, CheckCircle, ChevronDown, ChevronUp, MessageSquare, Mail, MessageCircle, PlayCircle, Loader2 } from "lucide-react";
 import clsx from "clsx";
@@ -33,73 +34,59 @@ interface DialerResult {
 }
 
 export default function CallsPage() {
-    const [calls, setCalls] = useState<Interaction[]>([]);
     const { user, sessionTimeout } = useAuth();
-    const [loading, setLoading] = useState(true);
+    const qc = useQueryClient();
     const [expandedCall, setExpandedCall] = useState<number | null>(null);
-    const [error, setError] = useState<string | null>(null);
-
-    // Pagination State
     const [currentPage, setCurrentPage] = useState(1);
-    const [totalCalls, setTotalCalls] = useState(0);
     const [itemsPerPage] = useState(10);
-    const totalPages = Math.ceil(totalCalls / itemsPerPage);
-
-    // Batch dialer state
     const [dialLimit, setDialLimit] = useState(10);
-    const [dialerRunning, setDialerRunning] = useState(false);
-    const [dialerResult, setDialerResult] = useState<DialerResult | null>(null);
-    const [dialerError, setDialerError] = useState<string | null>(null);
 
     const API_BASE = "http://localhost:6060";
     const CRM_BASE = `${API_BASE}/crm`;
 
-    const fetchCalls = useCallback(async (page: number = 1) => {
-        setLoading(true);
-        try {
-            const res = await apiFetch(`${CRM_BASE}/interactions?page=${page}&limit=${itemsPerPage}`, {
-            });
-            if (res.status === 401) {
-                sessionTimeout();
-                return;
-            }
+    // Server state via TanStack Query — auto cache, dedup, refetch-on-focus.
+    type CallsPayload = { items: Interaction[]; total: number };
+    const callsQuery = useQuery<CallsPayload>({
+        queryKey: ["calls", currentPage, itemsPerPage],
+        enabled: !!user,
+        refetchInterval: 30_000,
+        queryFn: async () => {
+            const res = await apiFetch(`${CRM_BASE}/interactions?page=${currentPage}&limit=${itemsPerPage}`);
+            if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
             if (!res.ok) throw new Error(`Server returned ${res.status}`);
-            const data = await res.json();
-            
-            setCalls(data.items || []);
-            setTotalCalls(data.total || 0);
-            // Don't reset currentPage from the response — the backend doesn't return it, so `data.page || 1` always snapped back to page 1 and thrashed useEffect into re-fetching page 1 right after every page change.
-            setError(null);
-        } catch (err: any) {
-            console.error("Failed to fetch calls:", err);
-            setError(err.message || "Could not connect to backend");
-        } finally {
-            setLoading(false);
-        }
-    }, [user, itemsPerPage, sessionTimeout]);
+            return res.json();
+        },
+    });
 
-    useEffect(() => {
-        fetchCalls(currentPage);
-    }, [fetchCalls, currentPage]);
+    const calls = callsQuery.data?.items ?? [];
+    const totalCalls = callsQuery.data?.total ?? 0;
+    const loading = callsQuery.isLoading;
+    const error = callsQuery.error
+        ? (callsQuery.error instanceof Error ? callsQuery.error.message : "Failed to load")
+        : null;
+    const totalPages = Math.ceil(totalCalls / itemsPerPage);
 
-    async function handleRunBatch() {
+    // Batch dialer mutation — invalidates the calls list on success.
+    const dialerMutation = useMutation<DialerResult, Error, void>({
+        mutationFn: async () => {
+            const res = await apiFetch(`${API_BASE}/call-tasks/run-batch?limit=${dialLimit}`, { method: "POST" });
+            if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
+            if (!res.ok) {
+                const body = await res.json().catch(() => ({}));
+                throw new Error(body.detail || `Server ${res.status}`);
+            }
+            return res.json();
+        },
+        onSuccess: () => qc.invalidateQueries({ queryKey: ["calls"] }),
+    });
+
+    const dialerRunning = dialerMutation.isPending;
+    const dialerResult = dialerMutation.data ?? null;
+    const dialerError = dialerMutation.error ? dialerMutation.error.message : null;
+
+    function handleRunBatch() {
         if (!user) return;
-        setDialerRunning(true);
-        setDialerResult(null);
-        setDialerError(null);
-        try {
-            const res = await apiFetch(`${API_BASE}/call-tasks/run-batch?limit=${dialLimit}`, {
-                method: "POST"
-            });
-            if (res.status === 401) { sessionTimeout(); return; }
-            if (!res.ok) throw new Error((await res.json()).detail || `Server ${res.status}`);
-            setDialerResult(await res.json());
-            fetchCalls(currentPage);
-        } catch (e) {
-            setDialerError(e instanceof Error ? e.message : "Batch dial failed");
-        } finally {
-            setDialerRunning(false);
-        }
+        dialerMutation.mutate();
     }
 
     const toggleExpand = (id: number) => {

@@ -156,6 +156,15 @@ class VoicePipeline:
         # question if the LLM is about to say goodbye without having asked.
         self.feedback_asked_this_call = False
         self.user_gave_rating_this_call = False
+        verbosity_level = str(all_settings.get("AI_VERBOSITY") or "2").strip()
+        default_turn_caps = {"1": 2, "2": 4, "3": 6}
+        self.max_sentences_per_turn = int(
+            os.getenv("VOICE_MAX_SENTENCES_PER_TURN", str(default_turn_caps.get(verbosity_level, 4)))
+        )
+        self.max_sentences_per_turn = max(2, self.max_sentences_per_turn)
+        self._sentences_emitted_this_turn = 0
+        self.last_user_transcript = ""
+        self.silence_reengage_count = 0
 
         llm_api_key = _resolve_setting(
             all_settings,
@@ -313,6 +322,13 @@ class VoicePipeline:
     async def _dispatch_llm(self, transcript: str, latency: float, interrupted_context: str = ""):
         if not transcript:
             return
+        fast_path = self._get_fast_path_response(transcript)
+        if fast_path:
+            self._sentences_emitted_this_turn = 0
+            self.transcript_accumulator.append(f"Rio: {fast_path}")
+            self.save_transcript()
+            await self.sentence_queue.put(fast_path)
+            return
         if self.current_llm_task and not self.current_llm_task.done():
             self.current_llm_task.cancel()
         # Inject "you were saying X" context ONCE before the user turn lands. Must fire before _process_llm_response adds the user message.
@@ -327,6 +343,12 @@ class VoicePipeline:
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning("[VoicePipeline] add_system_message for interrupt failed: %s", exc)
+        turn_guidance = self._build_turn_guidance(transcript)
+        if turn_guidance:
+            try:
+                self.llm_service.add_system_message(turn_guidance)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[VoicePipeline] add_system_message for turn guidance failed: %s", exc)
         self.current_llm_task = asyncio.create_task(
             self._process_llm_response(transcript, latency)
         )
@@ -402,6 +424,30 @@ class VoicePipeline:
         r"(scale\s+of\s+1\s+to\s+5|rate\s+your\s+experience|how\s+would\s+you\s+rate)",
         re.IGNORECASE,
     )
+    _AUDIBILITY_RE = re.compile(
+        r"\b(am i audible|can you hear me|are you able to hear me|are you there|hello what happened|can you hear this)\b",
+        re.IGNORECASE,
+    )
+    _TOPIC_SWITCH_RE = re.compile(
+        r"\b(move on|other product|another product|switch product|different product|get to the point|skip that|not that one)\b",
+        re.IGNORECASE,
+    )
+    _DETAIL_REQUEST_RE = re.compile(
+        r"\b(compare|comparison|details|specs|specifications|features|pricing|price|availability|options)\b",
+        re.IGNORECASE,
+    )
+    _DETAIL_FOLLOWUP_RE = re.compile(
+        r"\b(more details|go deeper|tell me more|later one|latter one|second one|that one|the other one)\b",
+        re.IGNORECASE,
+    )
+    _ACTIVE_REQUEST_RE = re.compile(
+        r"\b(compare|comparison|details|specs|features|pricing|price|availability|share|send|email|whatsapp|options|tell me more|go deeper|other product|another product)\b",
+        re.IGNORECASE,
+    )
+    _OFF_TOPIC_RE = re.compile(
+        r"\b(pizza|peaceout|peace out|public set channel)\b",
+        re.IGNORECASE,
+    )
     _FORCED_FEEDBACK_PHRASE = (
         "Before we wrap up — on a scale of 1 to 5, how would you rate your experience speaking with me today?"
     )
@@ -414,6 +460,96 @@ class VoicePipeline:
 
     def _sentence_asks_feedback(self, sentence: str) -> bool:
         return bool(sentence and self._FEEDBACK_ASK_RE.search(sentence))
+
+    def _should_defer_feedback(self) -> bool:
+        if self.user_gave_rating_this_call:
+            return False
+        transcript = (self.last_user_transcript or "").strip()
+        if not transcript:
+            return False
+        return bool(self._ACTIVE_REQUEST_RE.search(transcript))
+
+    def _get_fast_path_response(self, transcript: str) -> str | None:
+        if not transcript:
+            return None
+        if self._AUDIBILITY_RE.search(transcript):
+            return "Yes, I can hear you. I'm here with you."
+        return None
+
+    def _build_turn_guidance(self, transcript: str) -> str | None:
+        notes: list[str] = []
+        if self._TOPIC_SWITCH_RE.search(transcript):
+            notes.append(
+                "The customer is redirecting the conversation. Acknowledge the switch briefly and do not repeat the previous product summary."
+            )
+        if self._DETAIL_REQUEST_RE.search(transcript):
+            notes.append(
+                "If you provide product details, comparisons, pricing, or specs, use get_product_info first instead of answering from memory."
+            )
+        if self._DETAIL_FOLLOWUP_RE.search(transcript):
+            notes.append(
+                "The customer is asking for follow-up detail on an already-mentioned option. Do not ask a broad reset question if the referent is reasonably clear."
+            )
+        if self._OFF_TOPIC_RE.search(transcript):
+            notes.append(
+                "Do not mirror jokes or slang. Reply professionally and steer back to the active sales task."
+            )
+        if not notes:
+            return None
+        return "[TURN GUIDANCE]\n" + "\n".join(f"- {note}" for note in notes)
+
+    def _tool_followup_phrase(self, tool_name: str, result: dict[str, Any]) -> str | None:
+        if not isinstance(result, dict):
+            return None
+        if tool_name == "send_communication":
+            status = result.get("channel_status") or {}
+            queued = [k for k, v in status.items() if v == "queued"]
+            sent = [k for k, v in status.items() if v == "sent"]
+            failed = [k for k, v in status.items() if v == "failed"]
+            parts: list[str] = []
+            if queued:
+                parts.append(f"I've queued the {', '.join(queued)}.")
+            if sent:
+                parts.append(f"I've sent the {', '.join(sent)}.")
+            if failed:
+                parts.append(f"I couldn't send the {', '.join(failed)} just yet.")
+            return " ".join(parts) if parts else "I couldn't send that just yet."
+        if tool_name in {"book_meeting", "book_demo"}:
+            if result.get("confirmed") or result.get("success"):
+                if result.get("duplicate"):
+                    return "You already have that scheduled."
+                return "I've got that scheduled."
+            return None
+        return None
+
+    def _tool_followup_note(self, phrase: str) -> str:
+        return (
+            "[TOOL RESULT SPEECH]\n"
+            f"You have already told the customer: \"{phrase}\"\n"
+            "Do not repeat or embellish that confirmation. Continue only with the next useful step."
+        )
+
+    def _is_low_value_fragment(self, text: str) -> bool:
+        if not text:
+            return True
+        trimmed = text.strip().strip('"').strip("'").strip()
+        if not trimmed:
+            return True
+        words = trimmed.split()
+        if len(words) == 1 and trimmed.lower() in {"so", "right", "okay", "great", "lokesh", "hello"}:
+            return True
+        if len(words) <= 2 and trimmed.endswith(","):
+            return True
+        if (text.strip().startswith('"') or text.strip().startswith("'")) and len(words) <= 6 and not re.search(r"[.?!]$", trimmed):
+            return True
+        if len(words) <= 3 and not re.search(r"[.?!]$", trimmed) and trimmed.lower() in {
+            "just to confirm",
+            "sending that over",
+            "let me see",
+            "one moment",
+        }:
+            return True
+        return False
 
     def _is_echo_transcript(self, transcript: str) -> bool:
         normalized = self._normalize_text(transcript)
@@ -521,7 +657,7 @@ class VoicePipeline:
             return
 
         # Personalized greeting if lead context is available
-        greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
+        greeting = f"Hello, I'm Rio from {self.company_name}. Can you hear me okay?"
         if self.lead_context:
             try:
                 
@@ -529,7 +665,7 @@ class VoicePipeline:
                 if name_line:
                     lead_name = name_line[0].split(",")[0].replace("Name: ", "").replace("[PROSPECT DATA]", "").strip()
                     if lead_name and lead_name.lower() not in ["unknown", "n/a", "none"]:
-                        greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
+                        greeting = f"Hello {lead_name}, this is Rio from {self.company_name}. Can you hear me okay?"
                         logger.info(f"📞 [Personalized Greeting] Sent to {lead_name}")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse lead name for greeting: {e}")
@@ -714,6 +850,8 @@ class VoicePipeline:
                     last_final_transcript = current_turn_transcript
                     logger.info(f"🎤 [STT] FINAL: {current_turn_transcript}")
                     self.last_customer_speech_time = time.time()
+                    self.last_user_transcript = current_turn_transcript
+                    self.silence_reengage_count = 0
                     # Track whether the customer named a 1-5 — used by the
                     # forced-feedback-ask gate so we don't pester someone
                     # who already gave a rating.
@@ -813,8 +951,29 @@ class VoicePipeline:
         2. Customer has NOT spoken since Rio finished
         3. Silence has lasted > threshold since Rio stopped
         """
-        SILENCE_THRESHOLD = 15.0  # seconds after Rio finishes speaking
-        CHECK_INTERVAL = 10.0
+        # Per-company override > env > hardcoded default.  Lets the user tune
+        # via /settings without restarting the backend.  Defaults: 6s silence +
+        # 3s check cadence → fires within 6-9s of last activity.
+        def _setting_or_env(key: str, env_default: str) -> float:
+            try:
+                from credentials_service import get_company_setting_value
+                from database import engine as _eng
+                from sqlmodel import Session as _Sess
+                if self.company_id:
+                    with _Sess(_eng) as _s:
+                        v = get_company_setting_value(_s, self.company_id, key)
+                        if v is not None and str(v).strip():
+                            return float(v)
+            except Exception:  # noqa: BLE001
+                pass
+            return float(os.getenv(key, env_default))
+
+        SILENCE_THRESHOLD = _setting_or_env("SILENCE_THRESHOLD_S", "6.0")
+        CHECK_INTERVAL = _setting_or_env("SILENCE_CHECK_INTERVAL_S", "3.0")
+        logger.info(
+            "[Pipeline] Silence-watcher: threshold=%.1fs check=%.1fs",
+            SILENCE_THRESHOLD, CHECK_INTERVAL,
+        )
 
         while True:
             await asyncio.sleep(CHECK_INTERVAL)
@@ -831,16 +990,19 @@ class VoicePipeline:
 
             if (silence_since_rio_finished > SILENCE_THRESHOLD 
                     and self.last_customer_speech_time < self.last_rio_speech_end_time):
+                if self.silence_reengage_count >= 1:
+                    continue
 
                 if self.last_context_type == "pricing":
-                    phrase = "Take your time — that's a big decision and I'm happy to walk through it."
+                    phrase = "I'm still here. Take your time, and I can compare the options if you want."
                 elif self.last_context_type == "demo":
-                    phrase = "Does that answer your question, or would you like me to go deeper on any part?"
+                    phrase = "I'm still here. If you want, I can go deeper on any part."
                 else:
-                    phrase = "Still there? Happy to answer anything."
+                    phrase = "I'm still here. Take your time."
 
                 logger.info(f"🔔 [Silence Watcher] {silence_since_rio_finished:.1f}s since Rio finished — re-engaging")
                 await self.sentence_queue.put(phrase)
+                self.silence_reengage_count += 1
 
                 # Reset so it doesn't fire again immediately
                 self.last_rio_speech_end_time = time.time()
@@ -1348,6 +1510,7 @@ class VoicePipeline:
             self.llm_service.add_user_message(user_input)
             # Fresh turn — clear the spoken-so-far buffer.  Tool-call recursion leaves it in place so an interruption mid-tool-output still sees what the agent was saying.
             self.last_rio_spoken.clear()
+            self._sentences_emitted_this_turn = 0
         
         mistral_tools = get_mistral_tools()
         
@@ -1378,11 +1541,22 @@ class VoicePipeline:
 
                 if not clean_sentence or len(clean_sentence.strip()) < 2:
                     continue
+                if self._is_low_value_fragment(clean_sentence):
+                    logger.info("[VoicePipeline] Dropping low-value fragment: %r", clean_sentence)
+                    continue
+                if self._sentences_emitted_this_turn >= self.max_sentences_per_turn:
+                    logger.info(
+                        "[VoicePipeline] Sentence cap reached for turn (%s). Dropping: %r",
+                        self.max_sentences_per_turn,
+                        clean_sentence,
+                    )
+                    continue
 
                 if (
                     self._sentence_says_goodbye(clean_sentence)
                     and not self.feedback_asked_this_call
                     and not self.user_gave_rating_this_call
+                    and not self._should_defer_feedback()
                 ):
                     logger.info(
                         "[Pipeline] LLM was about to say goodbye without asking for "
@@ -1398,6 +1572,7 @@ class VoicePipeline:
                     self.feedback_asked_this_call = True
 
                 logger.info("📤 [%s -> Queue] Sentence: %r", self.llm_provider, clean_sentence)
+                self._sentences_emitted_this_turn += 1
                 await self.sentence_queue.put(clean_sentence)
             elif chunk["type"] == "error":
                 self.llm_error_count += 1
@@ -1526,6 +1701,17 @@ class VoicePipeline:
                         except Exception as e:
                             logger.error(f"❌ Tool Execution Error: {e}")
                             result = {"error": str(e)}
+
+                        followup_phrase = self._tool_followup_phrase(tool_name, result)
+                        if followup_phrase:
+                            await self.sentence_queue.put(followup_phrase)
+                            self.transcript_accumulator.append(f"Rio: {followup_phrase}")
+                            self.save_transcript()
+                            self._sentences_emitted_this_turn += 1
+                            try:
+                                self.llm_service.add_system_message(self._tool_followup_note(followup_phrase))
+                            except Exception as exc:  # noqa: BLE001
+                                logger.warning("[VoicePipeline] add_system_message for tool follow-up failed: %s", exc)
                         
                         self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
                     

@@ -20,7 +20,7 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from config import settings as app_settings
 from database import engine, init_db, rls_company_id
-from models.models import BackgroundJob, CallStatusEvent, CallTask, Company, Interaction, Lead, SentimentEvent, User, utc_now
+from models.models import BackgroundJob, CallStatusEvent, CallTask, Company, Interaction, IsmActivityEvent, Lead, SentimentEvent, User, utc_now
 from pipelines.voice_pipeline import VoicePipeline
 from routes import admin, analytics, auth, automation, call_task, campaign, feedback, quote, requirement, templates, telephony, tracking
 from routes import accounts, coach, competitors, interactions, lead_import, leads, objections, products, settings as crm_settings
@@ -372,6 +372,44 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             "If they still don't give a single number, do not apologize or react as if you got a low score; "
             "thank them and close the call. Their qualitative words alone are valuable."
         )
+
+        system_prompt += (
+            "\n\n### COMMUNICATION TOOL GUARDRAILS\n"
+            "If the customer asks you to send details by email or WhatsApp, you must use the send_communication tool "
+            "before saying the message was sent, queued, shared, or scheduled.\n"
+            "Never claim that an email or WhatsApp was sent unless a tool result in this call confirms it.\n"
+            "If the customer asked for both email and WhatsApp, call send_communication with both channels. "
+            "Do not silently downgrade to one channel.\n"
+            "After the tool returns, describe only the channels that actually succeeded or were queued. "
+            "If one channel failed, say that plainly and do not imply both worked.\n"
+            "If the customer is still clarifying what to send, ask one short clarification question instead of promising delivery."
+        )
+        system_prompt += (
+            "\n\n### LIVE CALL BEHAVIOR\n"
+            "Respect the configured AI_VERBOSITY level for length. Even at the highest verbosity, keep spoken replies easy to follow.\n"
+            "Ask at most one question before pausing for the customer.\n"
+            "If the customer interrupts, changes topic, says 'move on', 'other product', 'get to the point', or similar, acknowledge the switch and do not repeat the previous product summary.\n"
+            "If the customer asks whether you can be heard, whether you are there, or says the line dropped, answer that directly first.\n"
+            "Do not invent product specs, availability, comparisons, pricing, or version support from memory. Use get_product_info first when giving product details or comparing models. If the catalog does not confirm it, say you need to check.\n"
+            "Never continue speaking in long multi-part lists unless the customer explicitly asked for a detailed walkthrough.\n"
+            "If the customer uses slang, jokes, or off-topic phrases, do not mirror them. Reply professionally and either steer back to the request or close politely."
+        )
+        system_prompt += (
+            "\n\n### FOLLOW-UP AND SCHEDULING\n"
+            "Do not promise that a follow-up call, reminder, or future outreach has been scheduled unless a booking or scheduling tool result in this call confirms it.\n"
+            "If no scheduling tool was used, say you can note the preference or that someone will follow up, but do not claim the event is already scheduled."
+        )
+        verbosity_level = (
+            get_company_setting_value(session, target_user.company_id, "AI_VERBOSITY")
+            if target_user
+            else None
+        ) or "2"
+        verbosity_rules = {
+            "1": "ULTRA-CONCISE: Maximum 5-10 words. Direct answers only. No long explanations.",
+            "2": "BALANCED: Usually 1-2 sentences. Keep spoken replies compact and easy to interrupt.",
+            "3": "DETAILED: Give more detail when asked, but still keep spoken turns structured and not rambling.",
+        }
+        system_prompt += f"\n\n### VERBOSITY\n{verbosity_rules.get(str(verbosity_level), verbosity_rules['2'])}"
 
         stt_provider = (
             get_company_setting_value(session, target_user.company_id, "STT_PROVIDER")
@@ -838,6 +876,59 @@ async def call_monitor(
             else:
                 idle_ticks += 1
                 if idle_ticks % 60 == 0:  # ~30s: 60 × 500ms
+                    await websocket.send_json({"type": "ping"})
+            await asyncio.sleep(0.5)
+    except Exception:
+        pass
+
+
+@app.websocket("/ws/ism-activity/{company_id}")
+async def ism_activity_monitor(
+    websocket: WebSocket,
+    company_id: int,
+):
+    """Live ISM agent activity feed for a company.
+
+    Streams IsmActivityEvent rows (dispatched_email / dispatched_whatsapp /
+    dispatched_call / handoff / auto_closed_won / auto_closed_lost / skipped)
+    scoped to company_id.  Cursor-based polling every 500ms for cross-worker
+    visibility — same pattern as /ws/call-monitor.
+    """
+    await websocket.accept()
+    last_id = 0
+    idle_ticks = 0
+    try:
+        while True:
+            with Session(engine) as s:
+                # LEFT JOIN Lead so soft-deleted leads' activity events
+                # don't surface in the live feed.  Allow null lead_id
+                # (system-level events without a lead).
+                rows = s.exec(
+                    select(IsmActivityEvent)
+                    .outerjoin(Lead, Lead.id == IsmActivityEvent.lead_id)
+                    .where(IsmActivityEvent.company_id == company_id)
+                    .where(IsmActivityEvent.id > last_id)
+                    .where((IsmActivityEvent.lead_id.is_(None)) | (Lead.deleted_at.is_(None)))
+                    .order_by(IsmActivityEvent.id)
+                    .limit(20)
+                ).all()
+            if rows:
+                for row in rows:
+                    await websocket.send_json({
+                        "type": "ism_activity",
+                        "lead_id": row.lead_id,
+                        "lead_name": row.lead_name,
+                        "stage": row.stage,
+                        "action": row.action,
+                        "reason": row.reason,
+                        "metadata": row.metadata_json or {},
+                        "ts": row.created_at.isoformat(),
+                    })
+                    last_id = row.id
+                idle_ticks = 0
+            else:
+                idle_ticks += 1
+                if idle_ticks % 60 == 0:  # ~30s
                     await websocket.send_json({"type": "ping"})
             await asyncio.sleep(0.5)
     except Exception:

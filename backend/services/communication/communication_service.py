@@ -262,6 +262,8 @@ def send_whatsapp_to_lead(
         "lead_id": lead.id,
         "interaction_id": interaction.id,
         "provider_message_sid": send_result.get("message_sid"),
+        "delivery_status": "sent" if success else "failed",
+        "error": send_result.get("error"),
     }
 
 

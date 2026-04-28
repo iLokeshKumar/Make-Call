@@ -24,7 +24,7 @@ from typing import Optional
 
 from sqlmodel import Session, select
 
-from models.models import CallCoachScore, CompanySetting, Feedback, utc_now
+from models.models import CallCoachScore, CompanySetting, Feedback, Lead, utc_now
 
 logger = logging.getLogger(__name__)
 
@@ -284,24 +284,31 @@ def get_coach_averages(session: Session, company_id: int) -> dict:
 
     # Recent low-CSAT signal: customer-given verbal ratings ≤ 2 (last 30 rows).
     # Surfaced in the coach panel so reps see customer voice alongside LLM scoring.
+    # JOIN to Lead so soft-deleted leads' feedback is hidden from analytics —
+    # otherwise a deleted noisy lead keeps poisoning the coach panel.  LEFT
+    # OUTER JOIN preserves rows where lead_id is null (legacy data).
     low_csat = session.exec(
         select(Feedback)
+        .outerjoin(Lead, Lead.id == Feedback.lead_id)
         .where(
             Feedback.company_id == company_id,
             Feedback.source == "customer",
             Feedback.feedback_type == "csat",
             Feedback.rating <= 2,
+            (Lead.deleted_at.is_(None)) | (Feedback.lead_id.is_(None)),
         )
         .order_by(Feedback.created_at.desc())
         .limit(30)
     ).all()
     csat_avg = session.exec(
         select(Feedback)
+        .outerjoin(Lead, Lead.id == Feedback.lead_id)
         .where(
             Feedback.company_id == company_id,
             Feedback.source == "customer",
             Feedback.feedback_type == "csat",
             Feedback.rating.is_not(None),
+            (Lead.deleted_at.is_(None)) | (Feedback.lead_id.is_(None)),
         )
     ).all()
     csat_ratings = [f.rating for f in csat_avg if f.rating is not None]

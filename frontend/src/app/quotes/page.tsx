@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useState } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   CheckCircle,
   FileDown,
@@ -119,52 +120,69 @@ export default function QuotesPage() {
     setTimeout(() => setToast(null), 3500);
   }
 
-  const fetchQuotes = useCallback(async () => {
-    if (!user) return;
-    setLoading(true);
-    try {
-      const res = await apiFetch(`${API_BASE}/quotes`, { });
-      if (res.status === 401) { sessionTimeout(); return; }
+  const qc = useQueryClient();
+
+  // Quotes — refetched after mutations, also auto-refreshes every 30s.
+  const quotesQuery = useQuery<Quote[]>({
+    queryKey: ["quotes"],
+    enabled: !!user,
+    refetchInterval: 30_000,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/quotes`);
+      if (res.status === 401) { sessionTimeout(); throw new Error("unauthorized"); }
       if (!res.ok) throw new Error("Failed to load quotes");
       const data = await res.json();
-      setQuotes(Array.isArray(data) ? data : data.items ?? []);
-    } catch (e) {
-      showToast(e instanceof Error ? e.message : "Failed to load quotes", true);
-    } finally {
-      setLoading(false);
-    }
-  }, [user, sessionTimeout]);
+      return Array.isArray(data) ? data : data.items ?? [];
+    },
+  });
 
-  const fetchLeads = useCallback(async () => {
-    if (!user) return;
-    try {
-      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=200`, {
-      });
-      if (res.ok) {
-        const d = await res.json();
-        setLeads(d.items ?? d ?? []);
-      }
-    } catch {
-      
-    }
-  }, [user]);
+  // Lead + product lookups — cached longer; only invalidated by explicit user actions elsewhere.
+  const leadsQuery = useQuery<Lead[]>({
+    queryKey: ["quotes-leads"],
+    enabled: !!user,
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=200`);
+      if (!res.ok) return [];
+      const d = await res.json();
+      return d.items ?? d ?? [];
+    },
+  });
+  const productsQuery = useQuery<Product[]>({
+    queryKey: ["quotes-products"],
+    enabled: !!user,
+    staleTime: 5 * 60_000,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/products`);
+      return res.ok ? res.json() : [];
+    },
+  });
 
-  const fetchProducts = useCallback(async () => {
-    if (!user) return;
-    try {
-      const res = await apiFetch(`${API_BASE}/crm/products`, {
-      });
-      if (res.ok) setProducts(await res.json());
-    } catch {
-      
-    }
-  }, [user]);
-
+  // Sync TanStack data into existing setState slots (kept to avoid rewriting
+  // every consumer in this 850-line file).  Cheap effect, runs only when data
+  // identity changes.
   useEffect(() => {
-    fetchQuotes();
-    fetchLeads();
-    fetchProducts();
-  }, [fetchQuotes, fetchLeads, fetchProducts]);
+    if (quotesQuery.data) setQuotes(quotesQuery.data);
+  }, [quotesQuery.data]);
+  useEffect(() => {
+    if (leadsQuery.data) setLeads(leadsQuery.data);
+  }, [leadsQuery.data]);
+  useEffect(() => {
+    if (productsQuery.data) setProducts(productsQuery.data);
+  }, [productsQuery.data]);
+  useEffect(() => {
+    setLoading(quotesQuery.isLoading);
+  }, [quotesQuery.isLoading]);
+
+  const fetchQuotes = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["quotes"] });
+  }, [qc]);
+  const fetchLeads = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["quotes-leads"] });
+  }, [qc]);
+  const fetchProducts = useCallback(() => {
+    void qc.invalidateQueries({ queryKey: ["quotes-products"] });
+  }, [qc]);
 
   // Derived stats
   const totalQuotes = quotes.length;
