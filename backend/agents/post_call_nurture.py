@@ -73,21 +73,28 @@ class CallSummarizer:
         return summary
     
     @staticmethod
-    def save_summary_to_crm(lead_id: int, summary: dict) -> bool:
+    def save_summary_to_crm(lead_id: int, summary: dict, company_id: int = 0, actor_user_id: int | None = None) -> bool:
         """
         Save call summary to CRM interactions table.
         """
         try:
             with Session(engine) as session:
                 interaction = Interaction(
+                    company_id=company_id,
                     lead_id=lead_id,
+                    user_id=actor_user_id,
                     type="call_summary",
+                    channel="call",
+                    direction="outbound",
+                    source="voice_pipeline",
                     content=json.dumps(summary),
-                    timestamp=datetime.now(timezone.utc)
+                    started_at=datetime.now(timezone.utc),
+                    created_by=actor_user_id,
+                    updated_by=actor_user_id,
                 )
                 session.add(interaction)
                 session.commit()
-                
+
                 print(f"✓ [SUMMARIZER] Summary saved to CRM for lead {lead_id}")
                 return True
         except Exception as e:
@@ -140,29 +147,38 @@ class CRMUpdater:
             return False
     
     @staticmethod
-    def log_interaction(lead_id: int, interaction_type: str, content: str) -> bool:
+    def log_interaction(lead_id: int, interaction_type: str, content: str, company_id: int = 0, actor_user_id: int | None = None) -> bool:
         """
         Log interaction to CRM.
-        
+
         Args:
             lead_id: ID of the lead
             interaction_type: "call" | "email" | "note" | "demo_scheduled"
             content: Interaction content
-        
+            company_id: Company the lead belongs to
+            actor_user_id: User performing the action
+
         Returns:
             Success boolean
         """
         try:
             with Session(engine) as session:
                 interaction = Interaction(
+                    company_id=company_id,
                     lead_id=lead_id,
+                    user_id=actor_user_id,
                     type=interaction_type,
+                    channel="call",
+                    direction="outbound",
+                    source="voice_pipeline",
                     content=content,
-                    timestamp=datetime.now(timezone.utc)
+                    started_at=datetime.now(timezone.utc),
+                    created_by=actor_user_id,
+                    updated_by=actor_user_id,
                 )
                 session.add(interaction)
                 session.commit()
-                
+
                 print(f"✓ [CRM_UPDATER] {interaction_type} logged for lead {lead_id}")
                 return True
         except Exception as e:
@@ -184,87 +200,57 @@ class EmailWriter:
         pain_points: List[str],
         questions: List[str],
         icp_score: float,
-        suggested_action: str
+        suggested_action: str,
     ) -> tuple:
         """
-        Generate personalized follow-up email subject and body.
-        
-        Args:
-            lead_name: Name of the lead
-            company: Lead's company
-            pain_points: List of pain points from call
-            questions: List of questions from call
-            icp_score: ICP qualification score
-            suggested_action: "book_demo" | "send_resources" | "discount_offer"
-        
+        Generate personalized follow-up email subject and body text.
+        Does NOT include a greeting or sign-off — those are added by get_styled_html.
+
         Returns:
-            (subject, html_body) tuple
+            (subject, body) tuple
         """
-        
-        # Generate dynamic subject
         if suggested_action == "book_demo":
-            subject = f"{lead_name}, your personalized Rio CRM demo is ready"
+            subject = "Let's set up your personalized demo"
         elif suggested_action == "discount_offer":
-            subject = f"Special 15% offer for {company} - Limited time"
+            subject = f"A special offer{' for ' + company if company else ''}"
         else:
-            subject = f"Resources for {', '.join(pain_points[:1])} challenges"
-        
-        # Generate dynamic body
-        pain_points_html = "".join([f"<li>{pain}</li>" for pain in pain_points])
-        
-        html_body = f"""
-        <h2>Hi {lead_name},</h2>
-        
-        <p>Thank you for speaking with our team today. We really enjoyed learning about {company} 
-        and understanding your goals.</p>
-        
-        <p><strong>We heard you're tackling:</strong></p>
-        <ul>
-            {pain_points_html}
-        </ul>
-        
-        """
-        
-        # Add action-specific content
+            subject = "Following up from today's call"
+
+        pain_html = "".join(f"<li>{p}</li>" for p in pain_points) if pain_points else ""
+
+        parts = ["Thank you for speaking with our team today."]
+
+        if pain_html:
+            parts.append(f"<strong>Based on our conversation, we know you're working on:</strong><ul>{pain_html}</ul>")
+
         if suggested_action == "book_demo":
-            html_body += f"""
-            <p>Based on our conversation, we think Rio CRM could be a great fit for your team. 
-            Would you like to see a personalized demo tailored to your needs?</p>
-            <p><a href="https://rio-crm.example.com/book-demo" 
-                  style="background-color: #007bff; color: white; padding: 10px 20px; 
-                  text-decoration: none; border-radius: 5px;">Schedule Your Demo</a></p>
-            """
+            parts.append(
+                "We think a personalized demo would be a great next step — "
+                "we'll tailor it specifically to your needs."
+            )
         elif suggested_action == "discount_offer":
-            html_body += f"""
-            <p>We'd like to make this easy for you. As a special offer, we're providing 
-            <strong>15% off</strong> your first year when you sign up this month.</p>
-            <p><a href="https://rio-crm.example.com/special-offer" 
-                  style="background-color: #28a745; color: white; padding: 10px 20px; 
-                  text-decoration: none; border-radius: 5px;">Claim Your Offer</a></p>
-            """
+            parts.append(
+                "We'd like to make this easy for you. We're offering "
+                "<strong>15% off</strong> your first year when you sign up this month."
+            )
         else:
-            html_body += f"""
-            <p>Here are some resources that may help:</p>
-            <ul>
-                <li><a href="#">Blog: {pain_points[0] if pain_points else 'Sales'} Best Practices</a></li>
-                <li><a href="#">Case Study: Similar to {company}</a></li>
-                <li><a href="#">Webinar: Industry Trends</a></li>
-            </ul>
-            """
-        
-        html_body += f"""
-        <p>Feel free to reply to this email or call us anytime. We're here to help!</p>
-        <p>Best regards,<br/>Rio Sales Team</p>
-        """
-        
+            parts.append(
+                "We'll follow up with resources tailored to your specific situation. "
+                "Feel free to reply to this email anytime — we're here to help."
+            )
+
+        body = "\n\n".join(parts)
+
         print(f"📝 [EMAIL_WRITER] Generated personalized email for {lead_name}")
-        print(f"   Subject: {subject}")
-        print(f"   Action: {suggested_action}")
-        
-        return subject, html_body
+        print(f"   Subject: {subject}, Action: {suggested_action}")
+
+        return subject, body
     
     @staticmethod
     def send_personalized_followup(
+        session,
+        company_id: int,
+        actor_user_id: int,
         lead_id: int,
         lead_name: str,
         lead_email: str,
@@ -272,36 +258,49 @@ class EmailWriter:
         pain_points: List[str],
         questions: List[str],
         icp_score: float,
-        suggested_action: str
+        suggested_action: str,
+        interaction_id: Optional[int] = None,
     ) -> bool:
         """
-        Generate and send personalized follow-up email.
+        Generate and send personalized follow-up email via communication_service.
+        Attaches a CSAT feedback link as the email CTA.
         """
         try:
-            from email_service import send_smtp_email
-            from tools.email import send_personalized_email
-            
-            # Generate email
-            subject, html_body = EmailWriter.generate_personalized_email(
+            from services.communication.communication_service import send_email_to_lead
+            from services.feedback.csat_service import get_csat_base_url, get_or_create_pending_csat
+
+            subject, body = EmailWriter.generate_personalized_email(
                 lead_name, company, pain_points, questions, icp_score, suggested_action
             )
-            
-            # Send via email service
-            send_smtp_email(
-                recipient=lead_email,
+
+            # Create (or reuse) a pending CSAT record so we can embed a real feedback URL
+            cta_url = ""
+            cta_label = ""
+            try:
+                fb, _ = get_or_create_pending_csat(
+                    session,
+                    company_id=company_id,
+                    lead_id=lead_id,
+                    actor_user_id=actor_user_id,
+                    interaction_id=interaction_id,
+                )
+                cta_url = f"{get_csat_base_url()}/feedback/{fb.token}"
+                cta_label = "Share Your Feedback"
+            except Exception as csat_exc:
+                print(f"⚠️ [EMAIL_WRITER] Could not create CSAT record: {csat_exc}")
+
+            result = send_email_to_lead(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=lead_id,
                 subject=subject,
-                html_body=html_body,
-                from_name="Rio Sales Team"
+                body=body,
+                cta_url=cta_url,
+                cta_label=cta_label,
             )
-            
-            # Log to CRM
-            CRMUpdater.log_interaction(
-                lead_id,
-                "email_sent",
-                f"Personalized {suggested_action} email sent: {subject}"
-            )
-            
-            print(f"✓ [EMAIL_WRITER] Email sent to {lead_email}")
+
+            print(f"✓ [EMAIL_WRITER] Email sent to {lead_email} | status: {result.get('status')}")
             return True
         except Exception as e:
             print(f"❌ [EMAIL_WRITER] Failed to send email: {e}")
@@ -312,11 +311,13 @@ class EmailWriter:
 async def execute_post_call_nurture(
     lead_id: int,
     lead_data: dict,
-    call_data: dict
+    call_data: dict,
+    company_id: int = 0,
+    actor_user_id: Optional[int] = None,
 ) -> dict:
     """
     Execute complete post-call nurture workflow.
-    
+
     Args:
         lead_id: ID of the lead
         lead_data: {"name": str, "email": str, "company": str}
@@ -329,25 +330,22 @@ async def execute_post_call_nurture(
             "bant_answers": dict,
             "call_outcome": str
         }
-    
+        company_id: Tenant ID (required for email dispatch)
+        actor_user_id: User initiating the workflow
+
     Returns:
         Result dict with workflow execution details
     """
-    
-    print(f"\n{'='*60}")
-    print(f"🔄 STARTING POST-CALL NURTURE FOR: {lead_data['name']}")
-    print(f"{'='*60}\n")
-    
     result = {
         "lead_id": lead_id,
         "summary_saved": False,
         "status_updated": False,
         "email_sent": False,
-        "errors": []
+        "errors": [],
     }
-    
+
     try:
-        # Step 1: Summarize call
+        # Summarize call
         summary = CallSummarizer.summarize_call(
             lead_id=lead_id,
             transcript=call_data["transcript"],
@@ -355,39 +353,42 @@ async def execute_post_call_nurture(
             sentiment=call_data["sentiment"],
             pain_points=call_data["pain_points"],
             questions_asked=call_data["questions_asked"],
-            bant_answers=call_data["bant_answers"]
+            bant_answers=call_data["bant_answers"],
         )
-        result["summary_saved"] = CallSummarizer.save_summary_to_crm(lead_id, summary)
-        
-        # Step 2: Update lead status in CRM
+        result["summary_saved"] = CallSummarizer.save_summary_to_crm(
+            lead_id, summary, company_id=company_id, actor_user_id=actor_user_id
+        )
+
+        # Update lead status
         new_status = "Qualified" if call_data["icp_score"] > 0.75 else "Not Qualified"
-        notes = f"Call outcome: {call_data['call_outcome']}, ICP Score: {call_data['icp_score']}"
-        result["status_updated"] = CRMUpdater.update_lead_status(lead_id, new_status, notes)
-        
-        # Step 3: Send personalized follow-up email
-        suggested_action = summary["recommendations"]["next_action"]
-        result["email_sent"] = EmailWriter.send_personalized_followup(
-            lead_id=lead_id,
-            lead_name=lead_data["name"],
-            lead_email=lead_data["email"],
-            company=lead_data["company"],
-            pain_points=call_data["pain_points"],
-            questions=call_data["questions_asked"],
-            icp_score=call_data["icp_score"],
-            suggested_action=suggested_action
+        notes = (
+            f"Call outcome: {call_data['call_outcome']}. "
+            f"ICP Score: {call_data['icp_score']}. "
+            f"Sentiment: {call_data['sentiment']}."
         )
-        
+        result["status_updated"] = CRMUpdater.update_lead_status(lead_id, new_status, notes)
+
+        # Send personalized follow-up email
+        suggested_action = summary["recommendations"]["next_action"]
+        with Session(engine) as session:
+            result["email_sent"] = EmailWriter.send_personalized_followup(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=lead_id,
+                lead_name=lead_data["name"],
+                lead_email=lead_data["email"],
+                company=lead_data.get("company", ""),
+                pain_points=call_data["pain_points"],
+                questions=call_data["questions_asked"],
+                icp_score=call_data["icp_score"],
+                suggested_action=suggested_action,
+            )
+
     except Exception as e:
         result["errors"].append(str(e))
-        print(f"❌ POST-CALL NURTURE ERROR: {e}")
-    
-    print(f"\n{'='*60}")
-    print(f"✓ POST-CALL NURTURE COMPLETE")
-    print(f"Summary Saved: {result['summary_saved']}")
-    print(f"Status Updated: {result['status_updated']}")
-    print(f"Email Sent: {result['email_sent']}")
-    print(f"{'='*60}\n")
-    
+        print(f"POST-CALL NURTURE ERROR: {e}")
+
     return result
 
 if __name__ == "__main__":

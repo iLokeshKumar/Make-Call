@@ -11,8 +11,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
+**/python*/lib/
+**/python*/lib64/
+# (the bare `lib/` rule was also hiding frontend/src/lib/ which contains
+# shadcn helpers like utils.ts — broke CI tsc.  Scope to repo-root + Python
+# venv paths only.)
 parts/
 sdist/
 var/
@@ -62,3 +67,41 @@ dist-ssr/
 .idea/
 *.swp
 *.swo
+
+# Claude
+.claude/
+continuation_handoff.md
+implementation_backlog.md
+multi-tenant_plan.md
+overall_architecture.md
+.gstack/
+Claude.md
+
+# Test/cache
+.pytest_cache/
+**/.pytest_cache/
+
+# QA/local work folders
+.qa/
+backend/.qa/
+frontend/.qa/
+
+# Local plugin/work dirs
+caveman/
+
+# Generated app data
+backend/uploads/
+backend/quotes/*.pdf
+
+# Windows
+desktop.ini
+
+docs/ARCHITECTURE.md
+docs/ROADMAP.md
+docs/SCALING.md
+docs/SLOs.md
+docs/VOICE_TUNING.md
+tools/claude-usage/
+
+**/CLAUDE.md
+**/.gitignore

@@ -39,8 +39,7 @@ async def handle_media_stream(websocket: WebSocket):
     await websocket.accept()
     print("📱 Phone Lab: Twilio connected. Opening Deepgram Agent...")
 
-    # DG Agent URL (Production V1)
-    # Using PCMU (mulaw) to match Twilio's native format (8kHz)
+    # DG Agent URL (Production V1) Using PCMU (mulaw) to match Twilio's native format (8kHz)
     voice = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")
     dg_url = f"wss://agent.deepgram.com/v1/agent/converse?model=nova-2&voice={voice}&encoding=mulaw&sample_rate=8000"
     headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
@@ -48,8 +47,6 @@ async def handle_media_stream(websocket: WebSocket):
     async with aiohttp.ClientSession() as session:
         async with session.ws_connect(dg_url, headers=headers) as dg_ws:
             
-            # 1. INITIAL HANDSHAKE
-            # We use Deepgram-hosted LLM (mistral-small) to ensure stability
             config = {
                 "type": "SettingsConfiguration",
                 "audio": {
@@ -69,7 +66,6 @@ async def handle_media_stream(websocket: WebSocket):
             await dg_ws.send_json(config)
             print("⚙️ Phone Lab: Agent configuration sent.")
 
-            # Mutable container to share streamSid between tasks
             state = {"sid": None}
 
             async def twilio_to_dg():

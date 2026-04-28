@@ -1,304 +1,411 @@
-"""
-Unified Tool Adapter for Rio AI Sales Assistant
-
-ARCHITECTURE - This is the CORRECT MCP pattern:
-===============================================
-1. MCP Tools (mcp_server.py): 
-   - Contains @mcp.tool() decorated functions
-   - COMPLETE implementations including side effects
-   - Example: book_meeting() creates appointment AND sends email
-   - Tools are self-contained agents
-
-2. Tool Adapter (this file):
-   - Pure schema converter for LLM compatibility
-   - Routes tool calls to MCP implementations
-   - Does NOT re-implement tool logic
-   - Single responsibility: dispatch and schema
-
-3. Main.py:
-   - Orchestrates speech recognition → LLM → tools → response flow
-   - Calls execute_mcp_tool() when LLM selects a tool
-
-Why this matters:
-- Prevents duplicate code in tool_adapter + mcp_server
-- Tools are atomic units of work (DB + email together)
-- Easy to test: each tool is independent
-- Clean separation: logic in MCP, schema in adapter
-"""
-
+import asyncio
 import logging
-from mcp_server import (
-    check_icp_qualification,
-    get_product_info,
-    check_guardrails,
+import re
+from typing import Any
+
+from sqlmodel import Session
+
+
+# LLM tool-call argument coercion.  Different LLMs handle the same
+# function-schema field types differently:
+#   - Mistral / GPT-class: clean int or numeric string ("110", 110)
+#   - Cerebras Llama 3.1 8B: free-form English ("less than 10", "lead 110", "10%")
+#
+# Strategy: try the fast path (int()/float()), fall back to regex extraction
+# from the string form.  Never reject — pass the result downstream so the
+# real tool decides what "valid" means (lead-not-found, etc.).  Keeps the
+# original behavior intact for compliant LLMs while catching the messy ones.
+
+def _safe_int_arg(raw: Any, default: int = 0) -> int:
+    """Tolerant int coercion for LLM tool args.  Tries int() first; on
+    failure, regex-extracts the first integer from the string form.  Returns
+    `default` only when nothing numeric is present at all.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return int(raw)
+    if isinstance(raw, int):
+        return raw
+    if isinstance(raw, float):
+        return int(raw)
+    s = str(raw).strip()
+    if not s:
+        return default
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        m = re.search(r"-?\d+", s)
+        return int(m.group(0)) if m else default
+
+
+def _safe_float_arg(raw: Any, default: float = 0.0) -> float:
+    """Tolerant float coercion.  Strips '%', '$', whitespace; extracts the
+    first numeric token from strings like '10.5%' or 'discount 15'.  Returns
+    `default` only when nothing numeric is present.
+    """
+    if raw is None:
+        return default
+    if isinstance(raw, bool):
+        return float(raw)
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    s = str(raw).strip().replace("%", "").replace("$", "").strip()
+    if not s:
+        return default
+    try:
+        return float(s)
+    except (ValueError, TypeError):
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        return float(m.group(0)) if m else default
+
+from database import engine
+from services.agent.agent_tool_service import (
+    book_demo,
     book_meeting,
+    check_guardrails,
+    check_icp_qualification,
     get_call_latency_summary,
+    get_google_auth_url,
     get_or_create_lead,
-    sync_product_catalog
+    get_product_info,
+    get_user_or_404,
+    send_communication,
+    submit_google_auth_code,
+    sync_product_catalog,
 )
 
 logger = logging.getLogger(__name__)
 
-# MISTRAL TOOL SCHEMA CONVERTER
 
-def get_mistral_tools():
-    """
-    Convert MCP tools to Mistral function calling format.
-    
-    IMPORTANT: This defines the SCHEMA ONLY
-    Actual implementations are in mcp_server.py @mcp.tool() functions
-    """
+def get_mistral_tools() -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
             "function": {
                 "name": "check_icp_qualification",
-                "description": "Validate if a company qualifies as an ideal customer profile (ICP). Returns qualification score and recommendation.",
+                "description": "Validate whether a prospect fits the ideal customer profile.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "company_size": {
-                            "type": "string",
-                            "description": "Company size: 'SMB', 'Mid-market', or 'Enterprise'"
-                        },
-                        "industry": {
-                            "type": "string",
-                            "description": "Industry: 'Tech', 'Healthcare', 'Finance', 'Retail', or 'Other'"
-                        },
-                        "employee_count": {
-                            "type": "integer",
-                            "description": "Number of employees (e.g., 50, 500, 5000)"
-                        }
+                        "company_size": {"type": "string"},
+                        "industry": {"type": "string"},
+                        "employee_count": {"type": "integer"},
                     },
-                    "required": ["company_size", "industry", "employee_count"]
-                }
-            }
+                    "required": ["company_size", "industry", "employee_count"],
+                },
+            },
         },
         {
             "type": "function",
             "function": {
                 "name": "get_product_info",
-                "description": "Fetch accurate product information using semantic search. This tool finds the closest match in the catalog. If a product is not found, treat it as 'temporarily unavailable' and continue the call naturally.",
+                "description": "Fetch product details from the tenant's product catalog.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "product_name": {
-                            "type": "string",
-                            "description": "Name or description of the product (e.g., 'Samsung 55 TV', 'Commercial Display')"
-                        }
+                        "product_name": {"type": "string"},
                     },
-                    "required": ["product_name"]
-                }
-            }
+                    "required": ["product_name"],
+                },
+            },
         },
         {
             "type": "function",
             "function": {
                 "name": "check_guardrails",
-                "description": "Check discount limits and approval requirements. Ensures discounts stay within policy.",
+                "description": "Check whether a requested discount is inside policy.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "requested_discount_percent": {
-                            "type": "number",
-                            "description": "Requested discount percentage (e.g., 5, 10, 15)"
-                        }
+                        "requested_discount_percent": {"type": "number"},
                     },
-                    "required": ["requested_discount_percent"]
-                }
-            }
+                    "required": ["requested_discount_percent"],
+                },
+            },
         },
         {
             "type": "function",
             "function": {
                 "name": "book_meeting",
-                "description": "Schedule a meeting/demo for a qualified lead. This is a COMPLETE tool: books appointment AND sends confirmation email to lead. No need to call anything else after this.",
+                "description": "Create an appointment for a lead and optionally send confirmation email.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "lead_id": {
-                            "type": "integer",
-                            "description": "Database ID of the lead (e.g., 2 for Lokesh Kumar)"
-                        },
-                        "proposed_time": {
-                            "type": "string",
-                            "description": "Proposed meeting time (e.g., 'Tuesday at 3 PM' or '2026-01-28T15:00:00')"
-                        },
-                        "meeting_type": {
-                            "type": "string",
-                            "description": "Type of meeting: 'demo', 'consultation', 'followup', or 'discovery'"
-                        }
+                        "lead_id": {"type": "integer"},
+                        "proposed_time": {"type": "string"},
+                        "meeting_type": {"type": "string"},
+                        "lead_email": {"type": "string"},
                     },
-                    "required": ["lead_id", "proposed_time", "meeting_type"]
-                }
-            }
+                    "required": ["lead_id", "proposed_time", "meeting_type"],
+                },
+            },
         },
         {
             "type": "function",
             "function": {
                 "name": "get_call_latency_summary",
-                "description": "Retrieve detailed latency metrics for a call to identify bottlenecks in STT, LLM, or TTS.",
+                "description": "Return latency summary when analytics migration is available.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "interaction_id": {
-                            "type": "integer",
-                            "description": "The database ID of the interaction/call."
-                        }
+                        "interaction_id": {"type": "integer"},
                     },
-                    "required": ["interaction_id"]
-                }
-            }
+                    "required": ["interaction_id"],
+                },
+            },
         },
         {
             "type": "function",
             "function": {
                 "name": "get_or_create_lead",
-                "description": "Identify a lead by phone or create a new record. Use this towards the end of a conversation (e.g., when close to booking or finishing) to identify the user. Avoid calling this at the very start of the call.",
+                "description": "Find an existing lead by phone/email or create one in the current tenant.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "name": {
-                            "type": "string",
-                            "description": "Name of the person (e.g., 'John Doe')"
-                        },
-                        "phone": {
-                            "type": "string",
-                            "description": "Phone number (e.g., '+1234567890')"
-                        },
-                        "email": {
-                            "type": "string",
-                            "description": "Email address (optional)"
-                        }
+                        "name": {"type": "string"},
+                        "phone": {"type": "string"},
+                        "email": {"type": "string"},
                     },
-                    "required": ["name", "phone"]
-                }
-            }
-        }
+                    "required": ["name", "phone"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "sync_product_catalog",
+                "description": "Sync the current tenant's product catalog to the semantic index.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "book_demo",
+                "description": "Create a demo appointment for a lead.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lead_id": {"type": "integer"},
+                        "name": {"type": "string"},
+                        "phone": {"type": "string"},
+                        "demo_date": {"type": "string"},
+                        "products": {"type": "string"},
+                        "demo_type": {"type": "string"},
+                        "city": {"type": "string"},
+                        "state": {"type": "string"},
+                        "pincode": {"type": "string"},
+                        "email": {"type": "string"},
+                        "notes": {"type": "string"},
+                    },
+                    "required": ["lead_id", "name", "phone", "demo_date", "products", "demo_type"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "send_communication",
+                "description": "Send an email and/or WhatsApp message to a lead.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "lead_id": {"type": "integer"},
+                        "channels": {
+                            "type": "array",
+                            "items": {"type": "string", "enum": ["email", "whatsapp"]},
+                        },
+                        "content": {"type": "string"},
+                        "subject": {"type": "string"},
+                        "email": {"type": "string"},
+                        "phone": {"type": "string"},
+                    },
+                    "required": ["lead_id", "channels", "content"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "get_google_auth_url",
+                "description": "Return Google Calendar auth status for the current tenant-safe path.",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "submit_google_auth_code",
+                "description": "Submit a Google auth code when calendar auth migration is available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "code": {"type": "string"},
+                    },
+                    "required": ["code"],
+                },
+            },
+        },
     ]
 
 
-# UNIFIED TOOL EXECUTOR
-
-async def execute_mcp_tool(tool_name: str, arguments: dict) -> dict:
-    """
-    Execute MCP tools by delegating to mcp_server.py.
-    
-    DESIGN PATTERN: This function routes calls to MCP tools.
-    It does NOT implement any tool logic - it simply dispatches.
-    
-    Args:
-        tool_name: Name of the tool to execute
-        arguments: Dict of arguments for the tool
-        
-    Returns:
-        Tool result as dict
-    """
-    
-    # Hallucination mapping: Mistral sometimes calls 'lookup_product' instead of 'get_product_info'
+async def _execute_with_session(
+    session: Session,
+    tool_name: str,
+    arguments: dict[str, Any],
+    user_id: int | None,
+) -> dict[str, Any]:
     if tool_name == "lookup_product":
         tool_name = "get_product_info"
-        
-    logger.info(f"[execute_mcp_tool] Routing {tool_name} with args: {arguments}")
-    
-    try:
-        if tool_name == "check_icp_qualification":
-            # Delegate to MCP tool
-            result = check_icp_qualification.fn(
-                company_size=arguments.get("company_size"),
-                industry=arguments.get("industry"),
-                employees=arguments.get("employee_count", 0)
-            )
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        
-        elif tool_name == "get_product_info":
-            # Delegate to MCP tool
-            result = get_product_info.fn(
-                product_name=arguments.get("product_name")
-            )
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        
-        elif tool_name == "check_guardrails":
-            # Delegate to MCP tool
-            result = check_guardrails.fn(
-                requested_discount_percent=arguments.get("requested_discount_percent", 0)
-            )
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        elif tool_name == "book_meeting":
-            # Delegate to MCP tool
-            result = book_meeting.fn(
-                lead_id=arguments.get("lead_id"),
-                proposed_time=arguments.get("proposed_time"),
-                meeting_type=arguments.get("meeting_type", "demo")
-            )
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        
-        elif tool_name == "get_call_latency_summary":
-            # Delegate to MCP tool
-            result = get_call_latency_summary.fn(
-                interaction_id=arguments.get("interaction_id")
-            )
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        
-        elif tool_name == "get_or_create_lead":
-            # Delegate to MCP tool
-            result = get_or_create_lead.fn(
-                name=arguments.get("name"),
-                phone=arguments.get("phone"),
-                email=arguments.get("email")
-            )
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        
-        elif tool_name == "sync_product_catalog":
-            # Delegate to MCP tool
-            result = sync_product_catalog.fn()
-            logger.info(f"[execute_mcp_tool] {tool_name} returned: {result}")
-            return result
-        
-        else:
-            error = {
-                "available_tools": ["check_icp_qualification", "get_product_info", "check_guardrails", "book_meeting", "get_call_latency_summary", "get_or_create_lead", "sync_product_catalog"]
-            }
-            logger.error(f"[execute_mcp_tool] Unknown tool error: {error}")
-            return error
-    
-    except Exception as e:
-        error = {
-            "error": f"Tool execution failed: {str(e)}",
-            "tool": tool_name
+
+    if tool_name == "check_icp_qualification":
+        return check_icp_qualification(
+            company_size=arguments.get("company_size", ""),
+            industry=arguments.get("industry", ""),
+            employee_count=_safe_int_arg(arguments.get("employee_count")),
+        )
+
+    if not user_id:
+        return {
+            "error": "Authenticated user context is required for tenant-safe tool execution.",
+            "tool": tool_name,
         }
-        logger.error(f"[execute_mcp_tool] Exception: {error}", exc_info=True)
-        return error
 
-# TOOL METADATA (for documentation/debugging)
+    user = get_user_or_404(session, user_id)
+    company_id = user.company_id
 
-TOOL_DESCRIPTIONS = {
-    "check_icp_qualification": {
-        "summary": "Validate if a company is ideal customer profile",
-        "use_when": "Need to qualify a lead before offering demo",
-        "returns": "ICP score, qualification status, priority level"
-    },
-    "get_product_info": {
-        "summary": "Get accurate product details from database",
-        "use_when": "Asked about product price, features, or availability",
-        "returns": "Product name, price, stock, features",
-        "note": "Never make up prices - always use this tool"
-    },
-    "check_guardrails": {
-        "summary": "Check discount limits and approval requirements",
-        "use_when": "Lead asks for discount or special pricing",
-        "returns": "Approved discount percentage, max allowed, manager approval needed"
-    },
-    "book_meeting": {
-        "summary": "Schedule meeting/demo AND send confirmation email",
-        "use_when": "Lead shows interest and wants to move forward",
-        "returns": "Appointment ID, calendar URL, email sent status",
-        "note": "This is SELF-CONTAINED - handles database + email in one call. No need to call email separately."
+    if tool_name == "get_product_info":
+        return get_product_info(
+            session=session,
+            company_id=company_id,
+            product_name=arguments.get("product_name", ""),
+        )
+
+    if tool_name == "check_guardrails":
+        return check_guardrails(
+            requested_discount_percent=_safe_float_arg(arguments.get("requested_discount_percent")),
+        )
+
+    if tool_name == "book_meeting":
+        return await book_meeting(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
+            proposed_time=arguments.get("proposed_time", ""),
+            meeting_type=arguments.get("meeting_type", "demo"),
+            lead_email=arguments.get("lead_email"),
+        )
+
+    if tool_name == "get_call_latency_summary":
+        return get_call_latency_summary(
+            interaction_id=_safe_int_arg(arguments.get("interaction_id")),
+        )
+
+    if tool_name == "get_or_create_lead":
+        return get_or_create_lead(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            name=arguments.get("name", ""),
+            phone=arguments.get("phone", ""),
+            email=arguments.get("email"),
+        )
+
+    if tool_name == "sync_product_catalog":
+        return sync_product_catalog(
+            session=session,
+            company_id=company_id,
+        )
+
+    if tool_name == "book_demo":
+        return await book_demo(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
+            name=arguments.get("name", ""),
+            phone=arguments.get("phone", ""),
+            city=arguments.get("city"),
+            state=arguments.get("state"),
+            pincode=arguments.get("pincode"),
+            demo_date=arguments.get("demo_date", ""),
+            products=arguments.get("products", ""),
+            demo_type=arguments.get("demo_type", "Offline"),
+            email=arguments.get("email"),
+            notes=arguments.get("notes"),
+        )
+
+    if tool_name == "send_communication":
+        return send_communication(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
+            channels=list(arguments.get("channels") or []),
+            content=arguments.get("content", ""),
+            subject=arguments.get("subject"),
+            email=arguments.get("email"),
+            phone=arguments.get("phone"),
+        )
+
+    if tool_name == "get_google_auth_url":
+        return get_google_auth_url(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+        )
+
+    if tool_name == "submit_google_auth_code":
+        return submit_google_auth_code(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            code=arguments.get("code", ""),
+        )
+
+    return {
+        "error": "Unknown tool",
+        "tool": tool_name,
+        "available_tools": [tool["function"]["name"] for tool in get_mistral_tools()],
     }
-}
+
+
+async def execute_mcp_tool(
+    tool_name: str,
+    arguments: dict[str, Any],
+    interaction_id: str | None = None,
+    user_id: int | None = None,
+    user=None,
+    session: Session | None = None,
+) -> dict[str, Any]:
+    logger.info(
+        "[execute_mcp_tool] tool=%s interaction_id=%s user_id=%s args=%s",
+        tool_name,
+        interaction_id,
+        user_id,
+        arguments,
+    )
+
+    try:
+        async with asyncio.timeout(30):
+            if session is not None:
+                effective_user_id = user_id or getattr(user, "id", None)
+                return await _execute_with_session(session, tool_name, arguments, effective_user_id)
+
+            with Session(engine) as owned_session:
+                effective_user_id = user_id or getattr(user, "id", None)
+                return await _execute_with_session(owned_session, tool_name, arguments, effective_user_id)
+    except asyncio.TimeoutError:
+        logger.error("[execute_mcp_tool] Tool '%s' timed out after 30s", tool_name)
+        return {"error": f"Tool '{tool_name}' timed out — please try again.", "tool": tool_name}
+    except Exception as exc:
+        logger.error("[execute_mcp_tool] Tool execution failed for %s: %s", tool_name, exc, exc_info=True)
+        return {
+            "error": f"Tool execution failed: {exc}",
+            "tool": tool_name,
+        }

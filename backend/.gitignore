@@ -61,3 +61,4 @@ token.pickle
 
 # (Optional: If you want to keep knowledge base, un-comment next line. Usually DBs are ignored)
 # knowledge_base/
+.gstack/

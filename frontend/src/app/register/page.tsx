@@ -1,46 +1,58 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { User, Mail, Lock, Phone, UserCircle } from "lucide-react";
+import { Building2, Eye, EyeOff, Loader2, Lock, Mail, User } from "lucide-react";
+
+import { apiFetch } from "@/utils/apiFetch";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
 
 export default function RegisterPage() {
+    const [companyName, setCompanyName] = useState("");
+    const [companySlug, setCompanySlug] = useState("");
     const [username, setUsername] = useState("");
     const [email, setEmail] = useState("");
     const [password, setPassword] = useState("");
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
-    const [phoneNumber, setPhoneNumber] = useState("");
     const [error, setError] = useState("");
+    const [showPassword, setShowPassword] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const router = useRouter();
+
+    const derivedSlug = useMemo(() => {
+        if (companySlug.trim()) return companySlug.trim().toLowerCase().replace(/\s+/g, "-");
+        return companyName.trim().toLowerCase().replace(/\s+/g, "-");
+    }, [companySlug, companyName]);
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setError("");
         setIsLoading(true);
-
         try {
-            const res = await fetch("http://localhost:6060/register", {
+            const res = await apiFetch(`${API_BASE}/companies/register`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
                 body: JSON.stringify({
+                    company_name: companyName,
+                    company_slug: derivedSlug,
                     username,
+                    admin_email: email,
                     email,
                     password,
                     first_name: firstName,
                     last_name: lastName,
-                    phone_number: phoneNumber
                 }),
             });
-
             if (!res.ok) {
                 const errData = await res.json();
                 throw new Error(errData.detail || "Registration failed");
             }
-
-            router.push("/login?registered=true");
+            // The server set the session cookie on a successful register, so
+            // navigating to / triggers fetchUser() in AuthContext and the user
+            // is logged in. No client-side token storage required.
+            router.push("/");
         } catch (err: any) {
             setError(err.message);
         } finally {
@@ -49,130 +61,158 @@ export default function RegisterPage() {
     };
 
     return (
-        <div className="flex items-center justify-center min-h-screen bg-slate-50 dark:bg-slate-900 p-4">
-            <div className="w-full max-w-lg p-8 space-y-8 bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-200 dark:border-slate-700 animate-in fade-in zoom-in duration-500">
-                <div className="text-center space-y-2">
-                    <h1 className="text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-                        Create Account
-                    </h1>
-                    <p className="text-slate-500 dark:text-slate-400">Join Rio CRM and boost your sales with AI</p>
+        <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-900 via-violet-950 to-slate-900 p-4 overflow-y-auto">
+            {/* Decorative blobs */}
+            <div className="pointer-events-none fixed inset-0 overflow-hidden">
+                <div className="absolute -top-40 -left-40 h-80 w-80 rounded-full bg-violet-600/20 blur-3xl" />
+                <div className="absolute -bottom-40 -right-40 h-80 w-80 rounded-full bg-blue-600/20 blur-3xl" />
+            </div>
+
+            <div className="relative w-full max-w-lg my-8">
+                {/* Logo / Brand */}
+                <div className="mb-8 text-center">
+                    <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-violet-500 to-blue-600 shadow-lg shadow-violet-500/40">
+                        <span className="text-2xl font-black text-white">R</span>
+                    </div>
+                    <h1 className="text-3xl font-bold text-white tracking-tight">Create your account</h1>
+                    <p className="mt-1 text-slate-400 text-sm">Get started with Rio CRM</p>
                 </div>
 
-                {error && (
-                    <div className="p-4 text-sm text-red-500 bg-red-100 dark:bg-red-900/30 border border-red-200 dark:border-red-800 rounded-xl animate-in shake duration-300">
-                        {error}
-                    </div>
-                )}
-
-                <form onSubmit={handleSubmit} className="space-y-5">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                        <div className="space-y-2">
-                            <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                                <UserCircle size={16} className="mr-2 text-violet-500" />
-                                First Name
-                            </label>
-                            <input
-                                type="text"
-                                required
-                                value={firstName}
-                                onChange={(e) => setFirstName(e.target.value)}
-                                className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                                placeholder="John"
-                            />
+                {/* Card */}
+                <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
+                    {error && (
+                        <div className="mb-5 rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-sm text-red-400">
+                            {error}
                         </div>
-                        <div className="space-y-2">
-                            <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                                <UserCircle size={16} className="mr-2 text-blue-500" />
-                                Last Name
-                            </label>
-                            <input
-                                type="text"
-                                required
-                                value={lastName}
-                                onChange={(e) => setLastName(e.target.value)}
-                                className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                                placeholder="Doe"
-                            />
+                    )}
+
+                    <form onSubmit={handleSubmit} className="space-y-4">
+                        {/* Company row */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                    Company Name
+                                </label>
+                                <div className="relative">
+                                    <Building2 className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                    <input
+                                        type="text"
+                                        required
+                                        value={companyName}
+                                        onChange={(e) => setCompanyName(e.target.value)}
+                                        placeholder="Acme Corp"
+                                        className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
+                                    />
+                                </div>
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">
+                                    Slug <span className="text-slate-600 normal-case">(auto)</span>
+                                </label>
+                                <input
+                                    type="text"
+                                    value={companySlug}
+                                    onChange={(e) => setCompanySlug(e.target.value)}
+                                    placeholder={derivedSlug || "acme-corp"}
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 px-4 text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm font-mono"
+                                />
+                            </div>
                         </div>
-                    </div>
 
-                    <div className="space-y-2">
-                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                            <User size={16} className="mr-2 text-violet-500" />
-                            Username
-                        </label>
-                        <input
-                            type="text"
-                            required
-                            value={username}
-                            onChange={(e) => setUsername(e.target.value)}
-                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                            placeholder="johndoe123"
-                        />
-                    </div>
+                        {/* Name row */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">First Name</label>
+                                <input
+                                    type="text"
+                                    value={firstName}
+                                    onChange={(e) => setFirstName(e.target.value)}
+                                    placeholder="John"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 px-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
+                                />
+                            </div>
+                            <div className="space-y-1.5">
+                                <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">Last Name</label>
+                                <input
+                                    type="text"
+                                    value={lastName}
+                                    onChange={(e) => setLastName(e.target.value)}
+                                    placeholder="Doe"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 px-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
+                                />
+                            </div>
+                        </div>
 
-                    <div className="space-y-2">
-                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                            <Mail size={16} className="mr-2 text-blue-500" />
-                            Email Address
-                        </label>
-                        <input
-                            type="email"
-                            required
-                            value={email}
-                            onChange={(e) => setEmail(e.target.value)}
-                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                            placeholder="john@example.com"
-                        />
-                    </div>
+                        {/* Username */}
+                        <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">Username</label>
+                            <div className="relative">
+                                <User className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type="text"
+                                    required
+                                    value={username}
+                                    onChange={(e) => setUsername(e.target.value)}
+                                    placeholder="johndoe"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
+                                />
+                            </div>
+                            <p className="text-xs text-slate-600">Used to log in · must be unique</p>
+                        </div>
 
-                    <div className="space-y-2">
-                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                            <Phone size={16} className="mr-2 text-violet-500" />
-                            Phone Number
-                        </label>
-                        <input
-                            type="tel"
-                            required
-                            value={phoneNumber}
-                            onChange={(e) => setPhoneNumber(e.target.value)}
-                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                            placeholder="+1 (555) 000-0000"
-                        />
-                    </div>
+                        {/* Email */}
+                        <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">Email</label>
+                            <div className="relative">
+                                <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type="email"
+                                    required
+                                    value={email}
+                                    onChange={(e) => setEmail(e.target.value)}
+                                    placeholder="john@acme.com"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
+                                />
+                            </div>
+                        </div>
 
-                    <div className="space-y-2">
-                        <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center">
-                            <Lock size={16} className="mr-2 text-blue-500" />
-                            Password
-                        </label>
-                        <input
-                            type="password"
-                            required
-                            value={password}
-                            onChange={(e) => setPassword(e.target.value)}
-                            className="w-full px-4 py-2.5 bg-slate-50 dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-xl focus:ring-2 focus:ring-violet-500 focus:border-transparent transition-all outline-none"
-                            placeholder="••••••••"
-                        />
-                    </div>
+                        {/* Password */}
+                        <div className="space-y-1.5">
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">Password</label>
+                            <div className="relative">
+                                <Lock className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
+                                <input
+                                    type={showPassword ? "text" : "password"}
+                                    required
+                                    value={password}
+                                    onChange={(e) => setPassword(e.target.value)}
+                                    placeholder="••••••••"
+                                    className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-10 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
+                                />
+                                <button
+                                    type="button"
+                                    onClick={() => setShowPassword(!showPassword)}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-500 hover:text-slate-300 transition-colors"
+                                >
+                                    {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                                </button>
+                            </div>
+                            <p className="text-xs text-slate-600">6+ chars · uppercase, lowercase, number, special character</p>
+                        </div>
 
-                    <button
-                        type="submit"
-                        disabled={isLoading}
-                        className="w-full py-3 px-4 bg-gradient-to-r from-violet-600 to-blue-600 hover:from-violet-700 hover:to-blue-700 text-white rounded-xl font-bold shadow-lg shadow-violet-500/30 transition-all hover:scale-[1.02] active:scale-[0.98] disabled:opacity-50 flex items-center justify-center space-x-2"
-                    >
-                        {isLoading ? (
-                            <div className="h-5 w-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                        ) : (
-                            <span>Create Account</span>
-                        )}
-                    </button>
-                </form>
+                        <button
+                            type="submit"
+                            disabled={isLoading}
+                            className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 py-3 font-bold text-white shadow-lg shadow-violet-500/30 hover:from-violet-500 hover:to-blue-500 transition-all disabled:opacity-50 flex items-center justify-center gap-2 mt-2"
+                        >
+                            {isLoading ? <Loader2 className="h-5 w-5 animate-spin" /> : null}
+                            Create Account
+                        </button>
+                    </form>
 
-                <div className="text-center pt-2">
-                    <p className="text-sm text-slate-500 dark:text-slate-400">
+                    <p className="mt-6 text-center text-sm text-slate-500">
                         Already have an account?{" "}
-                        <Link href="/login" className="text-violet-600 dark:text-violet-400 font-bold hover:underline transition-all">
+                        <Link href="/login" className="font-semibold text-violet-400 hover:text-violet-300 transition-colors">
                             Sign in
                         </Link>
                     </p>

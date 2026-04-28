@@ -1,45 +1,476 @@
 import asyncio
-from datetime import datetime, timezone
 import base64
-import logging
-import time
 import json
+import logging
+import os
+import re
+import time
+import uuid as _uuid
+from datetime import datetime
+from collections import deque
+from typing import Any, Dict, List, Optional
+
 import aiohttp
 import audioop
-from typing import List, Dict, Any, Optional
+from sqlmodel import Session, select
 
-from services.llm_service import LLMService
-from services.tts_service import TTSService
-from services.stt_service import STTService
+from models.models import CompanySetting, Interaction, LatencyLog, User, utc_now
+from services.ai.llm import get_llm_service
+from services.ai.stt import get_stt_service
+from services.ai.tts import get_tts_service
+from tool_adapter import execute_mcp_tool, get_mistral_tools
+from utils.encryption import decrypt_value
 from utils.audio import clean_voice_text
-from utils.config import mistral_client
-from tool_adapter import get_mistral_tools, execute_mcp_tool
-from sqlmodel import Session
-from models.models import Interaction, LatencyLog
+from utils.lead_utils import get_comprehensive_lead_context
+from utils import settings_cache as _sc
+from services.call import sentiment_broadcaster
 
 logger = logging.getLogger(__name__)
 
+
+_SETTINGS_CACHE_SENTINEL = "__cache_loaded__"
+
+
+def _load_company_settings(session: Session, company_id: int | None) -> dict[str, str]:
+    if not company_id:
+        return {}
+
+
+    if _sc.get(_SETTINGS_CACHE_SENTINEL, user_id=company_id) is not None:
+        result = _sc.get_all(user_id=company_id)
+        result.pop(_SETTINGS_CACHE_SENTINEL, None)
+        logger.debug(f"[SettingsCache] HIT — {len(result)} keys for company {company_id}")
+        return result
+
+
+    settings = session.exec(
+        select(CompanySetting).where(CompanySetting.company_id == company_id)
+    ).all()
+    result = {
+        item.key: decrypt_value(item.value) if item.is_secret else item.value
+        for item in settings
+    }
+
+    # Populate cache (sentinel marks the company as loaded, even if settings are empty)
+    _sc.update({_SETTINGS_CACHE_SENTINEL: "1", **result}, user_id=company_id)
+    logger.info(f"[SettingsCache] MISS — loaded {len(result)} keys for company {company_id} into cache")
+    return result
+
+
+def _resolve_setting(settings: dict[str, str], keys: list[str], hint: str):
+    for key in keys:
+        normalized_key = key.upper()
+        value = settings.get(normalized_key) or settings.get(key)
+        if value:
+            logger.info(f"[Settings] {hint} resolved from company_settings.{normalized_key}")
+            return value
+
+    for key in keys:
+        normalized_key = key.upper()
+        env_value = os.getenv(normalized_key)
+        if env_value:
+            logger.info(f"[EnvVar] {hint} resolved from ${normalized_key}")
+            return env_value
+
+    logger.info(f"[Fallback] {hint} not found in company_settings or env")
+    return None
+
+
 class VoicePipeline:
-    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session):
+    def __init__(self, communicator, interaction_id: str, system_prompt: str, transcript_accumulator: List[str], session: Session,
+                 stt_provider: str = "deepgram", llm_provider: str = "mistral", tts_provider: str = "cartesia",
+                 company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
+                 company_website: str = None, lead_id: int = None,
+                 audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000,
+                 lead_language: str = "en-IN"):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
         self.transcript_accumulator = transcript_accumulator
+        self._transcript_dirty = False
         self.session = session
+        self.company_name = company_name
+        self.user = user
+        self.lead_context = lead_context
+        self.company_website = company_website
+        user_id = user.id if user else None
+        self.user_id = user_id
+        self.lead_id = lead_id
+        self.company_id = user.company_id if user else None
+
+        company_id = user.company_id if user else None
+        all_settings = _load_company_settings(session, company_id)
+
+        self.stt_provider = stt_provider or "deepgram"
+        self.llm_provider = llm_provider or "mistral"
+        self.tts_provider = tts_provider or "cartesia"
+        self.lead_language = lead_language or "en-IN"
+
+        self.audio_encoding = audio_encoding
+        self.audio_sample_rate = audio_sample_rate
+        self.last_customer_speech_time = time.time()
+        self.last_rio_speech_end_time = time.time()
         
-        self.llm_service = LLMService(system_prompt)
-        self.tts_service = TTSService()
-        self.stt_service = STTService()
-        
+        # Basic Initialization (Core loop attributes)
         self.sentence_queue = asyncio.Queue()
         self.current_tts_task = None
         self.current_llm_task = None
         self.is_rio_speaking = False
         self.tts_first_byte_time = 0.0
         self.last_tts_start_time = 0.0
+        self.llm_error_count = 0 
+        self.current_turn_user_text = ""
+        self.pending_user_turn_text = ""
+        self.pending_llm_latency = 0.0
+        self.llm_dispatch_task: asyncio.Task | None = None
+        self.post_stt_grace = 0.5
+        self.interrupt_pending = False
+        self.pause_playback = False
+        self.resume_event = asyncio.Event()
+        self.resume_event.set()
+        self.pending_interrupt_reason: str | None = None
+        self.last_rio_sentences: deque[str] = deque(maxlen=3)
+        self._last_clear_ts = 0.0
 
-    async def run(self, engine_type: str = "mistral-cartesia"):
-        speaker_task = asyncio.create_task(self._speaker_loop(engine_type))
+        # Barge-in tuning (env-overridable) to avoid aggressive false interrupts.
+        self.barge_rms_threshold = int(os.getenv("BARGE_RMS_THRESHOLD", "1200"))
+        self.barge_frames_needed = int(os.getenv("BARGE_FRAMES_NEEDED", "8"))
+        self.barge_silence_reset_frames = int(os.getenv("BARGE_SILENCE_RESET_FRAMES", "20"))
+        self.barge_tts_guard_ms = int(os.getenv("BARGE_TTS_GUARD_MS", "1500"))
+        self.barge_post_speech_cooldown_ms = int(os.getenv("BARGE_POST_SPEECH_COOLDOWN_MS", "1200"))
+        self.barge_clear_cooldown_ms = int(os.getenv("BARGE_CLEAR_COOLDOWN_MS", "600"))
+        self.barge_retrigger_cooldown_ms = int(os.getenv("BARGE_RETRIGGER_COOLDOWN_MS", "2500"))
+        self.disable_barge_in = os.getenv("DISABLE_BARGE_IN", "0").lower() in {"1", "true", "yes", "on"}
+        self._last_barge_trigger_ts = 0.0
+
+        # Silero-VAD confirmation gate — opt-in, confirms suspected barge-ins actually contain speech (filters coughs, background noise, mic plosives). Falls back to RMS-only if disabled or model load fails.
+        self.use_silero_vad = os.getenv("USE_SILERO_VAD", "0").lower() in {"1", "true", "yes", "on"}
+
+        # Rolling buffer of sentences actually emitted to TTS this turn — used to seed the next LLM prompt with "you were saying X" context on confirmed barge-in, so the agent does not restart cold.
+        self.last_rio_spoken: deque[str] = deque(maxlen=5)
+
+        # End-of-call feedback enforcement: smaller LLMs sometimes drop the
+        # rare "ask for 1-5 rating before goodbye" instruction.  We track
+        # whether (a) Rio has actually asked, and (b) the customer has given
+        # a 1-5 in their speech, so the speaker layer can force-prepend the
+        # question if the LLM is about to say goodbye without having asked.
+        self.feedback_asked_this_call = False
+        self.user_gave_rating_this_call = False
+
+        llm_api_key = _resolve_setting(
+            all_settings,
+            [f"{self.llm_provider.upper()}_API_KEY", "LLM_API_KEY"],
+            f"{self.llm_provider.upper()} LLM API key",
+        )
+        tts_api_key = _resolve_setting(
+            all_settings,
+            [f"{self.tts_provider.upper()}_API_KEY", "TTS_API_KEY"],
+            f"{self.tts_provider.upper()} TTS API key",
+        )
+        stt_api_key = _resolve_setting(
+            all_settings,
+            [f"{self.stt_provider.upper()}_API_KEY", "STT_API_KEY"],
+            f"{self.stt_provider.upper()} STT API key",
+        )
+
+        llm_model = _resolve_setting(
+            all_settings,
+            [f"{self.llm_provider.upper()}_MODEL", "LLM_MODEL"],
+            f"{self.llm_provider.upper()} LLM model",
+        )
+        tts_voice = _resolve_setting(
+            all_settings,
+            [
+                f"{self.tts_provider.upper()}_VOICE_ID",
+                f"{self.tts_provider.upper()}_VOICE",
+                "TTS_VOICE_ID",
+            ],
+            f"{self.tts_provider.upper()} TTS voice",
+        )
+        tts_model = _resolve_setting(
+            all_settings,
+            [
+                f"{self.tts_provider.upper()}_TTS_MODEL",
+                f"{self.tts_provider.upper()}_MODEL",
+                "TTS_MODEL",
+            ],
+            f"{self.tts_provider.upper()} TTS model",
+        )
+        stt_model = _resolve_setting(
+            all_settings,
+            [
+                f"{self.stt_provider.upper()}_STT_MODEL",
+                f"{self.stt_provider.upper()}_MODEL",
+                "STT_MODEL",
+            ],
+            f"{self.stt_provider.upper()} STT model",
+        )
+
+        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        
+        full_system_prompt = system_prompt + time_context
+        self.llm_service = get_llm_service(self.llm_provider, full_system_prompt, api_key=llm_api_key, model=llm_model)
+        self.tts_service = get_tts_service(self.tts_provider, api_key=tts_api_key, voice_id=tts_voice, model=tts_model)
+        self.stt_service = get_stt_service(self.stt_provider, api_key=stt_api_key, model=stt_model)
+
+        # Inject language into Sarvam services when a non-default language is active
+        if self.lead_language and self.lead_language != "en-IN":
+            if hasattr(self.stt_service, "language"):
+                self.stt_service.language = self.lead_language
+                logger.info("[Pipeline] Sarvam STT language set to %s", self.lead_language)
+            if hasattr(self.tts_service, "target_language_code"):
+                self.tts_service.target_language_code = self.lead_language
+                logger.info("[Pipeline] Sarvam TTS language set to %s", self.lead_language)
+
+        # Store keys globally on instance for reference if needed
+        self.integration_keys = all_settings
+
+        # Inject pre-fetched lead/prospect context if provided at start
+        if lead_context:
+            self._apply_context_to_prompt(lead_context)
+
+        # Inject objection playbook from the company library
+        if company_id:
+            try:
+                from services.objection_service import get_objection_playbook
+                playbook = get_objection_playbook(session, company_id)
+                if playbook:
+                    current_prompt = self.llm_service.system_prompt
+                    self.llm_service.update_system_prompt(current_prompt + playbook)
+                    logger.info("[Pipeline] Objection playbook injected (%d entries)", playbook.count("→"))
+            except Exception as _pe:
+                logger.debug("[Pipeline] Objection playbook skipped: %s", _pe)
+
+        self.last_context_type = "general"
+
+        # Trace context — one trace_id per call, turn_index increments each turn
+        self.trace_id = _uuid.uuid4().hex
+        self.turn_index = 0
+
+    def _silero_confirms(self, audio_chunk: bytes) -> bool:
+        """Wrap Silero VAD with the same encoding the barge-in loop receives.
+
+        Fails OPEN — any exception returns True so a misbehaving VAD never
+        silently drops legitimate barge-ins.  Call only when `use_silero_vad`
+        is set; RMS stays as the cheap first-pass filter.
+        """
+        try:
+            from services.ai.vad import silero_confirms_speech
+            return silero_confirms_speech(
+                audio_bytes=audio_chunk,
+                encoding=self.audio_encoding,
+                sample_rate=self.audio_sample_rate,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[VoicePipeline] Silero gate failure (fail-open): %s", exc)
+            return True
+
+    def _pause_playback_for_interrupt(self):
+        if not self.pause_playback:
+            self.pause_playback = True
+            self.resume_event.clear()
+
+    def _resume_playback_from_interrupt(self):
+        if self.pause_playback:
+            self.pause_playback = False
+            self.resume_event.set()
+
+    def _clear_sentence_queue(self):
+        while not self.sentence_queue.empty():
+            try:
+                self.sentence_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+
+    def _cancel_pending_llm_dispatch(self):
+        if self.llm_dispatch_task and not self.llm_dispatch_task.done():
+            self.llm_dispatch_task.cancel()
+        self.llm_dispatch_task = None
+
+    def _schedule_llm_dispatch(self, latency: float):
+        self.pending_llm_latency = latency
+        self._cancel_pending_llm_dispatch()
+        if not self.pending_user_turn_text.strip():
+            return
+        self.llm_dispatch_task = asyncio.create_task(self._defer_llm_dispatch())
+
+    async def _defer_llm_dispatch(self):
+        try:
+            await asyncio.sleep(self.post_stt_grace)
+            if self.interrupt_pending:
+                return
+            transcript = self.pending_user_turn_text.strip()
+            self.pending_user_turn_text = ""
+            if not transcript:
+                return
+            await self._dispatch_llm(transcript, self.pending_llm_latency)
+        except asyncio.CancelledError:
+            return
+        finally:
+            self.llm_dispatch_task = None
+
+    async def _dispatch_llm(self, transcript: str, latency: float, interrupted_context: str = ""):
+        if not transcript:
+            return
+        if self.current_llm_task and not self.current_llm_task.done():
+            self.current_llm_task.cancel()
+        # Inject "you were saying X" context ONCE before the user turn lands. Must fire before _process_llm_response adds the user message.
+        if interrupted_context:
+            try:
+                self.llm_service.add_system_message(
+                    "[MID-TURN INTERRUPTION]\n"
+                    f"You were just saying: \"{interrupted_context}\"\n"
+                    f"The user cut you off to say: \"{transcript}\"\n"
+                    "Acknowledge their interruption and address what they said. "
+                    "Do NOT repeat what you already said."
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[VoicePipeline] add_system_message for interrupt failed: %s", exc)
+        self.current_llm_task = asyncio.create_task(
+            self._process_llm_response(transcript, latency)
+        )
+
+    def _handle_false_positive_interrupt(self):
+        logger.info("⏹️ False positive interruption detected. Resuming playback.")
+        self.interrupt_pending = False
+        self.pending_interrupt_reason = None
+        self._resume_playback_from_interrupt()
+
+    def _handle_confirmed_interrupt(self, latency: float):
+        logger.info("🔄 Confirmed interruption. Restarting inference with accumulated transcripts.")
+        self.interrupt_pending = False
+        self.pending_interrupt_reason = None
+        self._cancel_pending_llm_dispatch()
+        self._clear_sentence_queue()
+        if self.current_tts_task and not self.current_tts_task.done():
+            self.current_tts_task.cancel()
+        if self.current_llm_task and not self.current_llm_task.done():
+            self.current_llm_task.cancel()
+        transcript = self.pending_user_turn_text.strip()
+        self.pending_user_turn_text = ""
+        # Snapshot + clear the "what we had actually said this turn" buffer so the next LLM call can acknowledge the interruption.  Next turn starts with a fresh buffer.
+        interrupted_text = " ".join(s for s in self.last_rio_spoken if s).strip()
+        self.last_rio_spoken.clear()
+        self._resume_playback_from_interrupt()
+        if transcript:
+            asyncio.create_task(
+                self._dispatch_llm(transcript, latency, interrupted_context=interrupted_text)
+            )
+
+    def _apply_context_to_prompt(self, context: str):
+        """Helper to structure and inject lead context into the LLM service."""
+        prospect_context = (
+            f"\n\n### [PROSPECT BACKGROUND]\n"
+            f"You are ALREADY speaking to an IDENTIFIED prospect. Here is their comprehensive record:\n\n"
+            f"{context}\n"
+            f"--- \n"
+            f"CRITICAL SALES INSTRUCTIONS:\n"
+            f"1. Use only the numeric `[__META_ID__]` for backend tool calls. Do NOT mention this ID in speech.\n"
+            f"2. You are 'Rio', a helpful human representative. NEVER say you have a 'record', 'lead info', or 'ID' for them.\n"
+            f"3. Greet them by name naturally (e.g., 'Hi Lokesh'). Do NOT report what you know about them.\n"
+            f"4. Focus on the value of our products and solving their needs, not database operations."
+        )
+        
+        # Re-build full system prompt
+        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
+        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        
+        full_system_prompt = self.system_prompt + time_context + prospect_context
+        # Ensure llm_service is already initialized before calling this
+        if hasattr(self, 'llm_service') and self.llm_service:
+            self.llm_service.update_system_prompt(full_system_prompt)
+        self.lead_context = context
+        logger.info(f"📋 [Pipeline] Assertive lead context injected into system prompt")
+
+    def _normalize_text(self, text: str | None) -> str:
+        if not text:
+            return ""
+        return re.sub(r"[^a-z0-9\s]", "", text.lower()).strip()
+
+    # Forced end-of-call feedback enforcement helpers.
+    _RATING_IN_USER_RE = re.compile(
+        r"\b(rat(?:e|ed|ing)|i(?:'d|'ll| would| will)?\s+say|give|out\s+of\s+(?:5|five)|stars?)\b[^.!?]{0,30}?\b(one|two|three|four|five|[1-5])\b",
+        re.IGNORECASE,
+    )
+    _GOODBYE_RE = re.compile(
+        r"\b(goodbye|good\s*bye|bye(?:\s*bye)?|take\s+care|have\s+a\s+(?:great|wonderful|good|nice)\s+day|"
+        r"talk\s+to\s+you\s+(?:soon|later)|see\s+you\s+(?:soon|later)|wrap\s+up|thanks\s+for\s+chatting)\b",
+        re.IGNORECASE,
+    )
+    _FEEDBACK_ASK_RE = re.compile(
+        r"(scale\s+of\s+1\s+to\s+5|rate\s+your\s+experience|how\s+would\s+you\s+rate)",
+        re.IGNORECASE,
+    )
+    _FORCED_FEEDBACK_PHRASE = (
+        "Before we wrap up — on a scale of 1 to 5, how would you rate your experience speaking with me today?"
+    )
+
+    def _customer_uttered_rating(self, transcript: str) -> bool:
+        return bool(transcript and self._RATING_IN_USER_RE.search(transcript))
+
+    def _sentence_says_goodbye(self, sentence: str) -> bool:
+        return bool(sentence and self._GOODBYE_RE.search(sentence))
+
+    def _sentence_asks_feedback(self, sentence: str) -> bool:
+        return bool(sentence and self._FEEDBACK_ASK_RE.search(sentence))
+
+    def _is_echo_transcript(self, transcript: str) -> bool:
+        normalized = self._normalize_text(transcript)
+        if not normalized:
+            return False
+        for sentence in self.last_rio_sentences:
+            candidate = self._normalize_text(sentence)
+            if not candidate:
+                continue
+            if normalized == candidate or candidate.startswith(normalized) or normalized.startswith(candidate):
+                return True
+        return False
+
+    async def _load_lead_context(self, lead_id: int):
+        """Load lead context from DB + pre-call KB cache and inject into system prompt."""
+        if not lead_id or lead_id <= 0:
+            return
+
+        logger.info(f"🔍 [Pipeline] Loading context for Lead #{lead_id}...")
+
+        
+        context = get_comprehensive_lead_context(self.session, lead_id)
+        if context:
+            self._apply_context_to_prompt(context)
+
+        # Pre-call KB context (products, objections, competitors) from orchestrator cache
+        try:
+            from utils.precall_cache import get as cache_get, format_kb_context_for_prompt, evict
+            company_id = self.company_id
+            if company_id:
+                cached = cache_get(company_id, lead_id)
+                if cached:
+                    kb_text = format_kb_context_for_prompt(cached)
+                    if kb_text and hasattr(self, "llm_service") and self.llm_service:
+                        current = self.llm_service.system_prompt
+                        self.llm_service.update_system_prompt(current + kb_text)
+                        logger.info(
+                            "📚 [Pipeline] KB context injected (%d chunks) for lead %s",
+                            len(cached.get("kb_context", [])),
+                            lead_id,
+                        )
+                    # Inject ICP score hint for routing decisions
+                    icp = cached.get("icp_score", 0.0)
+                    if icp >= 0.75 and hasattr(self, "llm_service") and self.llm_service:
+                        current = self.llm_service.system_prompt
+                        icp_hint = (
+                            f"\n\n[ICP SIGNAL] This lead has a high fit score ({icp:.0%}). "
+                            "Prioritise demo booking and closing language."
+                        )
+                        self.llm_service.update_system_prompt(current + icp_hint)
+                    evict(company_id, lead_id)
+        except Exception as exc:
+            logger.debug("[Pipeline] Pre-call cache read failed (non-blocking): %s", exc)
+
+    async def run(self):
+        speaker_task = asyncio.create_task(self._speaker_loop())
+        silence_task = asyncio.create_task(self._silence_watcher())
         audio_queue = asyncio.Queue()
 
         async def _ingest():
@@ -54,176 +485,671 @@ class VoicePipeline:
             while True:
                 data = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                 if data.get("event") == "start":
-                    self.communicator.stream_sid = data["start"]["streamSid"]
-                    logger.info(f"🚀 [Twilio] Stream started. Sid: {self.communicator.stream_sid}")
+                    start_msg = data.get("start", {})
+                    self.communicator.stream_sid = start_msg.get("streamSid")
+                    
+                    # Proactively check for lead_id/interaction_id in start parameters (Twilio specific)
+                    params = start_msg.get("customParameters", {})
+                    stream_lead_id = params.get("lead_id")
+                    stream_int_id = params.get("interaction_id")
+                    
+                    if stream_lead_id:
+                        try:
+                            lid = int(stream_lead_id)
+                            # Only load if we don't already have context
+                            if not self.lead_context:
+                                await self._load_lead_context(lid)
+                        except (ValueError, TypeError):
+                            pass
+                            
+                    # Only adopt stream-supplied interaction_id when we don't already have one from main.py's pre-validated session. An attacker-controlled or stale stream parameter could otherwise re-attach transcript writes to a different DB row, splitting a single call across records.
+                    if stream_int_id and not self.interaction_id:
+                        self.interaction_id = stream_int_id
+                    elif stream_int_id and str(stream_int_id) != str(self.interaction_id):
+                        logger.warning(
+                            "[Pipeline] stream_int_id=%s differs from session interaction_id=%s — keeping session value",
+                            stream_int_id, self.interaction_id,
+                        )
+
+                    logger.info(f"🚀 [Telephony] Stream started. Sid: {self.communicator.stream_sid} | Interaction: {self.interaction_id}")
                     break
                 elif data.get("event") == "stop":
                     logger.error("❌ Got stop before start. Exiting.")
                     return
         except asyncio.TimeoutError:
-            logger.error("❌ Timed out waiting for Twilio start event.")
+            logger.error("❌ Timed out waiting for start event.")
             return
 
-        greeting = "Hello, I'm Rio from Yexis Electronics! How can I help you today?"
+        # Personalized greeting if lead context is available
+        greeting = f"Hello, I'm Rio from {self.company_name}! How can I help you today?"
+        if self.lead_context:
+            try:
+                
+                name_line = [l for l in self.lead_context.split("\n") if "Name:" in l]
+                if name_line:
+                    lead_name = name_line[0].split(",")[0].replace("Name: ", "").replace("[PROSPECT DATA]", "").strip()
+                    if lead_name and lead_name.lower() not in ["unknown", "n/a", "none"]:
+                        greeting = f"Hello {lead_name}, this is Rio from {self.company_name}! How are you doing today?"
+                        logger.info(f"📞 [Personalized Greeting] Sent to {lead_name}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to parse lead name for greeting: {e}")
+        
         await self.sentence_queue.put(greeting)
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
 
         async def _audio_gen_from_queue():
-            chunk_count = 0
             while True:
                 data = await audio_queue.get()
                 event = data.get("event")
                 if event == "media":
-                    chunk_count += 1
-                    if chunk_count == 1:
-                        logger.info("🎤 First audio chunk received from Twilio")
                     yield base64.b64decode(data["media"]["payload"])
                 elif event == "stop":
-                    logger.info(f"🛑 [Twilio] Stream stopped. Total chunks: {chunk_count}")
                     break
 
-        encoding, rate = "pcm_mulaw", "8000"
+        # Two consumers of audio: barge-in detector + STT. We can't use the same generator twice, so we fan-out via a second queue.  The barge queue is bounded so a long call with DISABLE_BARGE_IN=1 (or a detector that briefly stalls) cannot grow it without limit. 200 chunks @ 20ms ≈ 4s of audio — plenty of headroom; OOM bound.
+        stt_queue = asyncio.Queue()
+        barge_queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+
+        async def _fan_out():
+            """Read raw audio once, copy to both queues."""
+            async for chunk in _audio_gen_from_queue():
+                await stt_queue.put(chunk)
+                # Drop-oldest on barge_queue to keep memory bounded when the detector lags (e.g., DISABLE_BARGE_IN=1).  STT side stays unbounded — losing STT audio would silently drop turns.
+                try:
+                    barge_queue.put_nowait(chunk)
+                except asyncio.QueueFull:
+                    try:
+                        barge_queue.get_nowait()
+                        barge_queue.put_nowait(chunk)
+                    except Exception:  # noqa: BLE001
+                        pass
+            await stt_queue.put(None)   # sentinel
+            try:
+                barge_queue.put_nowait(None)
+            except asyncio.QueueFull:
+                # Drop one to make room for the sentinel.
+                try:
+                    barge_queue.get_nowait()
+                    barge_queue.put_nowait(None)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        async def _stt_gen():
+            """Feed STT from stt_queue."""
+            while True:
+                chunk = await stt_queue.get()
+                if chunk is None:
+                    break
+                yield chunk
+
+        async def _barge_in_detector():
+            """
+            Runs parallel to STT. Detects speech onset from raw mulaw audio.
+            Uses RMS energy — no API, no latency. Fires the moment customer speaks.
+            """
+            import struct, math
+            SPEECH_RMS = self.barge_rms_threshold
+            SPEECH_FRAMES_NEEDED = self.barge_frames_needed
+            SILENCE_RESET_FRAMES = self.barge_silence_reset_frames
+            
+            speech_counter = 0
+            silence_counter = 0
+
+            while True:
+                if self.disable_barge_in:
+                    await asyncio.sleep(0.05)
+                    continue
+
+                chunk = await barge_queue.get()
+                if chunk is None:
+                    break
+
+                # mulaw → linear16 for RMS
+                try:
+                    pcm = audioop.ulaw2lin(chunk, 2)
+                except Exception:
+                    pcm = chunk
+
+                samples = struct.unpack(f"<{len(pcm)//2}h", pcm)
+                rms = math.sqrt(sum(s*s for s in samples) / len(samples)) if samples else 0
+
+                now = time.time()
+
+                # Guard: within TTS-start window (Rio just started speaking)
+                tts_start_guard = (
+                    self.is_rio_speaking
+                    and self.last_tts_start_time > 0
+                    and (now - self.last_tts_start_time) * 1000 < self.barge_tts_guard_ms
+                )
+                # Guard: post-speech cooldown — audio tail/echo after Rio finishes
+                post_speech_guard = (
+                    not self.is_rio_speaking
+                    and self.last_rio_speech_end_time > 0
+                    and (now - self.last_rio_speech_end_time) * 1000 < self.barge_post_speech_cooldown_ms
+                )
+                if tts_start_guard or post_speech_guard:
+                    speech_counter = 0
+                    continue
+
+                if rms > SPEECH_RMS:
+                    silence_counter = 0
+                    speech_counter += 1
+                    if speech_counter >= SPEECH_FRAMES_NEEDED:
+                        if self.is_rio_speaking or not self.sentence_queue.empty():
+                            # Rio is mid-speech — confirm with Silero before raising.
+                            # RMS is cheap + catches silence; Silero is slow but rejects background noise / plosives / non-speech bursts.
+                            if self.use_silero_vad and not self._silero_confirms(chunk):
+                                logger.debug(f"🔕 [Barge-in] Silero rejected RMS spike (RMS:{rms:.0f}) — suppressing")
+                                speech_counter = 0
+                                continue
+                            logger.info(f"⚡ [Barge-in] Interrupt while Rio speaking (RMS:{rms:.0f})")
+                            if not self.interrupt_pending:
+                                self.interrupt_pending = True
+                                self.pending_interrupt_reason = "customer_speaking"
+                                self._pause_playback_for_interrupt()
+                                self._cancel_pending_llm_dispatch()
+                            if (now - self._last_clear_ts) * 1000 >= self.barge_clear_cooldown_ms:
+                                await self.communicator.clear_audio_buffer()
+                                self._last_clear_ts = now
+                            speech_counter = 0
+                            continue
+
+                        # Rio is silent — customer taking their turn. Retrigger cooldown: don't flood LLM with repeated triggers
+                        if (now - self._last_barge_trigger_ts) * 1000 < self.barge_retrigger_cooldown_ms:
+                            speech_counter = 0
+                            continue
+
+                        logger.info(f"⚡ [Customer turn] Speech detected (RMS:{rms:.0f}) — sending to LLM")
+                        self._last_barge_trigger_ts = now
+                        await self._handle_barge_in(reason="customer_speaking")
+                        speech_counter = 0
+                else:
+                    silence_counter += 1
+                    if silence_counter > SILENCE_RESET_FRAMES:
+                        speech_counter = 0
+
+        # encoding, rate = "pcm_mulaw", "8000"
+        encoding, rate = self.audio_encoding, self.audio_sample_rate
         stt_start_time = time.time()
         last_final_transcript = ""
         current_turn_transcript = ""
 
+        fan_out_task = asyncio.create_task(_fan_out())
+        barge_task = asyncio.create_task(_barge_in_detector())
+
         try:
-            async for result in self.stt_service.transcribe(
-                _audio_gen_from_queue(), engine_type, encoding, rate
-            ):
+            async for result in self.stt_service.transcribe(_stt_gen(), encoding, rate):
                 transcript = result.get("transcript", "")
                 is_final = result.get("is_final", False)
                 res_type = result.get("type", "transcript")
 
                 if transcript:
+                    logger.debug(f"🎤 {'FINAL' if is_final else 'Interim'}: {transcript}")
                     current_turn_transcript = transcript
 
                 if is_final or res_type == "end_of_turn":
                     if not current_turn_transcript or current_turn_transcript == last_final_transcript:
                         continue
 
+                    # distinguish *real* echo (STT picked up Rio's own voice) from a legitimate user turn that happens during Rio's playback.  The previous blanket "Rio speaking → drop" rule silenced customers whose speech the barge detector failed to catch (e.g. RMS below threshold during back-to-back TTS guard windows).  Now we drop only when the transcript matches one of the last 3 Rio sentences (prefix / exact match).  Fresh content is treated as a confirmed barge-in: pause Rio, raise interrupt_pending so downstream logic processes the turn properly.
+                    if not self.interrupt_pending and (self.is_rio_speaking or not self.sentence_queue.empty()):
+                        if self._is_echo_transcript(current_turn_transcript):
+                            logger.info(f"🔇 Echo ignored: '{current_turn_transcript}'")
+                            current_turn_transcript = ""
+                            continue
+                        # New content from the user mid-playback — promote to confirmed interrupt so the rest of this loop treats it as a real turn.  Pause playback + clear audio so Rio's voice doesn't talk over the customer.
+                        logger.info(f"⚡ [Mid-playback turn] '{current_turn_transcript}' (no barge fired) — treating as interrupt")
+                        self.interrupt_pending = True
+                        self.pending_interrupt_reason = "stt_caught_user_speaking"
+                        try:
+                            self._pause_playback_for_interrupt()
+                        except Exception:  # noqa: BLE001
+                            pass
+                        try:
+                            await self.communicator.clear_audio_buffer()
+                        except Exception:  # noqa: BLE001
+                            pass
+
                     last_final_transcript = current_turn_transcript
-                    logger.info(f"🎤 [STT] {'🎯 EOT' if res_type == 'end_of_turn' else '✅ FINAL'}: {current_turn_transcript}")
-                    latency = time.time() - stt_start_time
+                    logger.info(f"🎤 [STT] FINAL: {current_turn_transcript}")
+                    self.last_customer_speech_time = time.time()
+                    # Track whether the customer named a 1-5 — used by the
+                    # forced-feedback-ask gate so we don't pester someone
+                    # who already gave a rating.
+                    if self._customer_uttered_rating(current_turn_transcript):
+                        self.user_gave_rating_this_call = True
+                    logger.info(f"⏰ [VoicePipeline] Last customer speech time: {self.last_customer_speech_time}")
+                    # Latency for THIS turn — measured from when listening for the next user turn began.  Capture it now, then immediately reset so the interrupt path's `continue` below cannot leak the clock across turns (which made stt_ms grow linearly with call duration).  Sanity-cap at 30s so a stuck pipeline doesn't poison percentile aggregates downstream.
+                    latency = min(time.time() - stt_start_time, 30.0)
+                    stt_start_time = time.time()
+
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
 
-                    if self.is_rio_speaking or not self.sentence_queue.empty():
-                        await self._handle_barge_in(reason=current_turn_transcript)
+                    # Publish live sentiment update to any subscribed dashboard clients
+                    try:
+                        sentiment_data = sentiment_broadcaster.analyze_sentiment(current_turn_transcript)
+                        sentiment_data["interaction_id"] = self.interaction_id
+                        asyncio.create_task(
+                            sentiment_broadcaster.publish(str(self.interaction_id), sentiment_data, self.company_id)
+                        )
+                    except Exception as _se:
+                        logger.debug("Sentiment publish skipped: %s", _se)
+
+                    # Real-time competitor mention detection
+                    try:
+                        from services.competitor_service import detect_competitors_in_utterance, get_counter_script_injection
+                        from database import engine as _db_engine
+                        from sqlmodel import Session as _DbSession
+                        with _DbSession(_db_engine) as _csess:
+                            _new_mentions = detect_competitors_in_utterance(
+                                session=_csess,
+                                company_id=self.company_id,
+                                lead_id=self.lead_id,
+                                interaction_id=self.interaction_id,
+                                utterance=current_turn_transcript,
+                            )
+                        for _m in _new_mentions:
+                            with _DbSession(_db_engine) as _csess2:
+                                _injection = get_counter_script_injection(
+                                    _csess2, self.company_id, _m.competitor_name
+                                )
+                            if _injection:
+                                self.llm_service.update_system_prompt(
+                                    self.llm_service.system_prompt + _injection
+                                )
+                                logger.info("[Pipeline] Counter-script injected for: %s", _m.competitor_name)
+                    except Exception as _ce:
+                        logger.debug("Competitor detection skipped: %s", _ce)
+
+                    normalized_transcript = current_turn_transcript.strip()
+                    if normalized_transcript:
+                        if self.pending_user_turn_text:
+                            self.pending_user_turn_text = (
+                                f"{self.pending_user_turn_text} {normalized_transcript}"
+                            ).strip()
+                        else:
+                            self.pending_user_turn_text = normalized_transcript
 
                     if self.current_llm_task and not self.current_llm_task.done():
                         self.current_llm_task.cancel()
-                        logger.info("♻️ Cancelled previous LLM task for new turn.")
 
-                    self.current_llm_task = asyncio.create_task(
-                        self._process_llm_response(current_turn_transcript, latency, engine_type)
-                    )
-                    stt_start_time = time.time()
+                    if self.interrupt_pending:
+                        if not normalized_transcript or self._is_echo_transcript(normalized_transcript):
+                            self._handle_false_positive_interrupt()
+                        else:
+                            self._handle_confirmed_interrupt(latency)
+                        current_turn_transcript = ""
+                        continue
+
+                    self._schedule_llm_dispatch(latency)
+                    # stt_start_time already reset above (immediately after capturing latency).  No reset needed here.
                     current_turn_transcript = ""
 
         except Exception as e:
             logger.error(f"❌ [VoicePipeline] STT loop error: {e}")
         finally:
+            # Defensive: ensure speaker is not stuck in pause-mode wait when we drop the shutdown sentinel.  resume_event.set() wakes any pending resume waiter so the queue.get() can read the None.
+            try:
+                self.resume_event.set()
+            except Exception:  # noqa: BLE001
+                pass
             await self.sentence_queue.put(None)
             await speaker_task
+            fan_out_task.cancel()
+            barge_task.cancel()
             ingest_task.cancel()
+            silence_task.cancel()
+            self.flush_transcript()
+            logger.info(f"✅ [VoicePipeline] Call ended. Interaction ID: {self.interaction_id}")
+            logger.info(f"📜 [VoicePipeline] Full Transcript: {self.transcript_accumulator}")
+            logger.info("📜 Post-call transcript flush complete.")
+            self._run_post_call_actions()
 
-    async def _speaker_loop(self, engine_type: str):
+    async def _silence_watcher(self):
+        """
+        Fires ONLY when:
+        1. Rio finished speaking (is_rio_speaking = False, queue empty)
+        2. Customer has NOT spoken since Rio finished
+        3. Silence has lasted > threshold since Rio stopped
+        """
+        SILENCE_THRESHOLD = 15.0  # seconds after Rio finishes speaking
+        CHECK_INTERVAL = 10.0
+
+        while True:
+            await asyncio.sleep(CHECK_INTERVAL)
+
+            # Skip if Rio is still talking or has more queued
+            if self.is_rio_speaking or not self.sentence_queue.empty():
+                continue
+
+            # How long since Rio finished speaking?
+            silence_since_rio_finished = time.time() - self.last_rio_speech_end_time
+        
+            # How long since customer last spoke?
+            silence_since_customer_spoke = time.time() - self.last_customer_speech_time
+
+            if (silence_since_rio_finished > SILENCE_THRESHOLD 
+                    and self.last_customer_speech_time < self.last_rio_speech_end_time):
+
+                if self.last_context_type == "pricing":
+                    phrase = "Take your time — that's a big decision and I'm happy to walk through it."
+                elif self.last_context_type == "demo":
+                    phrase = "Does that answer your question, or would you like me to go deeper on any part?"
+                else:
+                    phrase = "Still there? Happy to answer anything."
+
+                logger.info(f"🔔 [Silence Watcher] {silence_since_rio_finished:.1f}s since Rio finished — re-engaging")
+                await self.sentence_queue.put(phrase)
+
+                # Reset so it doesn't fire again immediately
+                self.last_rio_speech_end_time = time.time()
+                self.last_context_type = "general"
+
+
+    async def _speaker_loop(self):
         """Continuously pulls sentences from the queue and speaks them."""
         async with aiohttp.ClientSession() as session:
             # Persistent WebSockets for specific providers
             dg_ws = None
             el_ws = None
             c_ws = None
+            sv_ws = None
             
             try:
-                # 1. Setup persistent connections if needed
-                if engine_type == "mistral-deepgram":
-                    from utils.config import DEEPGRAM_API_KEY, DEEPGRAM_VOICE
-                    dg_url = f"wss://api.deepgram.com/v1/speak?model={DEEPGRAM_VOICE}&encoding=mulaw&sample_rate=8000"
-                    dg_headers = {"Authorization": f"Token {DEEPGRAM_API_KEY}"}
-                    dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
-                    logger.info("🎯 Deepgram TTS Persistent WebSocket Connected")
+                # Setup persistent connections if needed
+                if self.tts_provider == "deepgram":
+                    dg_api_key = self.integration_keys.get("DEEPGRAM_API_KEY")
+                    if not dg_api_key:
+                        logger.warning("⚠️ Deepgram API key missing; falling back to REST for TTS.")
+                    else:
+                        dg_voice = self.tts_service.model
+                        dg_url = f"wss://api.deepgram.com/v1/speak?model={dg_voice}&encoding=mulaw&sample_rate=8000"
+                        dg_headers = {"Authorization": f"Token {dg_api_key}"}
+                        try:
+                            dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
+                            logger.info(f"🎯 Deepgram TTS Persistent WebSocket Connected (model={dg_voice})")
+                        except Exception as exc:
+                            dg_ws = None
+                            logger.error(f"❌ Deepgram TTS WebSocket connect failed: {exc}")
                 
-                elif engine_type == "mistral-elevenlabs":
-                    from utils.config import ELEVENLABS_API_KEY, ELEVENLABS_VOICE_ID
-                    el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
-                    el_headers = {"xi-api-key": ELEVENLABS_API_KEY}
-                    el_ws = await session.ws_connect(el_url, headers=el_headers)
-                    logger.info("🎯 ElevenLabs TTS Persistent WebSocket Connected")
-                
-                # Setup Cartesia Persistent Connection if using it
-                if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
-                    from utils.config import CARTESIA_API_KEY
-                    c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
-                    c_ws = await session.ws_connect(c_url)
-                    logger.info("🎯 Cartesia TTS Persistent WebSocket Connected (aiohttp)")
+                elif self.tts_provider == "elevenlabs":
+                    el_api_key = self.integration_keys.get("ELEVENLABS_API_KEY")
+                    if not el_api_key:
+                        logger.warning("⚠️ ElevenLabs API key missing; falling back to REST for TTS.")
+                    else:
+                        el_voice = self.tts_service.voice_id
+                        el_model = self.tts_service.model
+                        el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=ulaw_8000"
+                        el_headers = {"xi-api-key": el_api_key}
+                        try:
+                            el_ws = await session.ws_connect(el_url, headers=el_headers)
+                            # Send BOS (beginning-of-stream) to initialize the persistent connection
+                            await el_ws.send_json({"text": " ", "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}})
+                            logger.info(f"🎯 ElevenLabs TTS Persistent WebSocket Connected (voice={el_voice}, model={el_model})")
+                        except Exception as exc:
+                            el_ws = None
+                            logger.error(f"❌ ElevenLabs TTS WebSocket connect failed: {exc}")
+                elif self.tts_provider == "cartesia":
+                    c_api_key = self.integration_keys.get("CARTESIA_API_KEY")
+                    if not c_api_key:
+                        logger.warning("⚠️ Cartesia API key missing; falling back to REST for TTS.")
+                    else:
+                        c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={c_api_key}&cartesia_version=2025-04-16"
+                        try:
+                            c_ws = await session.ws_connect(c_url)
+                            logger.info("🎯 Cartesia TTS Persistent WebSocket Connected (aiohttp)")
+                        except Exception as exc:
+                            c_ws = None
+                            logger.error(f"❌ Cartesia TTS WebSocket connect failed: {exc}")
 
-                # 2. Main Speaker Loop
+                elif self.tts_provider == "sarvam":
+                    sv_api_key = self.integration_keys.get("SARVAM_API_KEY")
+                    if not sv_api_key:
+                        logger.warning("⚠️ Sarvam API key missing; falling back to REST for TTS.")
+                    else:
+                        sv_headers = {"api-subscription-key": sv_api_key}
+                        from services.ai.tts.sarvam import SarvamTTS
+                        try:
+                            sv_ws = await session.ws_connect(SarvamTTS.WS_URL, headers=sv_headers)
+                            sv_config = SarvamTTS.ws_config_frame_static(
+                                model=self.tts_service.model,
+                                speaker=self.tts_service.speaker,
+                                language=self.lead_language,
+                            )
+                            await sv_ws.send_str(sv_config)
+                            logger.info(f"🎯 Sarvam TTS Persistent WebSocket Connected (language={self.lead_language})")
+                        except Exception as exc:
+                            sv_ws = None
+                            logger.error(f"❌ Sarvam TTS WebSocket connect failed: {exc}")
+
+            # Main Speaker Loop.  Race resume_event against the queue so a shutdown sentinel (None) puts during pause-mode hang-up wakes this loop immediately.  Without the race, hang-up during an active barge-in pause would leave the speaker blocked on resume_event.wait() forever, stalling teardown until the outer timeout fires (and post-call flush with it).
                 while True:
-                    sentence = await self.sentence_queue.get()
-                    if sentence is None:
-                        break
-                    
+                    resume_task = asyncio.create_task(self.resume_event.wait())
+                    sentence_task = asyncio.create_task(self.sentence_queue.get())
+                    done, pending = await asyncio.wait(
+                        {resume_task, sentence_task},
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for p in pending:
+                        p.cancel()
+
+                    if sentence_task in done:
+                        sentence = sentence_task.result()
+                        if sentence is None:
+                            break
+                        # Delivery still gated — wait for resume if paused.
+                        if not self.resume_event.is_set():
+                            await self.resume_event.wait()
+                    else:
+                        # resume signaled with empty queue — loop back.
+                        continue
+
+                    # Track what we actually emit to TTS this turn.  On confirmed barge-in this buffer feeds "you were saying X" into the next LLM call so the agent can acknowledge being cut off.
+                    if isinstance(sentence, str) and sentence.strip():
+                        self.last_rio_spoken.append(sentence.strip())
+
                     if not self.communicator.stream_sid:
                         logger.warning("⚠️ Speaker loop waiting for stream_sid...")
                         await asyncio.sleep(0.5)
 
-                    # --- ADDING: Persistent WebSocket Health Check & Reconnect ---
-                    if engine_type in ["mistral-cartesia", "mistral-deepgram-cartesia"]:
+                    if self.tts_provider == "cartesia":
                         if not c_ws or c_ws.closed:
-                            from utils.config import CARTESIA_API_KEY
-                            # Using the latest cartesia_version as suggested by the user
-                            c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={CARTESIA_API_KEY}&cartesia_version=2025-04-16"
-                            c_ws = await session.ws_connect(c_url)
-                            logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
+                            c_api_key = self.integration_keys.get("CARTESIA_API_KEY")
+                            if not c_api_key:
+                                logger.warning("⚠️ Cartesia API key missing; cannot reopen websocket.")
+                                c_ws = None
+                            else:
+                                c_url = f"wss://api.cartesia.ai/tts/websocket?api_key={c_api_key}&cartesia_version=2025-04-16"
+                                try:
+                                    c_ws = await session.ws_connect(c_url)
+                                    logger.info("🎯 Cartesia TTS Persistent WebSocket (Re)Connected")
+                                except Exception as exc:
+                                    c_ws = None
+                                    logger.error(f"❌ Cartesia TTS WebSocket reconnect failed: {exc}")
 
-                    logger.info(f"🗣️ [Speaker Loop] Starting TTS for: '{sentence}'")
+                    elif self.tts_provider == "elevenlabs":
+                        if not el_ws or el_ws.closed:
+                            el_api_key = self.integration_keys.get("ELEVENLABS_API_KEY")
+                            if not el_api_key:
+                                logger.warning("⚠️ ElevenLabs API key missing; cannot reopen websocket.")
+                                el_ws = None
+                            else:
+                                el_voice = self.tts_service.voice_id
+                                el_model = self.tts_service.model
+                                el_url = f"wss://api.elevenlabs.io/v1/text-to-speech/{el_voice}/stream-input?model_id={el_model}&output_format=ulaw_8000"
+                                el_headers = {"xi-api-key": el_api_key}
+                                try:
+                                    el_ws = await session.ws_connect(el_url, headers=el_headers)
+                                    await el_ws.send_json({"text": " ", "voice_settings": {"stability": 0.5, "similarity_boost": 0.8}})
+                                    logger.info("🎯 ElevenLabs TTS Persistent WebSocket (Re)Connected")
+                                except Exception as exc:
+                                    el_ws = None
+                                    logger.error(f"❌ ElevenLabs TTS WebSocket reconnect failed: {exc}")
+
+                    elif self.tts_provider == "deepgram":
+                        if not dg_ws or dg_ws.closed:
+                            dg_api_key = self.integration_keys.get("DEEPGRAM_API_KEY")
+                            if not dg_api_key:
+                                logger.warning("⚠️ Deepgram API key missing; cannot reopen websocket.")
+                                dg_ws = None
+                            else:
+                                dg_voice = self.tts_service.model
+                                dg_url = f"wss://api.deepgram.com/v1/speak?model={dg_voice}&encoding=mulaw&sample_rate=8000"
+                                dg_headers = {"Authorization": f"Token {dg_api_key}"}
+                                try:
+                                    dg_ws = await session.ws_connect(dg_url, headers=dg_headers)
+                                    logger.info("🎯 Deepgram TTS Persistent WebSocket (Re)Connected")
+                                except Exception as exc:
+                                    dg_ws = None
+                                    logger.error(f"❌ Deepgram TTS WebSocket reconnect failed: {exc}")
+
+                    elif self.tts_provider == "sarvam":
+                        if not sv_ws or sv_ws.closed:
+                            sv_api_key = self.integration_keys.get("SARVAM_API_KEY")
+                            if not sv_api_key:
+                                logger.warning("⚠️ Sarvam API key missing; cannot reopen websocket.")
+                                sv_ws = None
+                            else:
+                                sv_headers = {"api-subscription-key": sv_api_key}
+                                from services.ai.tts.sarvam import SarvamTTS
+                                try:
+                                    sv_ws = await session.ws_connect(SarvamTTS.WS_URL, headers=sv_headers)
+                                    sv_config = SarvamTTS.ws_config_frame_static(
+                                        model=self.tts_service.model,
+                                        speaker=self.tts_service.speaker,
+                                        language=self.lead_language,
+                                    )
+                                    await sv_ws.send_str(sv_config)
+                                    logger.info(f"🎯 Sarvam TTS Persistent WebSocket (Re)Connected (language={self.lead_language})")
+                                except Exception as exc:
+                                    sv_ws = None
+                                    logger.error(f"❌ Sarvam TTS WebSocket reconnect failed: {exc}")
+                
+                    tts_text = clean_voice_text(sentence) if sentence else ""
+                    logger.info(f"🗣️ [Speaker Loop] Starting TTS for: '{tts_text}'")
+                    normalized_sentence = self._normalize_text(tts_text)
+                    if normalized_sentence:
+                        self.last_rio_sentences.append(normalized_sentence)
                     # Generate a unique context_id per sentence for better multiplexing
                     turn_context_id = f"ctx_{self.interaction_id}_{int(time.time()*1000)}"
-                    
+
                     self.is_rio_speaking = True
                     self.last_tts_start_time = time.time()
-                    self.current_tts_task = asyncio.create_task(
-                        self.tts_service.speak(
-                            text=sentence, 
-                            engine_type=engine_type, 
-                            communicator=self.communicator, 
-                            cartesia_ws=c_ws,
-                            aiohttp_session=session,
-                            deepgram_ws=dg_ws,
-                            elevenlabs_ws=el_ws,
-                            context_id=turn_context_id
+
+                    # For Cartesia: fire TTS request AND immediately check for next sentence
+                    # Cartesia queues them server-side via context_id
+                    if self.tts_provider == "cartesia" and c_ws:
+                        self.current_tts_task = asyncio.create_task(
+                            self.tts_service.speak(
+                                text=tts_text,
+                                communicator=self.communicator,
+                                ws_to_use=c_ws,
+                                context_id=turn_context_id,
+                                aiohttp_session=session
+                            )
                         )
-                    )
-                    try:
-                        await self.current_tts_task
-                    except asyncio.CancelledError:
-                        logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
-                    finally:
-                        self.is_rio_speaking = False
-                        self.sentence_queue.task_done()
+                        try:
+                            await self.current_tts_task
+                        except asyncio.CancelledError:
+                            logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                        finally:
+                            self.is_rio_speaking = False
+                            self.last_rio_speech_end_time = time.time()
+                            self.sentence_queue.task_done()
+                    else:
+                        # Determine which persistent WS to pass as generic 'ws_to_use'
+                        active_ws = None
+                        if self.tts_provider == "deepgram":
+                            active_ws = dg_ws
+                        elif self.tts_provider == "elevenlabs":
+                            active_ws = el_ws
+                        elif self.tts_provider == "sarvam":
+                            active_ws = sv_ws
+                        # mimo is REST-based — no persistent WebSocket, active_ws stays None
+
+                        self.current_tts_task = asyncio.create_task(
+                            self.tts_service.speak(
+                                text=tts_text,
+                                communicator=self.communicator,
+                                ws_to_use=active_ws,
+                                context_id=turn_context_id, #if self.tts_provider == "cartesia" else None,
+                                aiohttp_session=session, #if self.tts_provider == "cartesia" else None
+                            )
+                        )
+                        try:
+                            await self.current_tts_task
+                        except asyncio.CancelledError:
+                            logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
+                        finally:
+                            self.is_rio_speaking = False
+                            self.last_rio_speech_end_time = time.time()
+                            self.sentence_queue.task_done()
             
             finally:
                 # Cleanup persistent WebSockets
                 if dg_ws: await dg_ws.close()
                 if el_ws: await el_ws.close()
                 if c_ws: await c_ws.close()
+                if sv_ws: await sv_ws.close()
 
     async def _handle_barge_in(self, reason: str = "Unknown"):
         """Interrupts current AI activities."""
         logger.info(f"🛑 Barge-in! Interrupting AI. Reason: '{reason}'")
+        if not self.interrupt_pending:
+            self.interrupt_pending = True
+            self.pending_interrupt_reason = reason
+            self._pause_playback_for_interrupt()
+            self._cancel_pending_llm_dispatch()
         await self.communicator.clear_audio_buffer()
-        
-        # Clear sentence queue
-        while not self.sentence_queue.empty():
-            try: self.sentence_queue.get_nowait()
-            except asyncio.QueueEmpty: break
+        self.llm_service.clean_interrupted_tool_calls()
+        self.current_turn_user_text = ""
+        self.is_rio_speaking = False
 
-        if self.current_tts_task and not self.current_tts_task.done():
-            self.current_tts_task.cancel()
-        if self.current_llm_task and not self.current_llm_task.done():
-            self.current_llm_task.cancel()
+    def _annotate_trace(self, span_status: str = "ok") -> None:
+        """
+        Attach trace_id/span_id/turn_index/span_status to the LatencyLog row
+        just written by save_latency(). Called immediately after save_latency().
+        Never raises — trace annotation is best-effort.
+        """
+        try:
+            interaction_id_int = int(self.interaction_id)
+        except (ValueError, TypeError):
+            return  # Anonymous/session calls — nothing to annotate
+
+        try:
+            from sqlalchemy import text as _text
+            from database import engine as _db_engine
+            from sqlmodel import Session as _TraceSession
+
+            span_id = _uuid.uuid4().hex[:16]
+            with _TraceSession(_db_engine) as s:
+                s.execute(
+                    _text("""
+                        UPDATE latencylog
+                        SET trace_id    = :trace_id,
+                            span_id     = :span_id,
+                            turn_index  = :turn_index,
+                            span_status = :span_status
+                        WHERE id = (
+                            SELECT id FROM latencylog
+                            WHERE interaction_id = :iid
+                            ORDER BY id DESC
+                            LIMIT 1
+                        )
+                    """),
+                    {
+                        "trace_id": self.trace_id,
+                        "span_id": span_id,
+                        "turn_index": self.turn_index,
+                        "span_status": span_status,
+                        "iid": interaction_id_int,
+                    },
+                )
+                s.commit()
+            self.turn_index += 1
+        except Exception as exc:
+            logger.debug("Trace annotation skipped: %s", exc)
 
     def save_latency(self, engine_name, stt, llm, tts, stt_p=None, stt_m=None, llm_p=None, llm_m=None, tts_p=None, tts_m=None):
         """Saves turn-level latency metrics to DB."""
@@ -235,8 +1161,14 @@ class VoicePipeline:
                 interaction_id_int = None
                 logger.debug(f"ℹ️ Interaction ID '{self.interaction_id}' is a session string. Saving latency as anonymous.")
 
+            log_user_id = self.user_id
+            log_lead_id = self.lead_id
+
             log = LatencyLog(
+                company_id=self.company_id,
                 interaction_id=interaction_id_int,
+                user_id=log_user_id,
+                lead_id=log_lead_id,
                 engine=engine_name,
                 stt_ms=round(stt * 1000, 2),
                 llm_ms=round(llm * 1000, 2),
@@ -248,12 +1180,12 @@ class VoicePipeline:
                 llm_model=llm_m,
                 tts_provider=tts_p,
                 tts_model=tts_m,
-                notes=f"ID: {self.interaction_id}" if interaction_id_int is None else None
+                notes=f"ID: {self.interaction_id}" if interaction_id_int is None else None,
             )
             self.session.add(log)
             self.session.commit()
-            
-            # Detailed Logging
+
+            # Detailed Logging (unchanged)
             logger.info(
                 f"⏱️ [Latency Saved] {engine_name} | Total: {log.total_ms}ms\n"
                 f"   🎙️ STT: {stt*1000:.0f}ms ({stt_p}/{stt_m})\n"
@@ -264,9 +1196,19 @@ class VoicePipeline:
             logger.error(f"❌ Error saving latency: {e}")
 
     def save_transcript(self, engine_name="voice_call"):
-        """Saves transcript to Interaction table. Upserts if record exists."""
+        """During call: just mark dirty. DB write is deferred to flush_transcript()."""
+        self._transcript_dirty = True
+
+    def _build_transcript_content(self) -> str:
+        return "\n".join(line for line in self.transcript_accumulator if line and line.strip())
+
+    def flush_transcript(self, engine_name="voice_call"):
+        """Called ONCE after call ends. Writes full transcript to DB using a fresh session
+        to avoid stale/rolled-back session state from the long-running call."""
+        if not self._transcript_dirty:
+            return
         try:
-            full_transcript = "\n".join(self.transcript_accumulator)
+            full_transcript = self._build_transcript_content()
             if not full_transcript.strip():
                 return
 
@@ -275,82 +1217,312 @@ class VoicePipeline:
             except (ValueError, TypeError):
                 interaction_id_int = None
 
-            db_i = None
+            from database import engine as _db_engine
+            from sqlmodel import Session as _Session
+            with _Session(_db_engine) as fresh_session:
+                db_i = None
+                if interaction_id_int:
+                    db_i = fresh_session.get(Interaction, interaction_id_int)
+
+                if not db_i:
+                    if not self.user_id:
+                        logger.warning("No user context for transcript flush fallback; skipping.")
+                        return
+                    db_i = Interaction(
+                        company_id=self.company_id,
+                        lead_id=self.lead_id,
+                        user_id=self.user_id,
+                        type="call",
+                        channel="call",
+                        direction="outbound",
+                        source="voice_pipeline",
+                        content=f"Voice Interaction ({engine_name})",
+                        transcript=full_transcript,
+                        status="completed",
+                        started_at=utc_now(),
+                        ended_at=utc_now(),
+                        created_by=self.user_id,
+                        updated_by=self.user_id,
+                    )
+                    fresh_session.add(db_i)
+                    fresh_session.commit()
+                    fresh_session.refresh(db_i)
+                    if not interaction_id_int:
+                        self.interaction_id = str(db_i.id)
+                else:
+                    db_i.transcript = full_transcript
+                    db_i.status = "completed"
+                    db_i.ended_at = utc_now()
+                    db_i.updated_at = utc_now()
+                    db_i.updated_by = self.user_id
+                    fresh_session.add(db_i)
+                    fresh_session.commit()
+
+            self._transcript_dirty = False
+            logger.info(f"📜 [Transcript Flushed] ID: {interaction_id_int or 'new'} | {len(full_transcript)} chars | {len(self.transcript_accumulator)} lines")
+        except Exception as e:
+            logger.error(f"❌ Error flushing transcript: {e}")
+
+    def _run_post_call_actions(self) -> None:
+        """
+        Triggered once after the call ends and transcript is flushed.
+        Saves a structured call summary and updates lead outreach metadata.
+        Runs synchronously in the pipeline teardown (non-blocking errors).
+        """
+        try:
+            from agents.post_call_nurture import CallSummarizer, CRMUpdater
+            from models.models import Lead
+
+            # Resolve interaction_id and lead from DB.
+            try:
+                interaction_id_int = int(self.interaction_id)
+            except (ValueError, TypeError):
+                interaction_id_int = None
+
+            lead_id: int | None = None
+            lead_score_normalized: float = 0.0
+
             if interaction_id_int:
                 db_i = self.session.get(Interaction, interaction_id_int)
-            
-            if not db_i:
-                # Try to find a lead if we have a phone number (not implemented in VoicePipeline but good pattern)
-                # For now, create a new Interaction record
-                db_i = Interaction(
-                    lead_id=0, # Anonymous lead
-                    type="call",
-                    content=f"Voice Interaction ({engine_name})",
-                    transcript=full_transcript,
-                    timestamp=datetime.now(timezone.utc)
-                )
-                self.session.add(db_i)
-                self.session.commit()
-                self.session.refresh(db_i)
-                # If we're now assigning an ID, update our internal reference
-                if not interaction_id_int:
-                    self.interaction_id = str(db_i.id)
-            else:
-                db_i.transcript = full_transcript
-                self.session.add(db_i)
-                self.session.commit()
-                
-            logger.debug(f"📜 [Transcript Saved] ID: {db_i.id} | Length: {len(full_transcript)} chars")
-        except Exception as e:
-            logger.error(f"❌ Error saving transcript: {e}")
+                if db_i:
+                    lead_id = db_i.lead_id
 
-    async def _process_llm_response(self, user_input, stt_latency, engine_type):
+            if lead_id:
+                lead = self.session.get(Lead, lead_id)
+                if lead and lead.lead_score is not None:
+                    lead_score_normalized = float(lead.lead_score) / 100.0
+
+            full_transcript = self._build_transcript_content()
+
+            # save structured summary interaction.
+            summary = CallSummarizer.summarize_call(
+                lead_id=lead_id or 0,
+                transcript=full_transcript,
+                icp_score=lead_score_normalized,
+                sentiment="neutral",
+                pain_points=[],
+                questions_asked=[],
+                bant_answers={},
+            )
+            if lead_id:
+                CallSummarizer.save_summary_to_crm(lead_id, summary, company_id=self.company_id or 0, actor_user_id=self.user_id)
+
+            # log the completed call as a CRM interaction note.
+            if lead_id:
+                line_count = len(self.transcript_accumulator)
+                CRMUpdater.log_interaction(
+                    lead_id,
+                    "call_completed",
+                    f"Voice call ended. {line_count} transcript lines recorded. "
+                    f"Interaction ID: {self.interaction_id}.",
+                    company_id=self.company_id or 0,
+                    actor_user_id=self.user_id,
+                )
+
+            logger.info(
+                "[PostCall] Nurture actions complete. lead_id=%s interaction=%s",
+                lead_id, self.interaction_id,
+            )
+        except Exception as exc:
+            logger.warning("[PostCall] Post-call actions failed (non-fatal): %s", exc)
+
+    def _strip_markdown(self, text: str) -> str:
+        """Removes markdown formatting like **bold**, *italics*, and bullet points for TTS."""
+        if not text:
+            return ""
+        # Remove bold/italics markers
+        text = re.sub(r'[*_]{1,3}', '', text)
+        # Remove bullet points/list markers at start of lines
+        text = re.sub(r'^[\s]*[-+*][\s]+', '', text, flags=re.MULTILINE)
+        # Remove hashtags for headers
+        text = re.sub(r'#+\s+', '', text)
+        return text.strip()
+
+    async def _process_llm_response(self, user_input, stt_latency):
         """Handles LLM generation, tool execution, and recursive follow-ups."""
         llm_start_time = time.time()
-        self.llm_service.add_user_message(user_input)
+
+        # Only add user message if this is a fresh turn, not a tool recursion
+        if user_input:
+            self.current_turn_user_text = user_input
+            self.llm_service.add_user_message(user_input)
+            # Fresh turn — clear the spoken-so-far buffer.  Tool-call recursion leaves it in place so an interruption mid-tool-output still sees what the agent was saying.
+            self.last_rio_spoken.clear()
         
         mistral_tools = get_mistral_tools()
         
         full_reply = ""
         tool_calls = None
         
-        async for chunk in self.llm_service.stream_mistral(tools=mistral_tools):
+        async for chunk in self.llm_service.stream(tools=mistral_tools):
             if chunk["type"] == "sentence":
-                logger.info(f"📤 [Mistral -> Queue] Sentence: '{chunk['content']}'")
-                await self.sentence_queue.put(chunk["content"])
+                sentence = chunk["content"]
+
+                stripped = self._strip_json_fragments(sentence)
+
+                # if stripping removed a meaningful chunk, log it
+                if stripped != sentence:
+                    logger.warning(
+                        "🚫 [VoicePipeline] JSON fragments stripped from sentence: %r → %r",
+                        sentence[:60], stripped[:60],
+                    )
+
+                # if what remains is still technical leakage, discard entirely
+                if not stripped or self._is_technical_leakage(stripped):
+                    logger.warning("🚫 [VoicePipeline] Discarding JSON-leaked sentence: %r", sentence[:60])
+                    continue
+
+                # strip markdown and internal ID patterns
+                clean_sentence = self._strip_markdown(stripped)
+                clean_sentence = self._filter_technical_speech(clean_sentence)
+
+                if not clean_sentence or len(clean_sentence.strip()) < 2:
+                    continue
+
+                if (
+                    self._sentence_says_goodbye(clean_sentence)
+                    and not self.feedback_asked_this_call
+                    and not self.user_gave_rating_this_call
+                ):
+                    logger.info(
+                        "[Pipeline] LLM was about to say goodbye without asking for "
+                        "feedback — forcing the 1-5 rating question."
+                    )
+                    self.feedback_asked_this_call = True
+                    self.last_rio_sentences.append(self._FORCED_FEEDBACK_PHRASE)
+                    self.last_rio_spoken.append(self._FORCED_FEEDBACK_PHRASE)
+                    await self.sentence_queue.put(self._FORCED_FEEDBACK_PHRASE)
+
+                
+                if self._sentence_asks_feedback(clean_sentence):
+                    self.feedback_asked_this_call = True
+
+                logger.info("📤 [%s -> Queue] Sentence: %r", self.llm_provider, clean_sentence)
+                await self.sentence_queue.put(clean_sentence)
+            elif chunk["type"] == "error":
+                self.llm_error_count += 1
+                if self.llm_error_count >= 3:
+                    fallback_sentence = "I'm sorry, I'm experiencing persistent technical difficulties. Please try calling back in a few minutes."
+                    logger.warning(f"🚨 [Smart Fallback] 3 consecutive failures. Queuing final error message.")
+                    self._annotate_trace("error")
+                else:
+                    fallback_sentence = "I'm sorry, I'm having a bit of trouble with my connection. Could you repeat that?"
+                    logger.info(f"🔄 [Smart Fallback] Failure #{self.llm_error_count}. Queuing retry message.")
+                    self._annotate_trace("error")
+                await self.sentence_queue.put(fallback_sentence)
+                return
             elif chunk["type"] == "finished":
+                self.llm_error_count = 0
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
+
+                reasoning_details = chunk.get("reasoning_details")
                 llm_end_time = time.time()
                 llm_latency = llm_end_time - llm_start_time
                 
-                if full_reply:
-                    self.llm_service.add_assistant_message(full_reply)
-                    self.transcript_accumulator.append(f"Rio: {full_reply}")
-                    self.save_transcript()
-                    self.save_latency(
-                        engine_type, 
-                        stt_latency, 
-                        llm_latency, 
-                        self.tts_service.last_tts_latency,
-                        stt_p=self.stt_service.last_provider,
-                        stt_m=self.stt_service.last_model,
-                        llm_p=self.llm_service.provider,
-                        llm_m=self.llm_service.model,
-                        tts_p=self.tts_service.last_provider,
-                        tts_m=self.tts_service.last_model
-                    )
+                self.llm_service.add_assistant_message(
+                    full_reply, 
+                    tool_calls=tool_calls, 
+                    reasoning_details=reasoning_details
+                )
                 
+                if full_reply:
+                    # Strip JSON fragments before recording transcript (keep LLM history untouched)
+                    transcript_reply = self._strip_json_fragments(full_reply)
+                    self.transcript_accumulator.append(f"Rio: {transcript_reply}")
+                    self.save_transcript()
+
+                # Always save latency, even for tool-only turns
+                self.save_latency(
+                    f"{self.stt_provider}-{self.llm_provider}-{self.tts_provider}",
+                    stt_latency,
+                    llm_latency,
+                    self.tts_service.last_latency,
+                    stt_p=self.stt_service.provider,
+                    stt_m=self.stt_service.model,
+                    llm_p=self.llm_service.provider,
+                    llm_m=self.llm_service.model,
+                    tts_p=self.tts_service.provider,
+                    tts_m=self.tts_service.model
+                )
+                self._annotate_trace("ok")
+
                 if tool_calls:
-                    self.llm_service.add_assistant_message(full_reply, tool_calls=tool_calls)
-                    
                     for tc in tool_calls:
                         tool_name = tc.function.name
-                        tool_args = json.loads(tc.function.arguments)
+                        raw_args = tc.function.arguments or "{}"
+                        try:
+                            tool_args = json.loads(raw_args)
+                        except json.JSONDecodeError:
+                            # Streaming may concatenate duplicate chunks → "Extra data".
+                            # Try extracting the first valid JSON object from the string.
+                            m = re.search(r'\{.*?\}', raw_args, re.DOTALL)
+                            try:
+                                tool_args = json.loads(m.group(0)) if m else {}
+                            except Exception:
+                                tool_args = {}
+                            logger.warning(
+                                "⚠️ [VoicePipeline] Malformed tool-call arguments for %s — "
+                                "raw: %r  parsed as: %r",
+                                tool_name, raw_args[:120], tool_args,
+                            )
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
+
+                        # Thinking message — keep customer engaged during tool wait
+                        thinking_phrases = {
+                            "get_product_info":        "Let me pull up the details on that for you.",
+                            "book_meeting":            "Let me get that booked for you right now.",
+                            "book_demo":               "I'm scheduling that demo for you now.",
+                            "send_communication":      "Sending that over to you now.",
+                            "get_or_create_lead":      "One moment while I update your record.",
+                            "check_icp_qualification": "Let me check if this fits your profile.",
+                            "check_guardrails":        "Let me check what I can do on pricing.",
+                        }
+                        
+                        # Update context for silence re-engagement
+                        if tool_name in ["get_product_info", "check_guardrails"]:
+                            self.last_context_type = "pricing"
+                        elif tool_name in ["book_meeting", "book_demo"]:
+                            self.last_context_type = "demo"
+                        
+                        thinking_msg = thinking_phrases.get(tool_name, "One moment, let me look into that for you.")
+                        
+                        # Only say it if Rio isn't already mid-sentence
+                        if self.sentence_queue.empty() and not self.is_rio_speaking:
+                            await self.sentence_queue.put(thinking_msg)
+                            # Small wait so the phrase starts playing before tool execution
+                            await asyncio.sleep(0.3)
                         
                         try:
-                            result = await execute_mcp_tool(tool_name, tool_args)
+                            result = await execute_mcp_tool(
+                                tool_name,
+                                tool_args,
+                                interaction_id=self.interaction_id,
+                                user_id=self.user_id,
+                                user=self.user,
+                                session=self.session,
+                            )
+                            
+                            # Auto-link interaction to lead if get_or_create_lead result has lead_id
+                            if tool_name == "get_or_create_lead" and "lead_id" in result:
+                                try:
+                                    lid = int(result["lead_id"])
+                                    logger.info(f"🔗 Linking interaction {self.interaction_id} to lead {lid}")
+                                    try:
+                                        interaction_id_int = int(self.interaction_id)
+                                        db_i = self.session.get(Interaction, interaction_id_int)
+                                        if db_i:
+                                            db_i.lead_id = lid
+                                            self.session.add(db_i)
+                                            self.session.commit()
+                                    except (ValueError, TypeError):
+                                        pass
+                                except Exception as e:
+                                    logger.error(f"❌ Failed to link interaction: {e}")
+
+                        except asyncio.CancelledError:
+                            logger.info(f"🛑 [VoicePipeline] Tool execution for '{tool_name}' interrupted by barge-in")
+                            raise # Re-raise to ensure the whole turn is aborted
                         except Exception as e:
                             logger.error(f"❌ Tool Execution Error: {e}")
                             result = {"error": str(e)}
@@ -358,17 +1530,85 @@ class VoicePipeline:
                         self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
                     
                     logger.info("🔄 Tool results ready. Recursing for final LLM response.")
-                    await self._process_llm_response("Tool results ready.", 0, engine_type)
+                    # Recurse with user_input=None to follow the correct tool result -> model response sequence
+                    await self._process_llm_response(None, 0)
+                self.current_turn_user_text = ""
 
-    #async def _audio_generator(self, receiver):
-    #    """Helper to yield audio chunks from the communicator."""
-    #    async for data in receiver:
-    #        event = data.get("event")
-    #        if event == "media":
-    #            yield base64.b64decode(data["media"]["payload"])
-    #        elif event == "stop":
-    #            logger.info("🛑 [Twilio] Stream stopped.")
-    #            break
+    def _strip_json_fragments(self, text: str) -> str:
+        """
+        Strips JSON objects, arrays, and bare key:value pairs from speech text.
+        Prose surrounding the JSON is preserved so a sentence like
+        "Great, I've noted that! {"email": "x@y.com"}" becomes "Great, I've noted that!"
+        """
+        if not text:
+            return text
+        for _ in range(3):
+            text = re.sub(r'\{[^{}]*\}', '', text)
+        text = re.sub(r'\[[^\[\]]*\]', '', text)
+        text = re.sub(
+            r'"[a-z_]{2,24}"\s*:\s*(?:"[^"]*"|\d+(?:\.\d+)?|true|false|null)',
+            '', text,
+        )
+        # Clean up leftover commas, spaces, and sentence-ending artifacts
+        text = re.sub(r',\s*,', ',', text)
+        text = re.sub(r'^\s*[,;]\s*', '', text)
+        text = re.sub(r'\s*[,;]\s*$', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+        return text
+
+    def _is_technical_leakage(self, text: str) -> bool:
+        """Detects if a string looks like raw JSON, tool call fragments, or technical metadata."""
+        if not text:
+            return False
+
+        trimmed = text.strip()
+        # Starts with JSON braces/brackets
+        if trimmed.startswith(("{", "[", '{"', '["')):
+            return True
+
+        # Contains key-value pair pattern (e.g. "key": "value" or "key": 123)
+        if re.search(r'"[a-z_]{2,24}"\s*:\s*(?:"[^"]*"|\d+|true|false|null)', trimmed):
+            return True
+
+        # Multiple bare quoted-key:value pairs (comma-separated JSON)
+        if len(re.findall(r'"[a-z_]+"\s*:', trimmed)) >= 2:
+            return True
+
+        # Contains tool call artifacts
+        technical_terms = ['"arguments":', '"name":', '"id":', 'function_call', 'tool_calls', 'call_id']
+        if any(term in trimmed for term in technical_terms):
+            return True
+
+        # Excessive technical characters ratio
+        technical_chars = trimmed.count("{") + trimmed.count("}") + trimmed.count("[") + trimmed.count("]")
+        if technical_chars >= 2:
+            return True
+
+        return False
+
+    def _filter_technical_speech(self, text: str) -> str:
+        """Regex-based safety layer to strip technical leakages from the voice stream."""
+        patterns = [
+            r"(?i)lead\s+id\s+(?:of\s+)?\d+",
+            r"(?i)internal\s+id\s+(?:of\s+)?\d+",
+            r"(?i)id\s+is\s+\d+",
+            r"(?i)id\s+\d+",
+            r"(?i)internal\s+id",
+            r"(?i)system\s+record",
+            r"(?i)database\s+id",
+            r"__META_ID__",
+        ]
+        for pattern in patterns:
+            text = re.sub(pattern, "", text)
+
+        # Clean up awkward double spaces or trailing conjunctions left by stripping
+        text = re.sub(r"\s+", " ", text).strip()
+        # Remove trailing "with a" or "and" if they were part of an ID phrase
+        text = re.sub(r"\b(with a|and|for)\s*$", "", text, flags=re.IGNORECASE).strip()
+        return text
+    
+    def get_full_transcript_self(self) -> str:
+        return "\n".join(self.transcript_accumulator)
 
     async def _audio_generator(self, receiver):
         chunk_count = 0

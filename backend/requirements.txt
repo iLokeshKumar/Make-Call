@@ -17,5 +17,18 @@ pandas
 openpyxl
 python-multipart
 requests
-cartesia>=1.0.0
-sarvamai>=0.2.0
+cartesia>=1.0.0 #3.0.2
+sarvamai>=0.1.27 #0.2.0 is the first version with TTS support
+dateparser
+python-dateutil
+langgraph
+langchain
+langsmith
+langchain-google-genai
+langchain-openai
+langchain-anthropic
+langchain-mistralai
+fastmcp
+scikit-learn
+sentence-transformers>=3.0.0
+rank-bm25>=0.2.2

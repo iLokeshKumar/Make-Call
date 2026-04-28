@@ -28,8 +28,10 @@ class TwilioCommunicator(TelephonyCommunicator):
                         "media": {"payload": b64_audio}
                     })
             except Exception as e:
-                # Silently catch closed socket errors
-                if "close message has been sent" not in str(e):
+                # Silently catch closed socket errors as normal hangups
+                if "closed" in str(e).lower() or "close message has been sent" in str(e).lower():
+                    logger.info("ℹ️ [Twilio] Media send failed (Phone hung up)")
+                else:
                     logger.error(f"❌ [Twilio] Error sending media: {e}")
         else:
             logger.warning("⚠️ [Twilio] Attempted to send media but stream_sid is missing!")

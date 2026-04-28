@@ -1,123 +1,264 @@
-import jwt
-from passlib.context import CryptContext
-from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
-from sqlmodel import Session, select
-from database import get_session, User
-from pydantic import BaseModel
+import base64
 import os
+from datetime import datetime, timedelta, timezone
+from io import BytesIO
+from typing import Optional
+
+import bcrypt
+import jwt
 import pyotp
 import qrcode
-import base64
-from io import BytesIO
-from optparse import Option
-from typing import Optional, List
-from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi.security import OAuth2PasswordBearer
+from sqlmodel import Session
 
-load_dotenv()
+from csrf import (
+    CSRF_BYPASS_PREFIXES,
+    CSRF_COOKIE_NAME,
+    CSRF_HEADER_NAME,
+    SESSION_COOKIE_NAME,
+    generate_csrf_token,
+    verify_csrf_invariants,
+)
+from database import get_session
+from models.models import User
+from services.core.auth_service import get_user_permission_keys
 
-# Fix for bcrypt compatibility with passlib 1.7.4+
-import bcrypt
 
-# CONFIGURATION
-SECRET_KEY = os.getenv("SECRET_KEY", "09d25e094faa6ca2556c818166b7a9563b93f7099f6f0f4caa6cf63b88e8d3e7")
+__all__ = [
+    "ACCESS_TOKEN_EXPIRE_MINUTES",
+    "ALGORITHM",
+    "CSRF_BYPASS_PREFIXES",
+    "CSRF_COOKIE_NAME",
+    "CSRF_HEADER_NAME",
+    "PermissionChecker",
+    "SECRET_KEY",
+    "SESSION_COOKIE_NAME",
+    "clear_auth_cookie",
+    "clear_csrf_cookie",
+    "create_access_token",
+    "generate_csrf_token",
+    "generate_mfa_qr_base64",
+    "generate_mfa_secret",
+    "get_current_active_user",
+    "get_current_user",
+    "get_mfa_provisioning_uri",
+    "get_password_hash",
+    "oauth2_scheme",
+    "set_auth_cookie",
+    "set_csrf_cookie",
+    "validate_password_rules",
+    "verify_csrf_invariants",
+    "verify_mfa_token",
+    "verify_password",
+]
+
+SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+# OAuth2 scheme stays for OpenAPI docs + bearer-token clients (mobile, scripts). `auto_error=False` makes the header optional so we can fall back to a cookie.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token", auto_error=False)
 
-class Token(BaseModel):
-    access_token: str
-    token_type: str
 
-class TokenData(BaseModel):
-    username: Optional[str] = None
+def set_auth_cookie(response: Response, token: str) -> None:
+    """Store the session JWT as an httpOnly cookie.
 
-def verify_password(plain_password: str, hashed_password: str):
+    httpOnly blocks JavaScript access (XSS can't exfiltrate the token).
+    Secure restricts to HTTPS in production (set COOKIE_SECURE=0 for local dev).
+    SameSite=Lax blocks classic CSRF on cross-site form posts while still
+    allowing top-level navigation to carry the cookie.
+    """
+    secure = os.getenv("COOKIE_SECURE", "1") == "1"
+    samesite = os.getenv("COOKIE_SAMESITE", "lax").lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    domain = os.getenv("COOKIE_DOMAIN") or None
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        domain=domain,
+        path="/",
+    )
+
+
+def clear_auth_cookie(response: Response) -> None:
+    """Remove the session cookie. Used on /auth/logout."""
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        domain=os.getenv("COOKIE_DOMAIN") or None,
+    )
+
+
+def set_csrf_cookie(response: Response, token: str) -> None:
+    """Set the CSRF double-submit cookie alongside the session cookie.
+
+    Non-httpOnly on purpose — the SPA reads this cookie with JavaScript and
+    echoes the value back in the `X-CSRF-Token` header. The session cookie
+    stays httpOnly; only the CSRF token is JS-readable. That pairing is what
+    makes the pattern XSS-resistant (attacker can read the CSRF cookie but
+    not the session cookie that carries auth).
+    """
+    secure = os.getenv("COOKIE_SECURE", "1") == "1"
+    samesite = os.getenv("COOKIE_SAMESITE", "lax").lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    domain = os.getenv("COOKIE_DOMAIN") or None
+    response.set_cookie(
+        key=CSRF_COOKIE_NAME,
+        value=token,
+        max_age=ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+        httponly=False, # intentional — SPA must read this
+        secure=secure,
+        samesite=samesite,
+        domain=domain,
+        path="/",
+    )
+
+
+def clear_csrf_cookie(response: Response) -> None:
+    """Remove the CSRF cookie. Call alongside clear_auth_cookie on logout."""
+    response.delete_cookie(
+        key=CSRF_COOKIE_NAME,
+        path="/",
+        domain=os.getenv("COOKIE_DOMAIN") or None,
+    )
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
     try:
-        return bcrypt.checkpw(plain_password.encode('utf-8'), hashed_password.encode('utf-8'))
+        return bcrypt.checkpw(plain_password.encode("utf-8"), hashed_password.encode("utf-8"))
     except Exception:
         return False
 
-def get_password_hash(password: str):
-    # bcrypt limit is 72 bytes. We truncate to ensure stability, though passwords are usually shorter.
-    pwd_bytes = password.encode('utf-8')[:72]
-    return bcrypt.hashpw(pwd_bytes, bcrypt.gensalt()).decode('utf-8')
 
-def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
-    to_encode = data.copy()
-    if expires_delta:
-        expire = datetime.utcnow() + expires_delta
-    else:
-        expire = datetime.utcnow() + timedelta(minutes=15)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-    return encoded_jwt
+def get_password_hash(password: str) -> str:
+    return bcrypt.hashpw(password.encode("utf-8")[:72], bcrypt.gensalt()).decode("utf-8")
 
-async def get_current_user(token: str = Depends(oauth2_scheme), session: Session = Depends(get_session)):
+
+def validate_password_rules(
+    password: str,
+    username: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    phone_number: str | None = None,
+) -> Optional[str]:
+    if len(password) < 6:
+        return "Password must be at least 6 characters long"
+
+    has_lower = any(char.islower() for char in password)
+    has_upper = any(char.isupper() for char in password)
+    has_digit = any(char.isdigit() for char in password)
+    has_special = any(char in "!@#$%^&*()_+-=[]{}|;:'\",.<>/?`~" for char in password)
+
+    if not (has_lower and has_upper and has_digit and has_special):
+        return "Password must contain lowercase, uppercase, number, and special character"
+
+    lowered = password.lower()
+    for value, label in (
+        (username, "username"),
+        (first_name, "first name"),
+        (last_name, "last name"),
+    ):
+        if value and value.lower() in lowered:
+            return f"Password cannot contain the {label}"
+
+    if phone_number and phone_number in password:
+        return "Password cannot contain the phone number"
+
+    return None
+
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    payload = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+    payload["exp"] = expire
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+async def get_current_user(
+    request: Request,
+    header_token: Optional[str] = Depends(oauth2_scheme),
+    session: Session = Depends(get_session),
+) -> User:
+    """Resolve the authenticated user from a session cookie or bearer header.
+
+    The cookie takes precedence so frontends can migrate fetch-by-fetch
+    without a flag day. Both paths decode the same JWT.
+    """
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
         headers={"WWW-Authenticate": "Bearer"},
     )
-    print(f"DEBUG: Validating Token - Secret: {SECRET_KEY[-4:]}, Algo: {ALGORITHM}")
+
+    token = request.cookies.get(SESSION_COOKIE_NAME) or header_token
+    if not token:
+        raise credentials_exception
+
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username: str = payload.get("sub")
-        if username is None:
-            print("DEBUG: Token validation failed - No 'sub' found")
+        user_id = payload.get("user_id")
+        company_id = payload.get("company_id")
+        token_version = payload.get("token_version")
+        if not user_id or not company_id:
             raise credentials_exception
-        token_data = TokenData(username=username)
-    except jwt.ExpiredSignatureError:
-        print("DEBUG: Token validation failed - Expired Signature")
+    except jwt.PyJWTError:
         raise credentials_exception
-    except jwt.InvalidTokenError as e:
-        print(f"DEBUG: Token validation failed - Invalid Token: {str(e)}")
+
+    user = session.get(User, user_id)
+    if not user or not user.is_active:
         raise credentials_exception
-    except jwt.PyJWTError as e:
-        print(f"DEBUG: Token validation failed - PyJWT Error: {str(e)}")
+
+    if user.company_id != company_id or user.token_version != token_version:
         raise credentials_exception
-        
-    user = session.exec(select(User).where(User.username == token_data.username)).first()
-    if user is None:
-        print(f"DEBUG: Token validation failed - User '{token_data.username}' not found in DB")
-        raise credentials_exception
-    print(f"DEBUG: Token validated for user: {user.username} (Role: {user.role})")
+
     return user
 
-async def get_current_active_user(current_user: User = Depends(get_current_user)):
+
+async def get_current_active_user(current_user: User = Depends(get_current_user)) -> User:
     if not current_user.is_active:
-        print(f"DEBUG: Active check failed for user: {current_user.username}")
         raise HTTPException(status_code=400, detail="Inactive user")
     return current_user
 
-class RoleChecker:
-    def __init__(self, allowed_roles: List[str]):
-        self.allowed_roles = allowed_roles
 
-    def __call__(self, user: User = Depends(get_current_active_user)):
-        if user.role not in self.allowed_roles:
-            print(f"DEBUG: Role check failed. User role: {user.role}, Allowed: {self.allowed_roles}")
+class PermissionChecker:
+    def __init__(self, permission_key: str):
+        self.permission_key = permission_key
+
+    def __call__(
+        self,
+        current_user: User = Depends(get_current_user),
+        session: Session = Depends(get_session),
+    ) -> User:
+        permissions = get_user_permission_keys(session, current_user.id)
+        if self.permission_key not in permissions:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail="Operation not permitted for your role"
+                detail="Permission denied",
             )
-        return user
+        return current_user
 
-# MFA Helpers
-def generate_mfa_secret():
+
+def generate_mfa_secret() -> str:
     return pyotp.random_base32()
 
-def verify_mfa_token(secret: str, token: str):
-    totp = pyotp.TOTP(secret)
-    return totp.verify(token)
 
-def get_mfa_provisioning_uri(username: str, secret: str):
-    return pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="Rio-CRM")
+def verify_mfa_token(secret: str, token: str) -> bool:
+    return pyotp.TOTP(secret).verify(token)
 
-def generate_mfa_qr_base64(uri: str):
-    img = qrcode.make(uri)
-    buffered = BytesIO()
-    img.save(buffered, format="PNG")
-    return base64.b64encode(buffered.getvalue()).decode()
+
+def get_mfa_provisioning_uri(username: str, secret: str) -> str:
+    return pyotp.totp.TOTP(secret).provisioning_uri(name=username, issuer_name="Rio CRM")
+
+
+def generate_mfa_qr_base64(uri: str) -> str:
+    image = qrcode.make(uri)
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return base64.b64encode(buffer.getvalue()).decode("utf-8")

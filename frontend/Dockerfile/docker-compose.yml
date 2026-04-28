@@ -1,0 +1,4 @@
+services:
+  api:
+    build: ./frontend
+    command: npm start

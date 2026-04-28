@@ -1,590 +1,741 @@
-import os
+from __future__ import annotations
+
 import logging
-from fastmcp import FastMCP
-from sqlalchemy import create_engine, text
-from sqlalchemy.orm import sessionmaker
-from dotenv import load_dotenv
-from sqlmodel import select
-from models.models import Lead, Interaction, Product, Appointment, LatencyLog, Outcome
-from rag_service import search_products, sync_products_to_chroma
+from typing import Any
 
-load_dotenv()
+try:
+    from fastmcp import FastMCP
+    _FASTMCP_AVAILABLE = True
+except ImportError:
+    FastMCP = None
+    _FASTMCP_AVAILABLE = False
 
-# Logger
+from sqlmodel import Session, select
+
+from database import engine
+from models.models import Appointment, Interaction, Lead, Product, User
+from services.agent.agent_tool_service import (
+    book_demo as service_book_demo,
+    book_meeting as service_book_meeting,
+    check_guardrails as service_check_guardrails,
+    check_icp_qualification as service_check_icp_qualification,
+    get_call_latency_summary as service_get_call_latency_summary,
+    get_google_auth_url as service_get_google_auth_url,
+    get_or_create_lead as service_get_or_create_lead,
+    get_product_info as service_get_product_info,
+    send_communication as service_send_communication,
+    submit_google_auth_code as service_submit_google_auth_code,
+    sync_product_catalog as service_sync_product_catalog,
+)
+
 logger = logging.getLogger(__name__)
 
-# MCP Server
-mcp = FastMCP("Rio CRM Navigator")
+if _FASTMCP_AVAILABLE:
+    mcp = FastMCP("Rio CRM Navigator")
+else:
+    mcp = None  # type: ignore[assignment]
 
-# Database Setup
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:1234@localhost/calls")
-engine = create_engine(DATABASE_URL)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
-# Import email service for MCP tool use
-try:
-    from email_service import send_smtp_email, get_styled_html
-    EMAIL_SERVICE_AVAILABLE = True
-except ImportError:
-    EMAIL_SERVICE_AVAILABLE = False
-    logger.warning("Email service not available - book_meeting will skip email sending")
+def _resolve_user_context(session: Session, user_id: int | None) -> tuple[int | None, int | None]:
+    if not user_id:
+        return None, None
+    user = session.get(User, user_id)
+    if not user:
+        return None, None
+    return user.company_id, user.id
 
-# Import Google Calendar service for Meet link generation
-try:
-    from google_calendar_service import create_google_meet_for_booking
-    GOOGLE_CALENDAR_AVAILABLE = True
-except ImportError:
-    GOOGLE_CALENDAR_AVAILABLE = False
-    logger.warning("Google Calendar service not available - Meet links will not be generated")
 
-@mcp.resource("crm://leads/summary")
-def get_leads_summary():
-    """Returns a summary of all leads in the system."""
-    with SessionLocal() as session:
-        result = session.execute(text("SELECT id, name, phone, status, enrichment_status FROM lead"))
-        leads = [dict(row._mapping) for row in result]
-        return leads
-
-@mcp.resource("crm://inventory")
-def get_inventory():
-    """Returns the current product inventory and stock levels."""
-    with SessionLocal() as session:
-        result = session.execute(text("SELECT name, stock, price, note FROM product"))
-        products = [dict(row._mapping) for row in result]
-        return products
-
-@mcp.resource("crm://interactions/{lead_id}")
-def get_lead_interactions(lead_id: int):
-    """Returns the recent call and email history for a specific lead."""
-    with SessionLocal() as session:
-        result = session.execute(text("SELECT type, content, timestamp FROM interaction WHERE lead_id = :lid ORDER BY timestamp DESC LIMIT 10"), {"lid": lead_id})
-        interactions = [dict(row._mapping) for row in result]
-        return interactions
-
-@mcp.resource("crm://appointments")
-def get_appointments():
-    """Returns all scheduled demos and meetings."""
-    with SessionLocal() as session:
-        result = session.execute(text("SELECT a.appointment_time, l.name as lead_name, a.status FROM appointment a JOIN lead l ON a.lead_id = l.id"))
-        appts = [dict(row._mapping) for row in result]
-        return appts
-
-@mcp.tool()
-def get_or_create_lead(name: str, phone: str, email: str = None) -> dict:
-    """
-    Looks up a lead by phone number or creates a new one if not found. 
-    Use this towards the end of a conversation (e.g., when close to booking or finishing) 
-    to identify the user. Avoid calling this at the very start of the call.
-    """
-    logger.info(f"[get_or_create_lead] Searching for phone: {phone}")
-    with SessionLocal() as session:
-        # Use ORM select for better compatibility with AuditMixin
-        statement = select(Lead).where(Lead.phone == phone)
-        lead = session.execute(statement).scalar_one_or_none()
-        
-        if not lead:
-            logger.info(f"[get_or_create_lead] Creating new lead: {name}")
-            lead = Lead(name=name, phone=phone, email=email, status="New")
-            session.add(lead)
-            session.commit()
-            session.refresh(lead)
-            return {"lead_id": lead.id, "name": lead.name, "status": "New", "message": "New lead created successfully."}
-        
-        logger.info(f"[get_or_create_lead] Existing lead found: {lead.name} (ID: {lead.id})")
-        return {
-            "lead_id": lead.id,
-            "name": lead.name,
-            "phone": lead.phone,
-            "email": lead.email,
-            "message": "Existing lead identified."
-        }
-
-@mcp.tool()
-def smart_search(query: str):
-    """
-    Search for a lead or product across the CRM using a flexible query.
-    """
-    with SessionLocal() as session:
-        # Search leads
-        lead_res = session.execute(text("SELECT id, name, phone FROM lead WHERE name ILIKE :q OR phone ILIKE :q"), {"q": f"%{query}%"})
-        leads = [dict(row._mapping) for row in lead_res]
-        
-        # Search products
-        prod_res = session.execute(text("SELECT name, price FROM product WHERE name ILIKE :q"), {"q": f"%{query}%"})
-        prods = [dict(row._mapping) for row in prod_res]
-        
-        return {"leads": leads, "products": prods}
-    
-@mcp.tool()
-def check_icp_qualification(company_size: str, industry: str, employees: int = 0) -> dict:
-    """
-    Check if lead meets Rio's Ideal Customer Profile (ICP).
-    ICP Criteria:
-    - Company size: Enterprise (1000+), Mid-Market (100-999), SMB (10-99)
-    - Industries: Tech, Healthcare, Finance, Retail, Manufacturing, SaaS
-    - Min employees: 10
-    
-    Returns: {"is_qualified": bool, "reason": str, "priority": "high"|"medium"|"low"}
-    """
-    qualified_industries = ["Tech", "Healthcare", "Finance", "Retail", "Manufacturing", "SaaS"]
-    
-    reasons = []
-    is_qualified = True
-    priority = "low"
-    
-    # Check industry
-    if industry.lower() in [ind.lower() for ind in qualified_industries]:
-        reasons.append(f"✓ Industry '{industry}' is target market")
-    else:
-        reasons.append(f"✗ Industry '{industry}' not in target markets")
-        is_qualified = False
-    
-    # Check company size
-    size_map = {
-        "enterprise": {"min": 1000, "priority": "high"},
-        "mid-market": {"min": 100, "priority": "high"},
-        "smb": {"min": 10, "priority": "medium"}
-    }
-    
-    size_key = company_size.lower()
-    if size_key in size_map:
-        if employees >= size_map[size_key]["min"]:
-            reasons.append(f"✓ Company size '{company_size}' matches profile")
-            priority = size_map[size_key]["priority"]
-        else:
-            reasons.append(f"✗ Company size below minimum ({employees} < {size_map[size_key]['min']})")
-            is_qualified = False
-    else:
-        reasons.append(f"? Unknown company size: {company_size}")
-    
-    return {
-        "is_qualified": is_qualified,
-        "reason": " | ".join(reasons),
-        "priority": priority
-    }
-
-@mcp.tool()
-def get_product_info(product_name: str) -> dict:
-    """
-    Get product information using semantic search.
-    Treats missing products as "temporarily unavailable".
-    
-    Returns: {"name": str, "price": str, "stock": int, "note": str, "status": str}
-    """
-    logger.info(f"[get_product_info] Semantic search for: {product_name}")
-    
-    # Perform semantic search in ChromaDB
-    semantic_results = search_products(product_name, n_results=1)
-    
-    if not semantic_results:
-        return {
-            "error": "Product not found in current catalog",
-            "status": "Unavailable",
-            "message": "This item is currently out of stock or not in our active catalog. Please continue the call."
-        }
-    
-    best_match_name = semantic_results[0]["name"]
-    logger.info(f"[get_product_info] Best semantic match: {best_match_name}")
-    
-    # Retrieve full details from Postgres for the best match
-    with SessionLocal() as session:
-        statement = select(Product).where(Product.name == best_match_name)
-        product = session.execute(statement).scalar_one_or_none()
-        
-        if not product:
-            return {
-                "error": "Product metadata mismatch",
-                "status": "Unavailable",
-                "message": "We found a match but couldn't retrieve details. Treated as unavailable."
+@mcp.resource("crm://leads/{user_id}")
+def get_leads_summary(user_id: int) -> list[dict[str, Any]]:
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        leads = session.exec(
+            select(Lead).where(Lead.company_id == company_id).order_by(Lead.created_at.desc())
+        ).all()
+        return [
+            {
+                "id": lead.id,
+                "name": lead.name,
+                "normalized_phone": lead.normalized_phone,
+                "status": lead.status,
+                "qualification_status": lead.qualification_status,
+                "next_action": lead.next_action,
             }
-        
-        return {
-            "name": product.name,
-            "price": product.price,
-            "stock": product.stock,
-            "note": product.note or "No additional notes",
-            "status": "Available" if product.stock > 0 else "Out of Stock",
-            "in_stock": product.stock > 0
-        }
+            for lead in leads[:100]
+        ]
+
+
+@mcp.resource("crm://inventory/{user_id}")
+def get_inventory(user_id: int) -> list[dict[str, Any]]:
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        products = session.exec(
+            select(Product).where(Product.company_id == company_id).order_by(Product.created_at.desc())
+        ).all()
+        return [
+            {
+                "id": product.id,
+                "name": product.name,
+                "sku": product.sku,
+                "stock": product.stock,
+                "price": str(product.price),
+                "currency": product.currency,
+                "note": product.note,
+            }
+            for product in products[:100]
+        ]
+
+
+@mcp.resource("crm://interactions/{user_id}/{lead_id}")
+def get_lead_interactions(user_id: int, lead_id: int) -> list[dict[str, Any]]:
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        interactions = session.exec(
+            select(Interaction).where(
+                Interaction.company_id == company_id,
+                Interaction.lead_id == lead_id,
+            ).order_by(Interaction.started_at.desc())
+        ).all()
+        return [
+            {
+                "id": item.id,
+                "type": item.type,
+                "channel": item.channel,
+                "direction": item.direction,
+                "content": item.content,
+                "status": item.status,
+                "started_at": item.started_at.isoformat() if item.started_at else None,
+            }
+            for item in interactions[:50]
+        ]
+
+
+@mcp.resource("crm://appointments/{user_id}")
+def get_appointments(user_id: int) -> list[dict[str, Any]]:
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        appointments = session.exec(
+            select(Appointment).where(Appointment.company_id == company_id).order_by(Appointment.appointment_time.desc())
+        ).all()
+        return [
+            {
+                "id": item.id,
+                "lead_id": item.lead_id,
+                "appointment_time": item.appointment_time.isoformat(),
+                "status": item.status,
+                "meeting_link": item.meeting_link,
+            }
+            for item in appointments[:100]
+        ]
+
 
 @mcp.tool()
-def sync_product_catalog() -> dict:
-    """Manual trigger to sync Postgres products with ChromaDB semantic index."""
-    with SessionLocal() as session:
-        products = session.execute(select(Product)).scalars().all()
-        sync_products_to_chroma(products)
-        return {"status": "success", "synced_count": len(products)}
+def check_icp_qualification(company_size: str, industry: str, employee_count: int = 0) -> dict[str, Any]:
+    return service_check_icp_qualification(company_size, industry, employee_count)
+
 
 @mcp.tool()
-def check_guardrails(requested_discount_percent: float, requested_price: float = None) -> dict:
-    """
-    Check if discount is within Rio's approved guardrails.
-    Guardrails:
-    - Max discount: 10% without manager approval
-    - If >10%: Requires manager (human) review
-    
-    Returns: {"approved": bool, "max_allowed_discount": float, "requires_manager": bool, "message": str}
-    """
-    MAX_AUTO_DISCOUNT = 10.0
-    
-    if requested_discount_percent <= MAX_AUTO_DISCOUNT:
-        return {
-            "approved": True,
-            "max_allowed_discount": MAX_AUTO_DISCOUNT,
-            "requires_manager": False,
-            "message": f"✓ Discount of {requested_discount_percent}% is within auto-approved limits"
-        }
-    else:
-        return {
-            "approved": False,
-            "max_allowed_discount": MAX_AUTO_DISCOUNT,
-            "requires_manager": True,
-            "message": f"✗ Discount of {requested_discount_percent}% exceeds limit. Requires manager approval. Auto-approved max: {MAX_AUTO_DISCOUNT}%"
-        }
+def get_product_info(product_name: str, user_id: int) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        return service_get_product_info(session, company_id, product_name)
+
 
 @mcp.tool()
-def send_email(phone: str, email: str, subject: str, body: str) -> dict:
-    """
-    Sends an email to a lead and logs it in the interaction history.
-    Args:
-    - phone: The lead's phone number to link the interaction.
-    - email: The email address (captured during call).
-    - subject: Email subject.
-    - body: Email content (markdown or plain text).
-    """
-    logger.info(f"[send_email] Sending to {email} for phone {phone}")
-    with SessionLocal() as session:
-        # 1. Fetch lead
-        statement = select(Lead).where(Lead.phone == phone)
-        lead = session.execute(statement).scalar_one_or_none()
-        
-        # Priority: provided email > DB email
-        target_email = email or (lead.email if lead else None)
-        if not target_email:
-            return {"success": False, "message": "No email address available. Please ask user for email."}
+def check_guardrails(requested_discount_percent: float) -> dict[str, Any]:
+    return service_check_guardrails(requested_discount_percent)
 
-        # 2. Update lead email if new
-        if lead and email and lead.email != email:
-            lead.email = email
-            lead.notes = (lead.notes or "") + f"\n[AI]: Captured email address: {email}"
-            session.add(lead)
-            session.commit()
-
-        # 3. Send Email
-        html_content = get_styled_html(subject, body, lead.name if lead else "Valued Customer")
-        success = send_smtp_email(target_email, subject, body, html_body=html_content)
-
-        if success:
-            # 4. Log Interaction
-            interaction = Interaction(
-                lead_id=lead.id if lead else 0,
-                type="Email",
-                content=f"Sent Email: {subject}",
-                timestamp=datetime.now(timezone.utc)
-            )
-            session.add(interaction)
-
-            # 5. Track Outcome (Stage: Interest)
-            outcome = Outcome(
-                lead_id=lead.id if lead else 0,
-                type="EMAIL_SENT",
-                stage="Interest",
-                potential_value=1200.0,
-                probability=0.05 
-            )
-            session.add(outcome)
-            session.commit()
-            return {"success": True, "message": f"Email '{subject}' sent to {target_email} and logged."}
-        else:
-            return {"success": False, "message": "SMTP failure. Check environmental variables."}
 
 @mcp.tool()
-def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", lead_email: str = None) -> dict:
+def get_or_create_lead(name: str, phone: str, user_id: int, email: str | None = None) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        return service_get_or_create_lead(session, company_id, actor_user_id, name, phone, email)
+
+
+@mcp.tool()
+async def book_meeting(
+    lead_id: int,
+    proposed_time: str,
+    user_id: int,
+    meeting_type: str = "demo",
+    lead_email: str | None = None,
+) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        return await service_book_meeting(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            lead_id=lead_id,
+            proposed_time=proposed_time,
+            meeting_type=meeting_type,
+            lead_email=lead_email,
+        )
+
+
+@mcp.tool()
+async def book_demo(
+    lead_id: int,
+    name: str,
+    phone: str,
+    demo_date: str,
+    products: str,
+    user_id: int,
+    demo_type: str = "Offline",
+    city: str | None = None,
+    state: str | None = None,
+    pincode: str | None = None,
+    email: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        return await service_book_demo(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            lead_id=lead_id,
+            name=name,
+            phone=phone,
+            demo_date=demo_date,
+            products=products,
+            demo_type=demo_type,
+            city=city,
+            state=state,
+            pincode=pincode,
+            email=email,
+            notes=notes,
+        )
+
+
+@mcp.tool()
+def send_communication(
+    lead_id: int,
+    channels: list[str],
+    content: str,
+    user_id: int,
+    subject: str | None = None,
+    email: str | None = None,
+    phone: str | None = None,
+) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        return service_send_communication(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            lead_id=lead_id,
+            channels=channels,
+            content=content,
+            subject=subject,
+            email=email,
+            phone=phone,
+        )
+
+
+@mcp.tool()
+def sync_product_catalog(user_id: int) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        return service_sync_product_catalog(session, company_id)
+
+
+@mcp.tool()
+def get_call_latency_summary(interaction_id: int) -> dict[str, Any]:
+    return service_get_call_latency_summary(interaction_id)
+
+
+@mcp.tool()
+def get_google_auth_url(user_id: int) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        return service_get_google_auth_url(session, company_id, actor_user_id)
+
+
+@mcp.tool()
+def submit_google_auth_code(user_id: int, code: str) -> dict[str, Any]:
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        return service_submit_google_auth_code(session, company_id, actor_user_id, code)
+
+
+# Expanded resources, agent tools, and SSE transport
+
+@mcp.resource("crm://knowledge/{user_id}/{collection}")
+def get_knowledge_collection(user_id: int, collection: str) -> list[dict[str, Any]]:
+    """List knowledge base documents in a given collection for this company.
+
+    Valid collections: products, objections, competitors, playbooks,
+    coaching, sops, transcripts, or 'all' for every collection.
     """
-    Book a meeting/demo for a qualified lead with Google Meet link.
-    This MCP tool is self-contained - it handles all side effects internally:
-    
-    ACTIONS PERFORMED:
-    1. Database: Fetch lead (or create if missing email)
-    2. Google Calendar: Create event with Google Meet link
-    3. Email: Send calendar invite with Meet link to lead
-    4. Database: Create appointment record
-    5. Logging: Track all operations
-    
-    Args:
-    - lead_id (required): Database ID of the lead
-    - proposed_time (required): Meeting time (natural language or ISO format)
-    - meeting_type: "demo", "consultation", "follow-up", "discovery"
-    - lead_email (optional): If provided and lead has no email, will update lead record
-    
-    Returns: {
-        "confirmed": bool,
-        "appointment_id": int,
-        "lead_name": str,
-        "lead_email": str,
-        "google_meet_link": str,
-        "calendar_url": str,
-        "email_sent": bool,
-        "needs_email": bool,
-        "message": str
-    }
-    """
-    logger.info(f"[book_meeting] Starting: lead_id={lead_id}, time={proposed_time}, type={meeting_type}")
-    
-    with SessionLocal() as session:
+    with Session(engine) as session:
+        from models.models import KnowledgeDocument
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        q = select(KnowledgeDocument).where(
+            KnowledgeDocument.company_id == company_id,
+            KnowledgeDocument.is_active == True,  # noqa: E712
+        )
+        if collection != "all":
+            q = q.where(KnowledgeDocument.collection == collection)
+        docs = session.exec(q.limit(200)).all()
+        return [
+            {"id": d.id, "collection": d.collection, "title": d.title,
+             "tags": d.tags, "last_indexed_at": str(d.last_indexed_at)}
+            for d in docs
+        ]
+
+
+@mcp.resource("crm://pipeline/{user_id}")
+def get_pipeline(user_id: int) -> dict[str, Any]:
+    """Return lead counts at each ISM stage (funnel view)."""
+    from sqlalchemy import func
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {}
+        rows = session.exec(
+            select(Lead.ism_stage, func.count(Lead.id).label("count"))
+            .where(Lead.company_id == company_id)
+            .group_by(Lead.ism_stage)
+        ).all()
+        return {r[0] or "unknown": r[1] for r in rows}
+
+
+@mcp.resource("crm://analytics/{user_id}")
+def get_analytics_summary(user_id: int) -> dict[str, Any]:
+    """Return a 30-day engagement summary (calls, emails, opens, replies)."""
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {}
         try:
-            # STEP 1: Fetch lead info from database
-            lead_result = session.execute(
-                text("SELECT id, name, email FROM lead WHERE id = :lid"),
-                {"lid": lead_id}
-            )
-            lead = lead_result.first()
-            
-            if not lead:
-                error_msg = f"Lead with ID {lead_id} not found"
-                logger.error(f"[book_meeting] {error_msg}")
-                return {"confirmed": False, "error": error_msg, "needs_email": False}
-            
-            lead_dict = dict(lead._mapping)
-            logger.info(f"[book_meeting] Lead found: {lead_dict['name']}")
-            
-            # STEP 1B: Handle missing email
-            if not lead_dict.get("email"):
-                if not lead_email:
-                    # Email missing and not provided - need to ask Rio to collect it
-                    logger.warning(f"[book_meeting] Lead {lead_id} has no email. Requesting from Rio...")
-                    return {
-                        "confirmed": False,
-                        "needs_email": True,
-                        "lead_id": lead_id,
-                        "lead_name": lead_dict["name"],
-                        "message": f"⚠️ {lead_dict['name']} doesn't have an email on file. Please ask them for their email address so we can send the meeting confirmation."
-                    }
-                else:
-                    # Email provided by Rio - update the lead record
-                    logger.info(f"[book_meeting] Updating email for lead {lead_id}: {lead_email}")
-                    session.execute(
-                        text("UPDATE lead SET email = :email WHERE id = :lid"),
-                        {"email": lead_email, "lid": lead_id}
-                    )
-                    session.commit()
-                    lead_dict["email"] = lead_email
-                    logger.info(f"[book_meeting] Email updated successfully")
-            
-            # STEP 2: Create Google Meet link
-            google_meet_link = None
-            calendar_url = None
-            
-            if GOOGLE_CALENDAR_AVAILABLE and lead_dict.get("email"):
-                try:
-                    meet_result = create_google_meet_for_booking(
-                        lead_name=lead_dict["name"],
-                        lead_email=lead_dict["email"],
-                        proposed_time=proposed_time,
-                        meeting_type=meeting_type
-                    )
-                    
-                    if meet_result.get("success"):
-                        google_meet_link = meet_result.get("google_meet_link")
-                        calendar_url = meet_result.get("calendar_link")
-                        logger.info(f"[book_meeting] Google Meet link created: {google_meet_link}")
-                    else:
-                        logger.warning(f"[book_meeting] Google Meet creation failed: {meet_result.get('error')}")
-                
-                except Exception as e:
-                    logger.warning(f"[book_meeting] Google Meet error: {e}")
-            else:
-                if not GOOGLE_CALENDAR_AVAILABLE:
-                    logger.warning("[book_meeting] Google Calendar not available - Meet link will not be generated")
-                elif not lead_dict.get("email"):
-                    logger.warning("[book_meeting] Cannot create Meet link without email")
-            
-            # STEP 3: Create appointment record in database
-            appointment_insert = text("""
-                INSERT INTO appointment (lead_id, appointment_time, status, google_meet_link)
-                VALUES (:lid, :atime, :status, :meet_link)
-                RETURNING id
-            """)
-            
-            result = session.execute(
-                appointment_insert,
-                {
-                    "lid": lead_id,
-                    "atime": proposed_time,
-                    "status": "scheduled",
-                    "meet_link": google_meet_link
-                }
-            )
-            session.commit()
-            appointment_id = result.scalar()
-            logger.info(f"[book_meeting] Appointment created: ID={appointment_id}")
-            
-            # STEP 4: Send email with calendar invite and Meet link
-            email_sent = False
-            email_error = None
-            
-            if EMAIL_SERVICE_AVAILABLE and lead_dict.get("email"):
-                try:
-                    email_subject = f"Your {meeting_type.title()} Meeting is Confirmed - Rio Sales Assistant"
-                    
-                    # Build email body with Google Meet link if available
-                    meet_section = ""
-                    if google_meet_link:
-                        meet_section = f"""
-                        <div style="background-color: #e8f5e9; padding: 20px; border-radius: 5px; margin: 20px 0; border-left: 4px solid #27ae60;">
-                            <h3 style="color: #27ae60; margin-top: 0;">📞 Join on Google Meet</h3>
-                            <p style="margin: 10px 0;">
-                                <a href="{google_meet_link}" 
-                                   style="display: inline-block; background-color: #4285f4; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold; font-size: 16px;">
-                                    Join Google Meet
-                                </a>
-                            </p>
-                            <p style="color: #666; font-size: 12px; margin: 10px 0 0 0;">
-                                📌 This is an automated Google Meet link. You can join directly from this email.
-                            </p>
-                        </div>
-                        """
-                    
-                    email_body = f"""
-                    <html>
-                    <body style="font-family: Arial, sans-serif;">
-                    <div style="max-width: 600px; margin: 0 auto;">
-                        <h2 style="color: #2c3e50; border-bottom: 3px solid #27ae60; padding-bottom: 10px;">
-                            {meeting_type.title()} Confirmed!
-                        </h2>
-                        
-                        <p>Hi <strong>{lead_dict['name']}</strong>,</p>
-                        
-                        <p>Great news! Your {meeting_type} has been scheduled successfully.</p>
-                        
-                        <div style="background-color: #f8f9fa; padding: 20px; border-radius: 5px; margin: 20px 0;">
-                            <h3 style="color: #27ae60; margin-top: 0;">📅 Meeting Details:</h3>
-                            <ul style="list-style: none; padding: 0;">
-                                <li style="padding: 8px 0;"><strong>Type:</strong> {meeting_type.title()}</li>
-                                <li style="padding: 8px 0;"><strong>Time:</strong> {proposed_time}</li>
-                                <li style="padding: 8px 0;"><strong>Confirmation ID:</strong> #{appointment_id}</li>
-                            </ul>
-                        </div>
-                        
-                        {meet_section}
-                        
-                        <p>
-                            <a href="https://rio-crm.example.com/appointment/{appointment_id}" 
-                               style="display: inline-block; background-color: #27ae60; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; font-weight: bold;">
-                                View Full Meeting Details
-                            </a>
-                        </p>
-                        
-                        <p>If you need to reschedule or have any questions, please reply to this email or contact us directly.</p>
-                        
-                        <p>Looking forward to our conversation!</p>
-                        
-                        <div style="border-top: 1px solid #ecf0f1; padding-top: 20px; margin-top: 30px; color: #7f8c8d; font-size: 12px;">
-                            <p>
-                            <strong>Rio</strong> - Your AI Sales Assistant<br/>
-                            Powered by Advanced Conversational AI<br/>
-                            </p>
-                        </div>
-                    </div>
-                    </body>
-                    </html>
-                    """
-                    
-                    send_smtp_email(
-                        to_email=lead_dict["email"],
-                        subject=email_subject,
-                        body=email_body
-                    )
-                    email_sent = True
-                    logger.info(f"[book_meeting] Email sent to {lead_dict['email']}")
-                    
-                    # Log Interaction for the Confirmation Email
-                    interaction = Interaction(
-                        lead_id=lead_id,
-                        type="Email",
-                        content=f"Sent Email: {email_subject}",
-                        timestamp=datetime.now(timezone.utc)
-                    )
-                    session.add(interaction)
-                    session.commit()
-                    
-                except Exception as e:
-                    email_error = str(e)
-                    logger.error(f"[book_meeting] Email failed: {email_error}", exc_info=True)
-            else:
-                if not EMAIL_SERVICE_AVAILABLE:
-                    logger.warning("[book_meeting] Email service not available - skipping email")
-                if not lead_dict.get("email"):
-                    logger.warning(f"[book_meeting] No email address for lead {lead_id}")
-            
-            # STEP 5: Return success response
-            crm_calendar_url = f"https://rio-crm.example.com/appointment/{appointment_id}"
-            
-            return {
-                "confirmed": True,
-                "appointment_id": appointment_id,
-                "lead_name": lead_dict["name"],
-                "lead_email": lead_dict["email"],
-                "google_meet_link": google_meet_link,
-                "calendar_url": calendar_url or crm_calendar_url,
-                "email_sent": email_sent,
-                "meeting_type": meeting_type,
-                "proposed_time": proposed_time,
-                "needs_email": False,
-                "message": f"✅ {meeting_type.title()} confirmed for {lead_dict['name']} on {proposed_time}" + 
-                          (f" | Meet: {google_meet_link[:50]}..." if google_meet_link else "") +
-                          (f" | Invite sent to {lead_dict['email']}" if email_sent else " (email not sent)")
-            }
-            
-        except Exception as e:
-            error_msg = f"Failed to book meeting: {str(e)}"
-            logger.error(f"[book_meeting] {error_msg}", exc_info=True)
-            return {
-                "confirmed": False,
-                "error": error_msg,
-                "email_sent": False
-            }
+            from services.analytics.analytics_service import get_engagement_summary
+            return get_engagement_summary(session=session, company_id=company_id, days=30)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+
+@mcp.resource("crm://quotes/{user_id}/{lead_id}")
+def get_lead_quotes(user_id: int, lead_id: int) -> list[dict[str, Any]]:
+    """Return all quotes for a lead."""
+    with Session(engine) as session:
+        from models.models import Quote, QuoteItem
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        quotes = session.exec(
+            select(Quote).where(
+                Quote.company_id == company_id, Quote.lead_id == lead_id
+            ).order_by(Quote.created_at.desc())
+        ).all()
+        result = []
+        for q in quotes:
+            items = session.exec(select(QuoteItem).where(QuoteItem.quote_id == q.id)).all()
+            result.append({
+                "id": q.id, "status": q.status, "valid_days": q.valid_days,
+                "notes": q.notes, "created_at": str(q.created_at),
+                "items": [{"product_id": i.product_id, "qty": i.quantity, "price": str(i.unit_price)}
+                          for i in items],
+            })
+        return result
+
+
+@mcp.resource("crm://campaigns/{user_id}")
+def get_campaigns_resource(user_id: int) -> list[dict[str, Any]]:
+    """Return all active campaigns for this company."""
+    with Session(engine) as session:
+        from models.models import Campaign
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return []
+        campaigns = session.exec(
+            select(Campaign).where(Campaign.company_id == company_id)
+            .order_by(Campaign.created_at.desc()).limit(100)
+        ).all()
+        return [{"id": c.id, "name": c.name, "status": c.status,
+                 "created_at": str(c.created_at)} for c in campaigns]
+
 
 @mcp.tool()
-def get_call_latency_summary(interaction_id: int) -> str:
-    """Retrieves a detailed latency breakdown for a specific call/interaction to identify bottlenecks."""
+def search_knowledge_base(
+    query: str,
+    user_id: int,
+    collection: str = "all",
+    n_results: int = 5,
+) -> dict[str, Any]:
+    """Search the company knowledge base using hybrid RAG (vector + BM25 + rerank).
+
+    Args:
+        query: Natural-language search query.
+        user_id: Authenticated user ID (resolves company).
+        collection: KB collection or 'all'. Options: products, objections,
+                    competitors, playbooks, coaching, sops, transcripts.
+        n_results: Max results to return (default 5).
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
     try:
-        with SessionLocal() as session:
-            result = session.execute(
-                text("SELECT stt_ms, llm_ms, tts_ms, stt_provider, llm_model, tts_provider FROM latencylog WHERE interaction_id = :lid"),
-                {"lid": interaction_id}
-            )
-            logs = [dict(row._mapping) for row in result]
-            if not logs:
-                return f"No latency data found for interaction {interaction_id}."
-            
-            total_stt = sum(l["stt_ms"] for l in logs)
-            total_llm = sum(l["llm_ms"] for l in logs)
-            total_tts = sum(l["tts_ms"] for l in logs)
-            count = len(logs)
-            
-            # Get unique providers/models for this call
-            stt_provs = ", ".join(set(filter(None, [l.get("stt_provider") for l in logs])))
-            llm_models = ", ".join(set(filter(None, [l.get("llm_model") for l in logs])))
-            tts_provs = ", ".join(set(filter(None, [l.get("tts_provider") for l in logs])))
-            
-            summary = [
-                f"📊 Detailed Latency Summary for Call {interaction_id} ({count} turns):",
-                f"- **STT Provider(s)**: {stt_provs}",
-                f"- **LLM Model(s)**: {llm_models}",
-                f"- **TTS Provider(s)**: {tts_provs}",
-                "",
-                f"- Avg STT (Listening): {total_stt/count:.1f}ms",
-                f"- Avg LLM (Thinking): {total_llm/count:.1f}ms",
-                f"- Avg TTS (Speaking First-Byte): {total_tts/count:.1f}ms",
-                f"- **Avg Turn Response Time**: {(total_stt+total_llm+total_tts)/count:.1f}ms",
-                "\nRecommendations:",
-                "1. If LLM is >1500ms, consider using a faster model (e.g., mistral-small)." if total_llm/count > 1500 else "LLM performance is good.",
-                "2. If TTS is >800ms, use Cartesia as it has the lowest latency." if total_tts/count > 800 else "TTS performance is good."
-            ]
-            return "\n".join(summary)
-    except Exception as e:
-        return f"Error retrieving latency summary: {e}"
+        from services.rag.query_engine import search as rag_search, format_for_prompt
+        results = rag_search(query, company_id=company_id, collection=collection, n_results=n_results)
+        return {"text": format_for_prompt(results), "chunks": len(results)}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def enrich_lead(lead_id: int, user_id: int) -> dict[str, Any]:
+    """Enrich a lead with Apollo.io data (company, title, LinkedIn, industry).
+
+    Args:
+        lead_id: ID of the lead to enrich.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        try:
+            from services.leads.demand_generation_service import enrich_lead_if_needed
+            enrich_lead_if_needed(session=session, company_id=company_id,
+                                  actor_user_id=actor_user_id, lead_id=lead_id)
+            return {"status": "enriched", "lead_id": lead_id}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+
+@mcp.tool()
+def score_lead(lead_id: int, user_id: int) -> dict[str, Any]:
+    """Compute and persist the ICP fit score for a lead (0.0 – 1.0).
+
+    Args:
+        lead_id: ID of the lead to score.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        try:
+            from services.leads.demand_generation_service import score_lead as _score
+            result = _score(session=session, company_id=company_id, lead_id=lead_id)
+            return result
+        except Exception as exc:
+            return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_ism_stage(lead_id: int, user_id: int) -> dict[str, Any]:
+    """Return the current ISM stage for a lead.
+
+    Args:
+        lead_id: ID of the lead.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        lead = session.get(Lead, lead_id)
+        if not lead or lead.company_id != company_id:
+            return {"error": f"Lead {lead_id} not found"}
+        return {"lead_id": lead_id, "ism_stage": lead.ism_stage or "new"}
+
+
+@mcp.tool()
+def advance_ism_stage(lead_id: int, user_id: int) -> dict[str, Any]:
+    """Run one ISM cycle: advance stage and dispatch the best outreach channel.
+
+    Args:
+        lead_id: ID of the lead.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        try:
+            from agents.ism_orchestrator import run_ism_cycle
+            result = run_ism_cycle(session=session, company_id=company_id,
+                                   lead_id=lead_id, actor_user_id=actor_user_id)
+            return result if isinstance(result, dict) else {"result": str(result)}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_pipeline_funnel(user_id: int) -> dict[str, Any]:
+    """Return lead counts at each ISM stage.
+
+    Args:
+        user_id: Authenticated user ID.
+    """
+    from sqlalchemy import func
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        rows = session.exec(
+            select(Lead.ism_stage, func.count(Lead.id).label("count"))
+            .where(Lead.company_id == company_id)
+            .group_by(Lead.ism_stage)
+        ).all()
+        return {r[0] or "unknown": r[1] for r in rows}
+
+
+@mcp.tool()
+def get_engagement_summary(user_id: int, days: int = 30) -> dict[str, Any]:
+    """Return engagement metrics for the last N days (calls, emails, opens, replies).
+
+    Args:
+        user_id: Authenticated user ID.
+        days: Lookback window in days (default 30).
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        try:
+            from services.analytics.analytics_service import get_engagement_summary as _get
+            return _get(session=session, company_id=company_id, days=days)
+        except Exception as exc:
+            return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_objection_rebuttal(objection: str, user_id: int) -> dict[str, Any]:
+    """Retrieve a proven rebuttal for an objection from the KB.
+
+    Args:
+        objection: The objection raised by the lead.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+    try:
+        from services.rag.query_engine import search as rag_search, format_for_prompt
+        results = rag_search(objection, company_id=company_id, collection="objections", n_results=3)
+        return {"rebuttal": format_for_prompt(results) or "No rebuttal found in KB."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_competitor_intel(competitor_name: str, user_id: int) -> dict[str, Any]:
+    """Pull competitor battle card from the KB.
+
+    Args:
+        competitor_name: Name of the competitor mentioned by the lead.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+    try:
+        from services.rag.query_engine import search as rag_search, format_for_prompt
+        results = rag_search(competitor_name, company_id=company_id, collection="competitors", n_results=3)
+        return {"intel": format_for_prompt(results) or f"No battle card found for {competitor_name}."}
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def update_lead_status(lead_id: int, new_status: str, user_id: int, notes: str = "") -> dict[str, Any]:
+    """Update a lead's CRM status.
+
+    Args:
+        lead_id: ID of the lead.
+        new_status: New status string (e.g. 'Demo Scheduled', 'Follow-up', 'Not Qualified').
+        user_id: Authenticated user ID.
+        notes: Optional notes to attach.
+    """
+    with Session(engine) as session:
+        company_id, _ = _resolve_user_context(session, user_id)
+        if not company_id:
+            return {"error": "User context not found"}
+        lead = session.get(Lead, lead_id)
+        if not lead or lead.company_id != company_id:
+            return {"error": f"Lead {lead_id} not found"}
+        lead.status = new_status
+        if notes:
+            lead.notes = f"{lead.notes or ''}\n{notes}".strip()
+        session.add(lead)
+        session.commit()
+        return {"lead_id": lead_id, "new_status": new_status}
+
+
+@mcp.tool()
+def enroll_in_campaign(lead_id: int, campaign_id: int, user_id: int) -> dict[str, Any]:
+    """Enroll a lead into a drip campaign.
+
+    Args:
+        lead_id: ID of the lead.
+        campaign_id: ID of the campaign.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        try:
+            from services.campaign.campaign_service import enroll_leads
+            result = enroll_leads(session=session, campaign_id=campaign_id,
+                                  lead_ids=[lead_id], company_id=company_id,
+                                  actor_user_id=actor_user_id)
+            return {"enrolled": True, "lead_id": lead_id, "campaign_id": campaign_id}
+        except Exception as exc:
+            return {"error": str(exc)}
+
+
+@mcp.tool()
+def create_quote_for_lead(
+    lead_id: int,
+    user_id: int,
+    items: list[dict[str, Any]],
+    notes: str = "",
+    valid_days: int = 30,
+) -> dict[str, Any]:
+    """Create a product quote for a lead.
+
+    Args:
+        lead_id: ID of the lead.
+        user_id: Authenticated user ID.
+        items: List of {product_id, quantity, unit_price} dicts.
+        notes: Optional notes on the quote.
+        valid_days: Days the quote is valid.
+    """
+    with Session(engine) as session:
+        from models.models import Quote, QuoteItem
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+        try:
+            quote = Quote(lead_id=lead_id, company_id=company_id, created_by=actor_user_id,
+                          notes=notes, valid_days=valid_days, status="draft")
+            session.add(quote)
+            session.flush()
+            for item in items:
+                session.add(QuoteItem(quote_id=quote.id, product_id=item.get("product_id"),
+                                      quantity=item.get("quantity", 1),
+                                      unit_price=item.get("unit_price", 0)))
+            session.commit()
+            return {"quote_id": quote.id, "lead_id": lead_id, "status": "draft", "items": len(items)}
+        except Exception as exc:
+            session.rollback()
+            return {"error": str(exc)}
+
+
+@mcp.tool()
+async def run_pre_call_workflow(lead_id: int, user_id: int) -> dict[str, Any]:
+    """Run the full pre-call enrichment workflow (KB search + lead research + ICP score).
+
+    Returns kb_context, lead_data, icp_score, interaction_history.
+
+    Args:
+        lead_id: ID of the lead being called.
+        user_id: Authenticated user ID.
+    """
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+    try:
+        from agents.orchestrator import run_pre_call
+        return await run_pre_call(lead_id=lead_id, company_id=company_id,
+                                  actor_user_id=actor_user_id)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+async def ask_rio(query: str, user_id: int, lead_id: int | None = None) -> dict[str, Any]:
+    """Ask Rio a freeform sales question. The supervisor routes to the right agent(s).
+
+    Examples:
+    - "What are the best objection rebuttals for pricing?"
+    - "How many deals are in negotiation this month?"
+    - "Prepare a briefing for lead 42 before my call"
+
+    Args:
+        query: Natural-language question or instruction.
+        user_id: Authenticated user ID.
+        lead_id: Optional lead ID for context.
+    """
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"error": "User context not found"}
+    try:
+        from agents.orchestrator import ask
+        return await ask(query=query, company_id=company_id,
+                         actor_user_id=actor_user_id, lead_id=lead_id)
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+# SSE Transport (mount on FastAPI at /mcp)
+
+def get_mcp_asgi_app():
+    """
+    Return an ASGI app for the MCP server with SSE transport.
+
+    Mount this on the FastAPI app at /mcp:
+        app.mount("/mcp", get_mcp_asgi_app())
+
+    Clients connect via:
+        SSE endpoint:     GET  /mcp/sse
+        Message endpoint: POST /mcp/messages
+    """
+    if not _FASTMCP_AVAILABLE or mcp is None:
+        logger.warning("[MCP] FastMCP not available — MCP server disabled.")
+        return None
+    
+    try:
+        return mcp.http_app(transport="sse")
+    except Exception:
+        pass
+    
+    for method_name in ("get_asgi_app", "streamable_http_app", "sse_app"):
+        try:
+            return getattr(mcp, method_name)()
+        except AttributeError:
+            continue
+    logger.warning("[MCP] Could not build SSE ASGI app — fastmcp API not found.")
+    return None
+
 
 if __name__ == "__main__":
-    mcp.run()
+    import sys
+    transport = sys.argv[1] if len(sys.argv) > 1 else "stdio"
+    mcp.run(transport=transport)

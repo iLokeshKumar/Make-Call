@@ -1,532 +1,416 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { useAuth } from "@/context/AuthContext";
-import { Upload, FileSpreadsheet, CheckCircle, AlertCircle, X, Phone, Trash2, Search, Sparkles, UserPlus, Plus, Mail, StickyNote } from "lucide-react";
+import Link from "next/link";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowUpRight, Download, Loader2, Mail, Phone, Plus, Search, Sparkles } from "lucide-react";
 
-interface Lead {
-    id: number;
-    name: string;
-    phone: string;
-    email?: string;
-    status: string;
-    source: string;
-    notes?: string;
-    enrichment_status?: string;
+import { useAuth } from "@/context/AuthContext";
+import ImportLeadsModal from "@/components/leads/ImportLeadsModal";
+
+import { apiFetch } from "@/utils/apiFetch";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+
+/** Strip system-appended log lines from lead notes before displaying. */
+function cleanNotes(notes: string | null | undefined): string {
+    if (!notes) return "";
+    const cleaned = notes
+        .split("\n")
+        .filter(line => !/^\[20\d\d-\d\d-\d\dT/.test(line.trim()))
+        .join("\n")
+        .trim();
+    return cleaned;
+}
+
+type Lead = {
+  id: number;
+  name: string;
+  normalized_phone: string;
+  email?: string | null;
+  status: string;
+  qualification_status?: string | null;
+  next_action?: string | null;
+  notes?: string | null;
+  source?: string | null;
+  created_at?: string;
+  city?: string | null;
+  state?: string | null;
+  lead_score?: number | null;
+  lead_score_reasons_json?: { reasons?: string[]; priority?: string } | string[] | null;
+  product_interest?: string | null;
+  last_outreach_at?: string | null;
+};
+
+const emptyLead = {
+  name: "",
+  normalized_phone: "",
+  email: "",
+  notes: "" };
+
+function humanize(value?: string | null) {
+  if (!value) return "None";
+  return value.replace(/_/g, " ").replace(/\b\w/g, (char) => char.toUpperCase());
+}
+
+function ScoreBadge({ score, reasons }: { score?: number | null; reasons?: string[] }) {
+  if (score == null) return null;
+  const pct = Math.round(score);
+  const color =
+    pct >= 70 ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+    : pct >= 40 ? "bg-amber-100 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300"
+    : "bg-slate-100 text-slate-600 dark:bg-slate-800 dark:text-slate-400";
+  const tooltip = reasons && reasons.length > 0
+    ? reasons.map((r) => r.replace(/_/g, " ")).join(" · ")
+    : undefined;
+  return (
+    <span
+      title={tooltip}
+      className={`rounded-full px-2.5 py-1 text-xs font-semibold cursor-default ${color} ${tooltip ? "underline decoration-dotted underline-offset-2" : ""}`}
+    >
+      ICP {pct}
+    </span>
+  );
+}
+
+function parseScoreReasons(raw?: { reasons?: string[]; priority?: string } | string[] | null): string[] {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw as string[];
+  return Array.isArray(raw.reasons) ? raw.reasons : [];
 }
 
 export default function LeadsPage() {
-    const [leads, setLeads] = useState<Lead[]>([]);
-    const { token } = useAuth();
-    const [loading, setLoading] = useState(true);
-    const [uploading, setUploading] = useState(false);
-    const [file, setFile] = useState<File | null>(null);
-    const [uploadResult, setUploadResult] = useState<{ message: string; errors: string[] } | null>(null);
-    const [searchQuery, setSearchQuery] = useState("");
-    const [manualLead, setManualLead] = useState({ name: "", phone: "", email: "", notes: "" });
-    const [isModalOpen, setIsModalOpen] = useState(false);
+  const { user, sessionTimeout } = useAuth();
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [leads, setLeads] = useState<Lead[]>([]);
+  const [query, setQuery] = useState("");
+  const [form, setForm] = useState(emptyLead);
+  const [message, setMessage] = useState<string | null>(null);
+  const [callInteractionId, setCallInteractionId] = useState<number | null>(null);
+  const [callStatus, setCallStatus] = useState<string | null>(null);
+  const [showImport, setShowImport] = useState(false);
 
-    const API_BASE = "http://localhost:6060";
+  const fetchLeads = useCallback(async () => {
+    if (!user) {
+      setLoading(false);
+      return;
+    }
 
-    const fetchLeads = async () => {
-        try {
-            const res = await fetch(`${API_BASE}/leads`, {
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                }
-            });
-            const data = await res.json();
-            setLeads(data);
-        } catch (error) {
-            console.error("Error fetching leads:", error);
-        } finally {
-            setLoading(false);
+    setLoading(true);
+    try {
+      const res = await apiFetch(`${API_BASE}/crm/leads?page=1&limit=100`, {
+      });
+
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
+
+      if (!res.ok) {
+        throw new Error("Failed to load leads");
+      }
+
+      const payload = await res.json();
+      setLeads(payload.items || []);
+    } catch (error) {
+      console.error(error);
+      setMessage("Unable to load leads right now.");
+    } finally {
+      setLoading(false);
+    }
+  }, [user, sessionTimeout]);
+
+  useEffect(() => {
+    fetchLeads();
+  }, [fetchLeads]);
+
+  const filteredLeads = useMemo(
+    () =>
+      leads.filter((lead) => {
+        const q = query.toLowerCase();
+        return (
+          lead.name.toLowerCase().includes(q) ||
+          lead.normalized_phone.includes(query) ||
+          (lead.email || "").toLowerCase().includes(q)
+        );
+      }),
+    [leads, query]
+  );
+
+  async function handleCreateLead(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!user || !form.name || !form.normalized_phone) return;
+
+    setSaving(true);
+    setMessage(null);
+
+    try {
+      const res = await apiFetch(`${API_BASE}/crm/leads`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json" },
+        body: JSON.stringify(form) });
+
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
+
+      const payload = await res.json();
+      if (!res.ok) {
+        throw new Error(payload.detail || "Failed to create lead");
+      }
+
+      setForm(emptyLead);
+      setMessage(`Lead ${payload.name} created successfully.`);
+      fetchLeads();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to create lead.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const CALL_STATUS_LABELS: Record<string, string> = {
+    initiated:    "Calling...",
+    ringing:      "Ringing...",
+    "in-progress":"In conversation",
+    completed:    "Call completed",
+    "no-answer":  "No answer",
+    busy:         "Line busy",
+    failed:       "Call failed",
+    canceled:     "Call canceled" };
+  const TERMINAL_STATUSES = new Set(["completed", "no-answer", "busy", "failed", "canceled"]);
+
+  useEffect(() => {
+    if (!callInteractionId ) return;
+    const interval = setInterval(async () => {
+      try {
+        const res = await apiFetch(`${API_BASE}/call-status?interaction_id=${callInteractionId}`, {
+        });
+        if (!res.ok) return;
+        const data = await res.json();
+        const label = CALL_STATUS_LABELS[data.call_status] ?? data.call_status;
+        setCallStatus(data.call_status);
+        setMessage(msg => {
+          // preserve non-call messages
+          if (!msg || CALL_STATUS_LABELS[callStatus ?? ""] || msg.startsWith("Calling")) return label;
+          return msg;
+        });
+        if (data.is_terminal) {
+          clearInterval(interval);
+          setTimeout(() => { setCallInteractionId(null); setCallStatus(null); }, 4000);
         }
-    };
+      } catch {  }
+    }, 2000);
+    return () => clearInterval(interval);
+  }, [callInteractionId, user]);
 
-    useEffect(() => {
-        fetchLeads();
-    }, []);
+  async function handleCall(lead: Lead) {
+    if (!user) return;
+    setCallInteractionId(null);
+    setCallStatus(null);
 
-    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files) {
-            setFile(e.target.files[0]);
-            setUploadResult(null);
+    try {
+      const res = await apiFetch(
+        `${API_BASE}/make-call?to=${encodeURIComponent(lead.normalized_phone)}&lead_id=${lead.id}`,
+        {
+          method: "POST"
         }
-    };
+      );
 
-    const handleUpload = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!file) return;
+      if (res.status === 401) {
+        sessionTimeout();
+        return;
+      }
 
-        setUploading(true);
-        const formData = new FormData();
-        formData.append("file", file);
+      if (!res.ok) throw new Error("Call could not be started");
+      const data = await res.json();
+      setMessage(`Calling ${lead.name} at ${lead.normalized_phone}...`);
+      if (data.interaction_id) setCallInteractionId(data.interaction_id);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Failed to start the call.");
+    }
+  }
 
-        try {
-            const res = await fetch(`${API_BASE}/leads/upload`, {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                },
-                body: formData,
-            });
-            const data = await res.json();
+  return (
+    <div className="space-y-6 pb-8">
+      {showImport && user && (
+        <ImportLeadsModal
+          onClose={() => setShowImport(false)}
+          onImported={() => { fetchLeads(); setShowImport(false); }}
+        />
+      )}
 
-            if (res.ok) {
-                setUploadResult({ message: data.message, errors: data.errors || [] });
-                fetchLeads();
-                setFile(null);
-            } else {
-                setUploadResult({ message: data.detail || "Upload failed", errors: [] });
-            }
-        } catch (error) {
-            console.error("Error uploading file:", error);
-            setUploadResult({ message: "Network error during upload", errors: [] });
-        } finally {
-            setUploading(false);
-        }
-    };
-
-    const handleCall = async (phone: string, id: number) => {
-        try {
-            await fetch(`${API_BASE}/make-call?to=${encodeURIComponent(phone)}&lead_id=${id}`, {
-                method: 'POST',
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                }
-            });
-            alert(`Initiating call to ${phone}...`);
-        } catch (e) {
-            alert("Failed to initiate call");
-        }
-    };
-
-    const handleOpenModal = () => {
-        setIsModalOpen(true);
-    };
-
-    // Keep existing delete functionality
-    const handleDeleteLead = async (id: number) => {
-        if (!confirm("Are you sure you want to delete this lead?")) return;
-        try {
-            const res = await fetch(`${API_BASE}/leads/${id}`, {
-                method: "DELETE",
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                }
-            });
-            if (res.ok) {
-                fetchLeads();
-            } else {
-                alert("Failed to delete lead");
-            }
-        } catch (error) {
-            console.error("Error deleting lead:", error);
-        }
-    };
-
-    const filteredLeads = leads.filter(lead =>
-        lead.name?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        lead.phone?.includes(searchQuery)
-    );
-
-    return (
-        <div className="space-y-6 pb-8">
-            {/* Header */}
-            <div className="flex items-center justify-between">
-                <div>
-                    <h1 className="text-4xl font-bold tracking-tight">
-                        <span className="gradient-text">Lead Management</span>
-                    </h1>
-                    <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
-                        Import and manage your sales leads.
-                    </p>
-                </div>
-                <button
-                    onClick={() => handleOpenModal()}
-                    className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-6 py-3 font-semibold text-white shadow-lg shadow-violet-500/50 hover:shadow-xl hover:scale-105 transition-all duration-300"
-                >
-                    <Plus className="h-5 w-5" />
-                    <span>Add Lead</span>
-                </button>
-            </div>
-
-            {/* Upload Section */}
-            <div className="rounded-2xl glass p-8 border border-white/40 dark:border-white/10 shadow-xl">
-                <div className="flex flex-col md:flex-row items-center gap-8">
-                    <div className="flex-1 space-y-4">
-                        <div className="flex items-center space-x-3">
-                            <div className="p-3 rounded-xl bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400">
-                                <FileSpreadsheet className="h-8 w-8" />
-                            </div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">Import Leads (Excel/CSV)</h2>
-                        </div>
-                        <p className="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                            Upload a <strong>.xlsx</strong> or <strong>.csv</strong> file to bulk import leads.
-                            <br />Ensure columns include: <code>Name</code>, <code>Phone</code>. Optional: <code>Email</code>, <code>Notes</code>.
-                        </p>
-                    </div>
-
-                    <div className="flex-1 w-full max-w-md">
-                        <form onSubmit={handleUpload} className="space-y-4">
-                            <div className="relative group">
-                                <input
-                                    type="file"
-                                    accept=".csv, .xlsx, .xls"
-                                    onChange={handleFileChange}
-                                    className="block w-full text-sm text-slate-500
-                                    file:mr-4 file:py-2.5 file:px-4
-                                    file:rounded-xl file:border-0
-                                    file:text-sm file:font-semibold
-                                    file:bg-violet-50 file:text-violet-700
-                                    hover:file:bg-violet-100
-                                    cursor-pointer border border-dashed border-slate-300 rounded-xl p-2
-                                    "
-                                />
-                            </div>
-
-                            {file && (
-                                <button
-                                    type="submit"
-                                    disabled={uploading}
-                                    className="w-full flex items-center justify-center space-x-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-3 font-semibold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                                >
-                                    {uploading ? (
-                                        <span className="animate-pulse">Uploading...</span>
-                                    ) : (
-                                        <>
-                                            <Upload className="h-5 w-5" />
-                                            <span>Start Import</span>
-                                        </>
-                                    )}
-                                </button>
-                            )}
-                        </form>
-                    </div>
-                </div>
-
-                {uploadResult && (
-                    <div className={`mt-6 p-4 rounded-xl flex items-start space-x-3 ${uploadResult.errors.length > 0 ? 'bg-yellow-50 text-yellow-800' : 'bg-green-50 text-green-800'}`}>
-                        {uploadResult.errors.length > 0 ? <AlertCircle className="h-5 w-5 mt-0.5" /> : <CheckCircle className="h-5 w-5 mt-0.5" />}
-                        <div>
-                            <p className="font-bold">{uploadResult.message}</p>
-                            {uploadResult.errors.length > 0 && (
-                                <ul className="mt-2 text-sm list-disc list-inside space-y-1">
-                                    {uploadResult.errors.map((err, i) => (
-                                        <li key={i}>{err}</li>
-                                    ))}
-                                </ul>
-                            )}
-                        </div>
-                    </div>
-                )}
-            </div>
-
-            {/* Apollo Section */}
-            <div className="rounded-2xl glass p-8 border border-white/40 dark:border-white/10 shadow-xl relative overflow-hidden mb-8">
-                <div className="absolute top-0 right-0 p-4 opacity-10">
-                    <Search className="w-32 h-32" />
-                </div>
-                <div className="flex flex-col md:flex-row items-center gap-8 relative z-10">
-                    <div className="flex-1 space-y-4">
-                        <div className="flex items-center space-x-3">
-                            <div className="p-3 rounded-xl bg-blue-100 dark:bg-blue-900/30 text-blue-600 dark:text-blue-400">
-                                <Search className="h-8 w-8" />
-                            </div>
-                            <h2 className="text-xl font-bold text-slate-900 dark:text-white">Automated Feed (Apollo.io)</h2>
-                        </div>
-                        <p className="text-slate-600 dark:text-slate-400 text-sm leading-relaxed">
-                            Connect to <strong>Apollo.io</strong> to verify and fetch potential leads automatically.
-                            <br />Enter target keywords (e.g., "Software Companies", "Hospitals") to populate your queue.
-                        </p>
-                    </div>
-
-                    <div className="flex-1 w-full max-w-md">
-                        <div className="space-y-4">
-                            <input
-                                type="text"
-                                placeholder="Target Industry or Keywords..."
-                                className="block w-full rounded-xl border-slate-300 p-3 text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500"
-                                id="apollo-search"
-                            />
-                            <button
-                                onClick={async () => {
-                                    const input = document.getElementById('apollo-search') as HTMLInputElement;
-                                    const keywords = input.value || "Technology";
-                                    const btn = document.getElementById('apollo-btn') as HTMLButtonElement;
-
-                                    if (btn) {
-                                        btn.disabled = true;
-                                        btn.innerText = "Fetching...";
-                                    }
-
-                                    try {
-                                        const res = await fetch(`${API_BASE}/leads/fetch-apollo`, {
-                                            method: 'POST',
-                                            headers: {
-                                                'Content-Type': 'application/json',
-                                                'Authorization': `Bearer ${token}`
-                                            },
-                                            body: JSON.stringify({ keywords })
-                                        });
-                                        const data = await res.json();
-                                        if (res.ok) {
-                                            alert(data.message);
-                                            fetchLeads();
-                                        } else {
-                                            alert("Error: " + data.detail);
-                                        }
-                                    } catch (e) {
-                                        alert("Connection Error");
-                                    } finally {
-                                        if (btn) {
-                                            btn.disabled = false;
-                                            btn.innerText = "Fetch from Apollo";
-                                        }
-                                    }
-                                }}
-                                id="apollo-btn"
-                                className="w-full flex items-center justify-center space-x-2 rounded-xl bg-gradient-to-r from-blue-600 to-cyan-600 px-4 py-3 font-semibold text-white shadow-lg hover:shadow-xl hover:scale-[1.02] transition-all disabled:opacity-50"
-                            >
-                                <Search className="h-5 w-5" />
-                                <span>Fetch from Apollo</span>
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            {/* Leads Table */}
-            <div className="rounded-2xl glass border border-white/40 dark:border-white/10 overflow-hidden">
-                <div className="px-6 py-4 border-b border-white/20 dark:border-white/10 bg-white/40 dark:bg-slate-800/40 flex justify-between items-center">
-                    <h3 className="font-bold text-lg text-slate-800 dark:text-slate-200">Lead Queue</h3>
-                    <div className="relative w-64">
-                        <div className="absolute inset-y-0 left-3 flex items-center pointer-events-none">
-                            <Search className="h-4 w-4 text-slate-400" />
-                        </div>
-                        <input
-                            type="text"
-                            placeholder="Search..."
-                            value={searchQuery}
-                            onChange={(e) => setSearchQuery(e.target.value)}
-                            className="w-full rounded-lg bg-white/50 border border-slate-200 pl-9 pr-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                        />
-                    </div>
-                </div>
-                <div className="overflow-x-auto">
-                    <table className="w-full text-left">
-                        <thead>
-                            <tr className="border-b border-white/20 dark:border-white/10 bg-white/40 dark:bg-slate-800/40">
-                                <th className="px-6 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Source</th>
-                                <th className="px-6 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Name</th>
-                                <th className="px-6 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Phone</th>
-                                <th className="px-6 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Status</th>
-                                <th className="px-6 py-4 text-sm font-bold text-slate-700 dark:text-slate-300 text-right">Action</th>
-                            </tr>
-                        </thead>
-                        <tbody className="divide-y divide-white/10 dark:divide-white/5">
-                            {loading ? (
-                                <tr><td colSpan={5} className="px-6 py-12 text-center text-slate-500">Loading leads...</td></tr>
-                            ) : filteredLeads.length === 0 ? (
-                                <tr><td colSpan={5} className="px-6 py-12 text-center text-slate-500">No leads found. Upload a file above.</td></tr>
-                            ) : (
-                                filteredLeads.map((lead) => (
-                                    <tr key={lead.id} className="hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors">
-                                        <td className="px-6 py-4">
-                                            <span className="inline-flex items-center rounded-md px-2 py-1 text-xs font-medium bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400 ring-1 ring-inset ring-slate-500/10">
-                                                {lead.source || "Manual"}
-                                            </span>
-                                        </td>
-                                        <td className="px-6 py-4 font-bold text-slate-900 dark:text-slate-100">
-                                            {lead.name}
-                                        </td>
-                                        <td className="px-6 py-4 font-mono text-slate-600 dark:text-slate-400">
-                                            {lead.phone}
-                                        </td>
-                                        <td className="px-6 py-4">
-                                            <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-bold ${lead.status === 'New'
-                                                ? 'bg-blue-50 text-blue-700 ring-blue-600/20'
-                                                : 'bg-green-50 text-green-700 ring-green-600/20'
-                                                }`}>
-                                                {lead.status}
-                                            </span>
-                                        </td>
-                                        <td className="px-6 py-4 text-right">
-                                            <div className="flex justify-end items-center space-x-2">
-                                                <button
-                                                    onClick={async () => {
-                                                        try {
-                                                            const res = await fetch(`${API_BASE}/leads/${lead.id}/enrich`, {
-                                                                method: 'POST',
-                                                                headers: {
-                                                                    "Authorization": `Bearer ${token}`
-                                                                }
-                                                            });
-                                                            if (res.ok) {
-                                                                alert("Successfully Enriched");
-                                                                fetchLeads();
-                                                            } else {
-                                                                alert("Enrichment failed");
-                                                            }
-                                                        } catch (e) {
-                                                            alert("Link Error");
-                                                        }
-                                                    }}
-                                                    title={lead.enrichment_status || "Not Enriched"}
-                                                    className={`inline-flex items-center space-x-1 px-3 py-1.5 rounded-lg text-sm font-semibold transition-all ${lead.enrichment_status && lead.enrichment_status !== 'Not Enriched'
-                                                        ? 'bg-amber-100 text-amber-700 hover:bg-amber-200'
-                                                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
-                                                        }`}
-                                                >
-                                                    <Sparkles className="h-3 w-3" />
-                                                    <span>Enrich</span>
-                                                </button>
-
-                                                <button
-                                                    onClick={() => handleCall(lead.phone, lead.id)}
-                                                    className="inline-flex items-center space-x-1 bg-violet-100 hover:bg-violet-200 text-violet-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors"
-                                                >
-                                                    <Phone className="h-3 w-3" />
-                                                    <span>Call</span>
-                                                </button>
-
-                                                <button
-                                                    onClick={() => handleDeleteLead(lead.id)}
-                                                    className="inline-flex items-center space-x-1 bg-rose-100 hover:bg-rose-200 text-rose-700 px-3 py-1.5 rounded-lg text-sm font-semibold transition-colors"
-                                                >
-                                                    <Trash2 className="h-3 w-3" />
-                                                    <span>Delete</span>
-                                                </button>
-                                            </div>
-                                        </td>
-                                    </tr>
-                                ))
-                            )}
-                        </tbody>
-                    </table>
-                </div>
-            </div>
-
-            {/* Modal Overlay */}
-            {isModalOpen && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-sm animate-in fade-in duration-200">
-                    <div className="w-full max-w-md bg-white dark:bg-slate-900 rounded-3xl shadow-2xl border border-white/20 overflow-hidden animate-in zoom-in-95 duration-200">
-                        <div className="p-6 border-b border-slate-100 dark:border-white/5 flex items-center justify-between bg-gradient-to-r from-violet-50 to-blue-50 dark:from-violet-900/20 dark:to-blue-900/20">
-                            <div className="flex items-center space-x-3">
-                                <div className="p-2.5 rounded-xl bg-violet-600 text-white shadow-lg shadow-violet-500/30">
-                                    <UserPlus className="h-5 w-5" />
-                                </div>
-                                <h2 className="text-xl font-bold">Add New Lead</h2>
-                            </div>
-                            <button
-                                onClick={() => setIsModalOpen(false)}
-                                className="p-2 hover:bg-white/50 dark:hover:bg-white/10 rounded-full transition-colors"
-                            >
-                                <X className="h-5 w-5" />
-                            </button>
-                        </div>
-
-                        <div className="p-6 space-y-6">
-                            <div className="space-y-4">
-                                <div className="space-y-2">
-                                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Lead Name</label>
-                                    <input
-                                        type="text"
-                                        placeholder="Enter full name"
-                                        className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 px-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all"
-                                        value={manualLead.name}
-                                        onChange={(e) => setManualLead({ ...manualLead, name: e.target.value })}
-                                    />
-                                </div>
-                                <div className="space-y-2">
-                                    <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Phone Number</label>
-                                    <div className="relative">
-                                        <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                                            <Phone className="h-4 w-4 text-slate-400" />
-                                        </div>
-                                        <input
-                                            type="text"
-                                            placeholder="+1234567890"
-                                            className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 pl-11 pr-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all"
-                                            value={manualLead.phone}
-                                            onChange={(e) => setManualLead({ ...manualLead, phone: e.target.value })}
-                                        />
-                                    </div>
-                                </div>
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Email Address</label>
-                                <div className="relative">
-                                    <div className="absolute inset-y-0 left-4 flex items-center pointer-events-none">
-                                        <Mail className="h-4 w-4 text-slate-400" />
-                                    </div>
-                                    <input
-                                        type="email"
-                                        placeholder="john@example.com"
-                                        className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 pl-11 pr-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all"
-                                        value={manualLead.email}
-                                        onChange={(e) => setManualLead({ ...manualLead, email: e.target.value })}
-                                    />
-                                </div>
-                            </div>
-
-                            <div className="space-y-2">
-                                <label className="text-sm font-bold text-slate-700 dark:text-slate-300 px-1">Notes</label>
-                                <div className="relative">
-                                    <div className="absolute top-4 left-4 flex items-center pointer-events-none">
-                                        <StickyNote className="h-4 w-4 text-slate-400" />
-                                    </div>
-                                    <textarea
-                                        placeholder="Add any relevant notes..."
-                                        rows={3}
-                                        className="w-full rounded-2xl border-slate-200 bg-slate-50 dark:bg-slate-800/50 dark:border-white/10 pl-11 pr-4 py-3.5 text-sm focus:ring-2 focus:ring-violet-500 focus:outline-none transition-all resize-none"
-                                        value={manualLead.notes}
-                                        onChange={(e) => setManualLead({ ...manualLead, notes: e.target.value })}
-                                    />
-                                </div>
-                            </div>
-                        </div>
-                        <div className="flex space-x-3 pt-2">
-                            <button
-                                onClick={() => setIsModalOpen(false)}
-                                className="flex-1 px-4 py-3.5 rounded-2xl font-bold text-slate-700 dark:text-slate-300 hover:bg-slate-100 dark:hover:bg-white/5 transition-colors"
-                            >
-                                Cancel
-                            </button>
-                            <button
-                                disabled={!manualLead.name || !manualLead.phone}
-                                onClick={async () => {
-                                    try {
-                                        const res = await fetch(`${API_BASE}/leads`, {
-                                            method: 'POST',
-                                            headers: {
-                                                'Content-Type': 'application/json',
-                                                'Authorization': `Bearer ${token}`
-                                            },
-                                            body: JSON.stringify({ ...manualLead, source: "Manual" })
-                                        });
-                                        if (res.ok) {
-                                            setManualLead({ name: "", phone: "", email: "", notes: "" });
-                                            setIsModalOpen(false);
-                                            fetchLeads();
-                                        } else {
-                                            const data = await res.json();
-                                            alert("Error: " + (data.detail || "Failed to add lead"));
-                                        }
-                                    } catch (e) {
-                                        alert("Connection Error");
-                                    }
-                                }}
-                                className="flex-2 px-8 py-3.5 rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 font-bold text-white shadow-xl shadow-violet-500/30 hover:shadow-2xl hover:scale-[1.02] active:scale-95 transition-all disabled:opacity-50 disabled:grayscale"
-                            >
-                                Add Lead
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <div>
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300">Pipeline workspace</p>
+          <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-white">
+            <span className="gradient-text">Leads</span>
+          </h1>
+          <p className="mt-2 text-slate-600 dark:text-slate-400">
+            Search, call, and manage your lead pipeline.
+          </p>
         </div>
-    );
+        <button
+          onClick={() => setShowImport(true)}
+          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-5 py-2.5 font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.02]"
+        >
+          <Download className="h-4 w-4" />
+          Import Leads
+        </button>
+      </div>
+
+      <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
+        <form onSubmit={handleCreateLead} className="rounded-2xl glass border border-white/40 p-6 shadow-sm dark:border-white/10 xl:col-span-1">
+          <div className="mb-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <div className="rounded-xl bg-violet-100 p-3 text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+                <Plus className="h-5 w-5" />
+              </div>
+              <div>
+                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Quick capture</h2>
+                <p className="text-sm text-slate-500 dark:text-slate-400">Single lead, fast.</p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowImport(true)}
+              className="text-xs font-medium text-violet-600 hover:underline dark:text-violet-400"
+            >
+              Bulk import →
+            </button>
+          </div>
+
+          <div className="space-y-4">
+            <input
+              value={form.name}
+              onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+              placeholder="Lead name"
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none ring-0 transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            />
+            <input
+              value={form.normalized_phone}
+              onChange={(event) => setForm((current) => ({ ...current, normalized_phone: event.target.value }))}
+              placeholder="Phone number"
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            />
+            <input
+              value={form.email}
+              onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
+              placeholder="Email (optional)"
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            />
+            <textarea
+              value={form.notes}
+              onChange={(event) => setForm((current) => ({ ...current, notes: event.target.value }))}
+              placeholder="Notes or campaign context"
+              rows={4}
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            />
+            <button
+              type="submit"
+              disabled={saving}
+              className="inline-flex w-full items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-3 font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01] disabled:opacity-60"
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+              Create lead
+            </button>
+          </div>
+        </form>
+
+        <div className="rounded-2xl glass border border-white/40 p-6 dark:border-white/10 xl:col-span-2">
+          <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+            <div>
+              <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Lead pipeline</h2>
+              <p className="text-sm text-slate-500 dark:text-slate-400">Search, call, and open the new Lead 360 page.</p>
+            </div>
+            <div className="relative w-full md:max-w-xs">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400" />
+              <input
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Search leads"
+                className="w-full rounded-xl border border-slate-200 bg-white py-2.5 pl-9 pr-3 text-sm outline-none transition focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+              />
+            </div>
+          </div>
+
+          {message && (
+            <div className={`mb-4 rounded-xl border px-4 py-3 text-sm flex items-center gap-2 ${
+              callStatus === "completed" ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/20 dark:bg-green-500/10 dark:text-green-300"
+              : callStatus === "no-answer" || callStatus === "busy" || callStatus === "failed" ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
+              : callStatus === "in-progress" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300"
+              : "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200"
+            }`}>
+              {callInteractionId && !TERMINAL_STATUSES.has(callStatus ?? "") && (
+                <span className="inline-block h-2 w-2 rounded-full bg-current animate-pulse flex-shrink-0" />
+              )}
+              {message}
+            </div>
+          )}
+
+          <div className="space-y-3">
+            {loading ? (
+              <div className="flex items-center justify-center py-12 text-slate-500 dark:text-slate-400">
+                <Loader2 className="mr-2 h-5 w-5 animate-spin" /> Loading leads...
+              </div>
+            ) : filteredLeads.length === 0 ? (
+              <div className="rounded-xl border border-dashed border-slate-300 px-6 py-12 text-center text-slate-500 dark:border-white/10 dark:text-slate-400">
+                No leads matched your search yet.
+              </div>
+            ) : (
+              filteredLeads.map((lead) => (
+                <div key={lead.id} className="rounded-2xl border border-slate-200 bg-white/80 p-4 transition hover:shadow-md dark:border-white/10 dark:bg-slate-900/40">
+                  <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <h3 className="text-lg font-semibold text-slate-900 dark:text-white">{lead.name}</h3>
+                        <span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-700 dark:bg-slate-800 dark:text-slate-200">
+                          {humanize(lead.status)}
+                        </span>
+                        {lead.qualification_status && (
+                          <span className="rounded-full bg-violet-100 px-2.5 py-1 text-xs font-medium text-violet-700 dark:bg-violet-500/10 dark:text-violet-200">
+                            {humanize(lead.qualification_status)}
+                          </span>
+                        )}
+                        <ScoreBadge score={lead.lead_score} reasons={parseScoreReasons(lead.lead_score_reasons_json)} />
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-4 text-sm text-slate-600 dark:text-slate-300">
+                        <span className="inline-flex items-center gap-1"><Phone className="h-4 w-4" /> {lead.normalized_phone}</span>
+                        {lead.email && <span className="inline-flex items-center gap-1"><Mail className="h-4 w-4" /> {lead.email}</span>}
+                        <span className="inline-flex items-center gap-1"><Sparkles className="h-4 w-4" /> {humanize(lead.next_action || "none")}</span>
+                      </div>
+
+                      {cleanNotes(lead.notes) && (
+                        <p className="text-sm text-slate-500 dark:text-slate-400 line-clamp-2">
+                          {cleanNotes(lead.notes)}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleCall(lead)}
+                        className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white"
+                      >
+                        <Phone className="h-4 w-4" /> Call now
+                      </button>
+                      <Link
+                        href={`/leads/${lead.id}`}
+                        className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-violet-300 hover:text-violet-700 dark:border-white/10 dark:text-slate-200"
+                      >
+                        Open Lead 360 <ArrowUpRight className="h-4 w-4" />
+                      </Link>
+                    </div>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
 }

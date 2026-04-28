@@ -1,133 +1,1515 @@
-from sqlmodel import SQLModel, Field, select
-from typing import Optional, List
+from __future__ import annotations
+
 from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Optional
+
+from sqlalchemy import JSON, Column, DateTime, Index, Numeric, String, UniqueConstraint
+from sqlmodel import Field, SQLModel
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
 
 class AuditMixin(SQLModel):
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)})
-    created_by: str = Field(default="System")
-    updated_by: Optional[str] = Field(default=None)
+    created_at: datetime = Field(default_factory=utc_now)
+    updated_at: datetime = Field(default_factory=utc_now)
+    created_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    updated_by: Optional[int] = Field(default=None, foreign_key="users.id")
 
-class Lead(AuditMixin, table=True):
+
+class Company(AuditMixin, table=True):
+    __tablename__ = "companies"
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    name: str
-    phone: str = Field(unique=True, index=True)
-    email: Optional[str] = None
-    status: str = Field(default="New")
-    source: str = Field(default="Manual") 
-    notes: Optional[str] = None
-    enrichment_status: Optional[str] = Field(default="Not Enriched")
-
-class LeadCreate(SQLModel):
-    name: str
-    phone: str
-    email: Optional[str] = None
-    status: Optional[str] = "New"
-    notes: Optional[str] = None
-
-class Interaction(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lead_id: int
-    type: str  
-    content: str
-    transcript: Optional[str] = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-class Product(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(index=True)
-    stock: int = Field(default=0)
-    price: str
-    note: Optional[str] = None
-
-class SystemSettings(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    key: str = Field(unique=True, index=True)
-    value: str
-
-class Appointment(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lead_id: int = Field(index=True)
-    appointment_time: datetime
-    status: str = Field(default="Scheduled")
-    notes: Optional[str] = None
-    meeting_link: Optional[str] = None
-    calendar_event_id: Optional[str] = None
-
-class Outcome(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lead_id: int = Field(index=True)
-    type: str
-    stage: str = Field(default="Interest")
-    potential_value: float = Field(default=0.0)
-    probability: float = Field(default=0.0)
-    notes: Optional[str] = None
-
-class LatencyLog(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    interaction_id: Optional[int] = Field(default=None, index=True)
-    engine: str
-    stt_ms: float = Field(default=0.0)
-    llm_ms: float = Field(default=0.0)
-    tts_ms: float = Field(default=0.0)
-    total_ms: float = Field(default=0.0)
+    name: str = Field(index=True, max_length=200)
+    slug: str = Field(index=True, unique=True, max_length=120)
+    domain: Optional[str] = Field(default=None, index=True, max_length=255)
+    website: Optional[str] = Field(default=None, max_length=255)
+    logo_url: Optional[str] = None
+    primary_color: Optional[str] = Field(default=None, max_length=20)
+    status: str = Field(default="active", max_length=30)
+    subscription_tier: str = Field(default="starter", max_length=50)
+    max_users: int = Field(default=10)
     
-    stt_provider: Optional[str] = None
-    stt_model: Optional[str] = None
-    llm_provider: Optional[str] = None
-    llm_model: Optional[str] = None
-    tts_provider: Optional[str] = None
-    tts_model: Optional[str] = None
-    
-    notes: Optional[str] = None
+    contact_email: Optional[str] = Field(default=None, max_length=255)
+    phone: Optional[str] = Field(default=None, max_length=30)
+    address: Optional[str] = Field(default=None, max_length=400)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    country: Optional[str] = Field(default=None, max_length=100)
+    pincode: Optional[str] = Field(default=None, max_length=20)
+    gst_number: Optional[str] = Field(default=None, max_length=50)
+    pan_number: Optional[str] = Field(default=None, max_length=20)
+    nature_of_business: Optional[str] = Field(default=None, max_length=255)
+    vat_number: Optional[str] = Field(default=None, max_length=50)
+    cin_number: Optional[str] = Field(default=None, max_length=50)
+
 
 class User(AuditMixin, table=True):
+    __table_args__ = (
+        UniqueConstraint("username_normalized", name="uq_users_username_normalized"),
+    )
+    __tablename__ = "users"
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    username: str = Field(unique=True, index=True)
-    email: str = Field(unique=True, index=True)
-    hashed_password: str
-    role: str = Field(default="sales_rep")
-    mfa_secret: Optional[str] = None
-    mfa_enabled: bool = Field(default=False)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    email: str = Field(index=True, unique=True, max_length=255)
+    username: Optional[str] = Field(default=None, index=True, max_length=100)
+    username_normalized: Optional[str] = Field(default=None, index=True, max_length=100)
+    password_hash: str
+    first_name: Optional[str] = Field(default=None, max_length=100)
+    last_name: Optional[str] = Field(default=None, max_length=100)
+    phone: Optional[str] = Field(default=None, max_length=30)
+    profile_picture_url: Optional[str] = Field(default=None, max_length=500)
     is_active: bool = Field(default=True)
     email_verified: bool = Field(default=False)
-    verification_token: Optional[str] = None
-    mfa_disable_otp: Optional[str] = None
+    mfa_enabled: bool = Field(default=False)
+    mfa_secret: Optional[str] = None
+    mfa_disable_otp: Optional[str] = Field(default=None, max_length=16)
+    reveal_code: Optional[str] = Field(default=None, max_length=6)
+    reveal_code_expires_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    token_version: int = Field(default=0, index=True)
+    last_login_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    email_verification_token: Optional[str] = None
+    email_verification_expires_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class Role(AuditMixin, table=True):
+    __tablename__ = "roles"
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_roles_company_name"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    name: str = Field(max_length=100)
+    description: Optional[str] = None
+    is_system: bool = Field(default=False)
+
+
+class Permission(SQLModel, table=True):
+    __tablename__ = "permissions"
+
+    key: str = Field(primary_key=True, max_length=100)
+    module: str = Field(max_length=50)
+    description: str
+
+
+class RolePermission(SQLModel, table=True):
+    __tablename__ = "role_permissions"
+
+    role_id: int = Field(foreign_key="roles.id", primary_key=True)
+    permission_key: str = Field(foreign_key="permissions.key", primary_key=True)
+
+
+class UserRole(SQLModel, table=True):
+    __tablename__ = "user_roles"
+
+    user_id: int = Field(foreign_key="users.id", primary_key=True)
+    role_id: int = Field(foreign_key="roles.id", primary_key=True)
+
+
+class Invite(AuditMixin, table=True):
+    __tablename__ = "invites"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    email: str = Field(index=True, max_length=255)
+    role_id: int = Field(foreign_key="roles.id")
+    token: str = Field(unique=True, index=True, max_length=255)
+    status: str = Field(default="pending", max_length=30)
+    expires_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    invited_by: int = Field(foreign_key="users.id")
+    accepted_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    accepted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class Account(AuditMixin, table=True):
+    __tablename__ = "accounts"
+    __table_args__ = (
+        UniqueConstraint("company_id", "name", name="uq_accounts_company_name"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    name: str = Field(max_length=200)
+    website: Optional[str] = Field(default=None, max_length=255)
+    domain: Optional[str] = Field(default=None, max_length=255, index=True)
+    industry: Optional[str] = Field(default=None, max_length=100)
+    company_size: Optional[str] = Field(default=None, max_length=50)
+    employee_count: Optional[int] = Field(default=None)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    country: Optional[str] = Field(default=None, max_length=100)
+    notes: Optional[str] = None
+    is_active: bool = Field(default=True)
+
+
+class Lead(AuditMixin, table=True):
+    __tablename__ = "leads"
+    __table_args__ = (
+        # Partial unique index: only enforced for non-deleted leads so that
+        # soft-deleted rows don't block re-creation of the same phone number.
+        Index(
+            "uq_leads_company_phone",
+            "company_id", "normalized_phone",
+            unique=True,
+            postgresql_where=Column("deleted_at").is_(None),
+        ),
+        Index("ix_leads_company_next_action_due_at", "company_id", "next_action_due_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    account_id: Optional[int] = Field(default=None, foreign_key="accounts.id", index=True)
+    owner_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    name: str = Field(max_length=200)
+    normalized_phone: str = Field(index=True, max_length=30)
+    email: Optional[str] = Field(default=None, max_length=255)
+    job_title: Optional[str] = Field(default=None, max_length=150)
+    industry: Optional[str] = Field(default=None, max_length=100)
+    website: Optional[str] = Field(default=None, max_length=255)
+    city: Optional[str] = Field(default=None, max_length=100)
+    state: Optional[str] = Field(default=None, max_length=100)
+    country: Optional[str] = Field(default=None, max_length=100)
+    timezone: Optional[str] = Field(default=None, max_length=60)  # IANA tz, e.g. "Asia/Kolkata"
+    status: str = Field(default="new", max_length=50)
+    qualification_status: str = Field(default="unqualified", max_length=50)
+    source: str = Field(default="manual", max_length=100)
+    notes: Optional[str] = None
+    enrichment_status: str = Field(default="not_enriched", max_length=50)
+    lead_score: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(5, 2), nullable=True),
+    )
+    lead_score_reasons_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    last_enriched_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_outreach_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    product_interest: Optional[str] = None
+    budget_range: Optional[str] = Field(default=None, max_length=100)
+    timeline: Optional[str] = Field(default=None, max_length=100)
+    decision_maker: Optional[str] = Field(default=None, max_length=200)
+    next_action: Optional[str] = Field(default=None, max_length=100)
+    next_action_due_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    ism_stage: Optional[str] = Field(default="new", max_length=50)
+    preferred_language: Optional[str] = Field(default="en", max_length=10)
+
+    company_name: Optional[str] = Field(default=None, max_length=200)
+    designation: Optional[str] = Field(default=None, max_length=150)
+
+    billing_address: Optional[str] = Field(default=None, max_length=400)
+    pincode: Optional[str] = Field(default=None, max_length=20)
+    gst_number: Optional[str] = Field(default=None, max_length=50)
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class Campaign(AuditMixin, table=True):
+    __tablename__ = "campaigns"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    name: str = Field(max_length=200)
+    channel: str = Field(max_length=50)
+    objective: str = Field(max_length=100)
+    status: str = Field(default="draft", max_length=30)
+    description: Optional[str] = None
+    target_audience_rule: Optional[str] = None
+    start_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    end_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class MessageTemplate(AuditMixin, table=True):
+    __tablename__ = "message_templates"
+    __table_args__ = (
+        UniqueConstraint("company_id", "channel", "name", name="uq_templates_company_channel_name"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    channel: str = Field(max_length=50)
+    name: str = Field(max_length=150)
+    subject_template: Optional[str] = None
+    body_template: str
+    variables_schema: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    is_active: bool = Field(default=True)
+
+
+class CampaignStep(AuditMixin, table=True):
+    __tablename__ = "campaign_steps"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "step_order", name="uq_campaign_steps_order"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="campaigns.id", index=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    step_order: int
+    channel: str = Field(max_length=50)
+    template_id: Optional[int] = Field(default=None, foreign_key="message_templates.id")
+    delay_hours: int = Field(default=0)
+    objective: Optional[str] = Field(default=None, max_length=100)
+    is_active: bool = Field(default=True)
+
+
+class Interaction(AuditMixin, table=True):
+    __tablename__ = "interactions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id", index=True)
+    call_task_id: Optional[int] = Field(default=None, foreign_key="call_tasks.id", index=True)
+    type: str = Field(max_length=50)
+    channel: Optional[str] = Field(default=None, max_length=50)
+    direction: Optional[str] = Field(default=None, max_length=20)
+    source: Optional[str] = Field(default=None, max_length=50)
+    content: Optional[str] = None
+    transcript: Optional[str] = None
+    recording_url: Optional[str] = None
+    recording_duration: Optional[int] = None  # seconds
+    delivery_status: Optional[str] = Field(default=None, max_length=30)
+    metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    session_id: Optional[str] = Field(default=None, index=True, max_length=255)
+    status: str = Field(default="active", max_length=30)
+    started_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    ended_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class CampaignRecipient(AuditMixin, table=True):
+    __tablename__ = "campaign_recipients"
+    __table_args__ = (
+        UniqueConstraint("campaign_id", "lead_id", name="uq_campaign_recipient"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    campaign_id: int = Field(foreign_key="campaigns.id", index=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    status: str = Field(default="pending", max_length=30)
+    current_step: int = Field(default=1)
+    next_run_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_contact_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    last_interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    # Claim-lock: set to now() when the worker starts processing this recipient. Workers skip rows where this is within the last 10 minutes (prevents double-send when a worker crashes mid-step and restarts before the next cycle).
+    processing_started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class CallTask(AuditMixin, table=True):
+    __tablename__ = "call_tasks"
+    __table_args__ = (
+        Index("ix_call_tasks_company_status_scheduled_at", "company_id", "status", "scheduled_at"),
+        Index("ix_call_tasks_company_retry_after", "company_id", "retry_after"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id", index=True)
+    campaign_step_id: Optional[int] = Field(default=None, foreign_key="campaign_steps.id", index=True)
+    campaign_recipient_id: Optional[int] = Field(default=None, foreign_key="campaign_recipients.id", index=True)
+    assigned_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    status: str = Field(default="pending", max_length=30)
+    scheduled_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    completed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    retry_after: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    attempt_count: int = Field(default=0)
+    max_attempts: int = Field(default=3)
+    last_outcome: Optional[str] = Field(default=None, max_length=100)
+    batch_id: Optional[str] = Field(default=None, index=True, max_length=100)
+    outcome_confidence: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(5, 2), nullable=True),
+    )
+    dialer_source: Optional[str] = Field(default=None, max_length=100)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    notes: Optional[str] = None
+
+
+class Product(AuditMixin, table=True):
+    __tablename__ = "products"
+    __table_args__ = (
+        UniqueConstraint("company_id", "sku", name="uq_products_company_sku"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    name: str = Field(max_length=200)
+    sku: Optional[str] = Field(default=None, max_length=100)
+    stock: int = Field(default=0)
+    price: Decimal = Field(
+        default=Decimal("0.00"),
+        sa_column=Column(Numeric(12, 2), nullable=False),
+    )
+    currency: str = Field(default="INR", max_length=10)
+    note: Optional[str] = None
+    is_active: bool = Field(default=True)
+    # Catalog / classification
+    brand: Optional[str] = Field(default=None, max_length=100)
+    category: Optional[str] = Field(default=None, max_length=100)
+    subcategory: Optional[str] = Field(default=None, max_length=100)
+    product_line: Optional[str] = Field(default=None, max_length=100)
+    model_number: Optional[str] = Field(default=None, max_length=100)
+    description: Optional[str] = None
+    # Pricing tiers
+    mrp: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(12, 2), nullable=True),
+    )
+    cost_price: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(12, 2), nullable=True),
+    )
+    min_price: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(12, 2), nullable=True),
+    )
+    # Tax / compliance
+    hsn_code: Optional[str] = Field(default=None, max_length=20)
+    tax_rate: Optional[Decimal] = Field(
+        default=None,
+        sa_column=Column(Numeric(5, 2), nullable=True),
+    )
+    unit: Optional[str] = Field(default=None, max_length=30)  # piece, box, set, kg …
+    # Logistics
+    reorder_level: Optional[int] = Field(default=None)
+    warranty_months: Optional[int] = Field(default=None)
+    # Media & extras
+    image_url: Optional[str] = Field(default=None, max_length=500)
+    attributes: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+
+class LeadRequirement(AuditMixin, table=True):
+    __tablename__ = "lead_requirements"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    use_case: Optional[str] = None
+    budget_range: Optional[str] = Field(default=None, max_length=100)
+    timeline: Optional[str] = Field(default=None, max_length=100)
+    decision_maker: Optional[str] = Field(default=None, max_length=200)
+    competitors: Optional[str] = None
+    pain_points: Optional[str] = None
+    required_products: Optional[str] = None
+    notes: Optional[str] = None
+    structured_data: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+
+class Appointment(AuditMixin, table=True):
+    __tablename__ = "appointments"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    owner_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    appointment_time: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    status: str = Field(default="scheduled", max_length=50)
+    notes: Optional[str] = None
+    meeting_link: Optional[str] = None
+    calendar_event_id: Optional[str] = Field(default=None, max_length=255)
+
+
+class Outcome(AuditMixin, table=True):
+    __tablename__ = "outcomes"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    type: str = Field(max_length=50)
+    stage: str = Field(default="interest", max_length=50)
+    potential_value: Decimal = Field(
+        default=Decimal("0.00"),
+        sa_column=Column(Numeric(12, 2), nullable=False),
+    )
+    probability: Decimal = Field(
+        default=Decimal("0.00"),
+        sa_column=Column(Numeric(5, 2), nullable=False),
+    )
+    notes: Optional[str] = None
+
+
+class Quote(AuditMixin, table=True):
+    __tablename__ = "quotes"
+    __table_args__ = (
+        UniqueConstraint("company_id", "quote_number", name="uq_quotes_company_number"),
+        Index("uq_quotes_company_tracking_token", "company_id", "tracking_token", unique=True),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    account_id: Optional[int] = Field(default=None, foreign_key="accounts.id", index=True)
+    quote_number: str = Field(max_length=50, index=True)
+    status: str = Field(default="draft", max_length=30)
+    currency: str = Field(default="INR", max_length=10)
+    subtotal: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    discount_amount: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    tax_amount: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    total_amount: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    valid_until: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    sent_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    opened_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    accepted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    rejected_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    tracking_token: Optional[str] = Field(default=None, index=True, max_length=255)
+    pdf_path: Optional[str] = None
+    notes: Optional[str] = None
+    deleted_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class QuoteItem(AuditMixin, table=True):
+    __tablename__ = "quote_items"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    quote_id: int = Field(foreign_key="quotes.id", index=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    product_id: Optional[int] = Field(default=None, foreign_key="products.id", index=True)
+    product_name_snapshot: str = Field(max_length=200)
+    sku_snapshot: Optional[str] = Field(default=None, max_length=100)
+    quantity: int = Field(default=1)
+    unit_price: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    discount_percent: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(5, 2), nullable=False))
+    line_total: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    notes: Optional[str] = None
+
+
+class CompanySetting(AuditMixin, table=True):
+    __tablename__ = "company_settings"
+    __table_args__ = (
+        UniqueConstraint("company_id", "key", name="uq_company_settings_company_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    key: str = Field(max_length=150)
+    value: str
+    is_secret: bool = Field(default=False)
+
+
+class KnowledgeDocument(AuditMixin, table=True):
+    """Per-company knowledge base document (stored in DB + indexed in ChromaDB)."""
+    __tablename__ = "knowledge_documents"
+    __table_args__ = (
+        UniqueConstraint(
+            "company_id", "collection", "title",
+            name="uq_kb_company_collection_title",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    # products | objections | competitors | playbooks | coaching | sops | transcripts
+    collection: str = Field(max_length=50, index=True)
+    title: str = Field(max_length=300)
+    content: str                             # full markdown body
+    tags: Optional[list] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    chroma_doc_id: Optional[str] = Field(default=None, max_length=200)
+    is_active: bool = Field(default=True)
+    last_indexed_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class UserSetting(SQLModel, table=True):
+    __tablename__ = "user_settings"
+    __table_args__ = (
+        UniqueConstraint("user_id", "key", name="uq_user_settings_user_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    key: str = Field(max_length=150)
+    value: str
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class ActivityEvent(SQLModel, table=True):
+    __tablename__ = "activity_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id", index=True)
+    event_type: str = Field(max_length=100)
+    channel: Optional[str] = Field(default=None, max_length=50)
+    payload: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class EngagementEvent(SQLModel, table=True):
+    __tablename__ = "engagement_events"
+    __table_args__ = (
+        Index("ix_engagement_events_company_created_at", "company_id", "created_at"),
+        Index("ix_engagement_events_interaction_id", "interaction_id"),
+        Index("ix_engagement_events_quote_id", "quote_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id")
+    quote_id: Optional[int] = Field(default=None, foreign_key="quotes.id")
+    channel: Optional[str] = Field(default=None, max_length=50)
+    event_type: str = Field(max_length=100)
+    payload: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class SentimentEvent(SQLModel, table=True):
+    __tablename__ = "sentiment_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    interaction_id: str = Field(index=True, max_length=120)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class CallStatusEvent(SQLModel, table=True):
+    """Real-time call lifecycle events for the live call monitor dashboard.
+
+    One row per transition: ringing → connected → ended.
+    Consumed by the /ws/call-monitor/{company_id} WebSocket endpoint.
+    Cleaned up by the automation worker after 4 hours.
+    """
+    __tablename__ = "call_status_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    campaign_id: Optional[int] = Field(default=None, foreign_key="campaigns.id", index=True)
+    call_task_id: Optional[int] = Field(default=None, foreign_key="call_tasks.id")
+    interaction_id: Optional[str] = Field(default=None, max_length=120)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id")
+    lead_name: Optional[str] = Field(default=None, max_length=200)
+    # "ringing" | "connected" | "ended"
+    status: str = Field(max_length=30)
+    # Set only on "ended" — mirrors CallTask.last_outcome values
+    outcome: Optional[str] = Field(default=None, max_length=100)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AnalyticsAlert(AuditMixin, table=True):
+    __tablename__ = "analytics_alerts"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    metric: str = Field(max_length=100)
+    threshold: Decimal = Field(sa_column=Column(Numeric(12, 2), nullable=False))
+    direction: str = Field(default="gte", max_length=10)  # gte or lte
+    channel: str = Field(default="email", max_length=50)
+    enabled: bool = Field(default=True)
+    last_triggered_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+
+
+class LatencyLog(SQLModel, table=True):
+    __tablename__ = "latencylog"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: Optional[int] = Field(default=None, foreign_key="companies.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    engine: Optional[str] = Field(default=None, max_length=120)
+    stt_ms: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    llm_ms: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    tts_ms: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    total_ms: Decimal = Field(default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False))
+    stt_provider: Optional[str] = Field(default=None, max_length=80)
+    stt_model: Optional[str] = Field(default=None, max_length=120)
+    llm_provider: Optional[str] = Field(default=None, max_length=80)
+    llm_model: Optional[str] = Field(default=None, max_length=120)
+    tts_provider: Optional[str] = Field(default=None, max_length=80)
+    tts_model: Optional[str] = Field(default=None, max_length=120)
+    notes: Optional[str] = None
+    trace_id: Optional[str] = Field(default=None, max_length=64)
+    span_id: Optional[str] = Field(default=None, max_length=32)
+    turn_index: Optional[int] = Field(default=None)
+    span_status: Optional[str] = Field(default=None, max_length=30)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class LoginHistory(SQLModel, table=True):
+    __tablename__ = "login_history"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: Optional[int] = Field(default=None, foreign_key="companies.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    email: str = Field(index=True, max_length=255)
+    event_type: str = Field(default="login_success", max_length=50)
+    success: bool = Field(default=True)
+    ip_address: Optional[str] = Field(default=None, max_length=64)
+    location: Optional[str] = Field(default=None, max_length=200)
+    geo_data: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    user_agent: Optional[str] = None
+    failure_reason: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class OptOut(SQLModel, table=True):
+    __tablename__ = "opt_outs"
+    __table_args__ = (
+        UniqueConstraint("company_id", "lead_id", "channel", name="uq_opt_out_company_lead_channel"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    channel: str = Field(max_length=50)
+    reason: Optional[str] = None
+    opted_out_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AuditLog(SQLModel, table=True):
+    __tablename__ = "audit_logs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    actor_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    entity_type: str = Field(max_length=100)
+    entity_id: Optional[int] = Field(default=None, index=True)
+    action: str = Field(max_length=50)
+    old_values: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    new_values: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    ip_address: Optional[str] = Field(default=None, max_length=64)
+    user_agent: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class ObjectionEntry(AuditMixin, table=True):
+    """Company-scoped objection library.
+
+    Populated automatically after each call via post_call_service.
+    Injected into the voice pipeline system prompt at call start so Rio
+    knows how to handle recurring objections.
+    """
+    __tablename__ = "objection_entries"
+    __table_args__ = (
+        UniqueConstraint("company_id", "objection_key", name="uq_objection_company_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    # Canonical short form of the objection, like "too expensive"
+    objection_key: str = Field(max_length=200)
+    # Human-readable label shown in the UI (same as key unless edited)
+    objection_text: str = Field(max_length=500)
+    # One of: price | competitor | timing | need | general
+    category: str = Field(default="general", max_length=50)
+    # Suggested rebuttal (editable by admins)
+    rebuttal: Optional[str] = None
+    # How many times raised (auto-incremented on extraction)
+    frequency_count: int = Field(default=1)
+    source_interaction_id: Optional[int] = Field(
+        default=None, foreign_key="interactions.id", index=True
+    )
+    is_active: bool = Field(default=True)
+
+
+class CallCoachScore(AuditMixin, table=True):
+    """AI-scored evaluation of the voice agent's performance on a call.
+
+    Populated automatically post-call by call_coach_service.
+    Used to identify weak areas and auto-tune the system prompt.
+    """
+    __tablename__ = "call_coach_scores"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    interaction_id: int = Field(foreign_key="interactions.id", index=True, unique=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+
+    # Dimension scores 0-10
+    score_rapport: Optional[int] = None # opening / tone
+    score_discovery: Optional[int] = None # questions asked, needs uncovered
+    score_objection_handling: Optional[int] = None
+    score_value_proposition: Optional[int] = None
+    score_closing: Optional[int] = None # clear CTA / next step set
+    score_overall: Optional[int] = None # weighted composite
+
+    # LLM-generated summary and recommended prompt fix
+    strengths: Optional[str] = None
+    weaknesses: Optional[str] = None
+    prompt_suggestion: Optional[str] = None      # the actual improved system-prompt snippet
+    prompt_applied: bool = Field(default=False)  # True once auto-tune writes it
+
+
+class CompetitorMention(AuditMixin, table=True):
+    """Tracks every time a competitor is mentioned on a call.
+
+    Populated in real-time by the voice pipeline and post-call by the LLM extractor.
+    Used to feed counter-scripts into the AI system prompt.
+    """
+    __tablename__ = "competitor_mentions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    # Normalised lowercase competitor name, e.g. "salesforce", "hubspot"
+    competitor_name: str = Field(max_length=200, index=True)
+    # Raw snippet from the transcript that triggered the detection
+    mention_snippet: Optional[str] = Field(default=None, max_length=500)
+    # Optional counter-script the AI should use when this competitor is mentioned
+    counter_script: Optional[str] = None
+    # Source: "realtime" (voice pipeline keyword match) or "post_call" (LLM extraction)
+    source: str = Field(default="post_call", max_length=50)
+    detected_at: Optional[datetime] = Field(default_factory=utc_now)
+
+
+class Token(SQLModel):
+    access_token: str
+    token_type: str = "bearer"
+
+
+class CompanyRegister(SQLModel):
+    company_name: str
+    company_slug: str
+    admin_email: str
+    password: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
-    phone_number: Optional[str] = None
-    profile_picture_url: Optional[str] = None
-    reveal_otp: Optional[str] = None
-    reveal_otp_expires_at: Optional[datetime] = None
-
-class UserCreate(SQLModel):
     username: str
+    phone_number: Optional[str] = None
+
+
+class InviteCreate(SQLModel):
+    email: str
+    role_id: int
+    expires_in_hours: int = 72
+
+
+class InviteAccept(SQLModel):
+    token: str
     email: str
     password: str
     first_name: Optional[str] = None
     last_name: Optional[str] = None
-    phone_number: Optional[str] = None
-    role: Optional[str] = "sales_rep"
-
-class Token(SQLModel):
-    access_token: str
-    token_type: str
-
-class TokenData(SQLModel):
     username: Optional[str] = None
 
-class ApolloSearch(SQLModel):
-    keywords: str
 
-class MFAVerify(SQLModel):
-    token: str
-
-class MFADisableRequest(SQLModel):
-    token: str
-
-class RevealOTPVerify(SQLModel):
-    token: str
-
-class ResendVerification(SQLModel):
+class LeadCreate(SQLModel):
+    name: str
+    normalized_phone: str
     email: Optional[str] = None
-    username: Optional[str] = None
+    status: Optional[str] = "new"
+    notes: Optional[str] = None
+    owner_user_id: Optional[int] = None
+
+
+class LeadUpdate(SQLModel):
+    name: Optional[str] = None
+    normalized_phone: Optional[str] = None
+    email: Optional[str] = None
+    status: Optional[str] = None
+    notes: Optional[str] = None
+    owner_user_id: Optional[int] = None
+    preferred_language: Optional[str] = None
+    timezone: Optional[str] = None
+
+class ProductCreate(SQLModel):
+    name: str
+    sku: Optional[str] = None
+    stock: int = 0
+    price: Decimal = Decimal("0.00")
+    currency: str = "INR"
+    note: Optional[str] = None
+    is_active: bool = True
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    product_line: Optional[str] = None
+    model_number: Optional[str] = None
+    description: Optional[str] = None
+    mrp: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = None
+    min_price: Optional[Decimal] = None
+    hsn_code: Optional[str] = None
+    tax_rate: Optional[Decimal] = None
+    unit: Optional[str] = None
+    reorder_level: Optional[int] = None
+    warranty_months: Optional[int] = None
+    image_url: Optional[str] = None
+    attributes: Optional[dict] = None
+
+class ProductUpdate(SQLModel):
+    name: Optional[str] = None
+    sku: Optional[str] = None
+    stock: Optional[int] = None
+    price: Optional[Decimal] = None
+    currency: Optional[str] = None
+    note: Optional[str] = None
+    is_active: Optional[bool] = None
+    brand: Optional[str] = None
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
+    product_line: Optional[str] = None
+    model_number: Optional[str] = None
+    description: Optional[str] = None
+    mrp: Optional[Decimal] = None
+    cost_price: Optional[Decimal] = None
+    min_price: Optional[Decimal] = None
+    hsn_code: Optional[str] = None
+    tax_rate: Optional[Decimal] = None
+    unit: Optional[str] = None
+    reorder_level: Optional[int] = None
+    warranty_months: Optional[int] = None
+    image_url: Optional[str] = None
+    attributes: Optional[dict] = None
+
+class Feedback(AuditMixin, table=True):
+    __tablename__ = "feedback"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    submitted_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id")
+
+    # call_review | csat | general | bug_report | feature_request
+    feedback_type: str = Field(default="general", max_length=50)
+    # internal | customer
+    source: str = Field(default="internal", max_length=20)
+
+    rating: Optional[int] = Field(default=None) # 1–5
+    comment: Optional[str] = None
+    # interested | not_interested | callback | voicemail | no_answer | do_not_call
+    disposition: Optional[str] = Field(default=None, max_length=50)
+    tags: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    # Public CSAT link support
+    token: Optional[str] = Field(
+        default=None,
+        sa_column=Column(String(100), unique=True, nullable=True, index=True),
+    )
+    token_expires_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    responded_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    # pending (CSAT not yet answered) | submitted | expired
+    status: str = Field(default="submitted", max_length=20)
+    assignee_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    close_loop_status: str = Field(default="none", max_length=30)  # none | open | in_progress | resolved
+    status_note: Optional[str] = None
+    follow_up_task_id: Optional[int] = Field(default=None, foreign_key="call_tasks.id", index=True)
+
+
+class EmailOutbox(AuditMixin, table=True):
+    __tablename__ = "email_outbox"
+    __table_args__ = (
+        UniqueConstraint("dedupe_key", name="uq_email_outbox_dedupe_key"),
+        Index("ix_email_outbox_status_next", "status", "next_attempt_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    actor_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    feedback_id: Optional[int] = Field(default=None, foreign_key="feedback.id", index=True)
+    dedupe_key: Optional[str] = Field(default=None, max_length=200, index=True)
+
+    to_email: str = Field(max_length=500)
+    subject: str = Field(max_length=500)
+    body: str
+    html_body: Optional[str] = None
+    company_name: Optional[str] = Field(default=None, max_length=200)
+
+    status: str = Field(default="pending", max_length=20)  # pending | sent | failed
+    attempts: int = Field(default=0)
+    max_attempts: int = Field(default=5)
+    next_attempt_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+    sent_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    last_issue: Optional[str] = None
+
+    # Distributed tracing — request_id_var (or worker trace_id) at enqueue time. Lets a support ticket → outbound email → backend log walk work in either direction.  Indexed for fast lookup when a customer cites the
+    # X-Request-Id header from their copy of the email.
+    request_id: Optional[str] = Field(default=None, max_length=64, index=True)
+
+
+class UiLatencyLog(SQLModel, table=True):
+    """Frontend timing beacon for SLO #2 (login → dashboard p95).
+
+    Populated by the apiFetch beacon at `frontend/src/utils/uiLatency.ts`
+    on `window.load` of `/`.  Cookie-auth only.  No PII.
+    """
+    __tablename__ = "ui_latency_log"
+    __table_args__ = (
+        Index("ix_ui_latency_log_company_created", "company_id", "created_at"),
+        Index("ix_ui_latency_log_route_event", "route", "event"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    route: str = Field(max_length=120)              # "/" | "/leads" etc.
+    event: str = Field(max_length=20)               # "ttfb" | "fmp" | "tti"
+    duration_ms: int
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class FeedbackPublicAudit(SQLModel, table=True):
+    __tablename__ = "feedback_public_audit"
+    __table_args__ = (
+        Index("ix_feedback_public_audit_created_at", "created_at"),
+        Index("ix_feedback_public_audit_token", "token_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: Optional[int] = Field(default=None, foreign_key="companies.id", index=True)
+    feedback_id: Optional[int] = Field(default=None, foreign_key="feedback.id", index=True)
+    action: str = Field(max_length=30)  # view | submit
+    status: str = Field(max_length=30)  # ok | invalid_token | expired | already_submitted | rate_limited | error
+    token_key: Optional[str] = Field(default=None, max_length=120)
+    ip_address: Optional[str] = Field(default=None, max_length=64)
+    user_agent: Optional[str] = None
+    rating: Optional[int] = None
+    detail: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    created_by: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    updated_by: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+
+
+class BackgroundJob(SQLModel, table=True):
+    """
+    Persistent job queue backed by PostgreSQL.
+
+    Jobs survive FastAPI process restarts. The automation worker claims rows
+    with status='pending', sets status='running', then marks them 'done' or
+    'failed'. Stale 'running' rows (started_at older than 10 min) are reset
+    to 'pending' at the start of each worker cycle so they are retried.
+
+    Supported job_types:
+      - post_call_workflow: run extract_and_save_requirements + dispatch_next_action
+    """
+    __tablename__ = "background_jobs"
+    __table_args__ = (
+        Index(
+            "ix_background_jobs_company_status_run_after",
+            "company_id", "status", "run_after",
+        ),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    job_type: str = Field(max_length=100)
+    status: str = Field(default="pending", max_length=30)  # pending | running | done | failed | dead_letter
+    payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    attempts: int = Field(default=0)
+    max_attempts: int = Field(default=3)
+    run_after: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    started_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    finished_at: Optional[datetime] = Field(
+        default=None,
+        sa_column=Column(DateTime(timezone=True), nullable=True),
+    )
+    error: Optional[str] = Field(default=None)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AgentTask(AuditMixin, table=True):
+    """
+    Durable agent task queue — the universal unit of work for the orchestrator.
+
+    The automation worker picks pending tasks, invokes the assigned agent via
+    orchestrator.run_agent(), and writes results back. Tasks that require human
+    approval stay in status='awaiting_approval' until a reviewer acts.
+
+    Status lifecycle:
+      pending → running → done | failed (re-queued if attempts < max_attempts)
+      pending → awaiting_approval → approved → running → done | failed
+                                  → rejected  (terminal)
+    """
+    __tablename__ = "agent_tasks"
+    __table_args__ = (
+        Index("ix_agent_tasks_company_status_run_after", "company_id", "status", "run_after"),
+        Index("ix_agent_tasks_company_agent_status", "company_id", "assigned_agent", "status"),
+        UniqueConstraint("idempotency_key", name="uq_agent_tasks_idempotency_key"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+
+    # What and who
+    task_type: str = Field(max_length=100)          # enrich_lead | send_email | qualify_lead | and so on
+    assigned_agent: str = Field(max_length=100)     # enrichment | knowledge | campaign | quote | and so on
+    priority: int = Field(default=5)                # 1=highest, 10=lowest
+
+    # Lifecycle
+    status: str = Field(default="pending", max_length=30)
+    # pending | running | awaiting_approval | approved | rejected | done | failed
+
+    # Payload
+    input_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    output_json: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+    error_json: Optional[dict] = Field(default=None, sa_column=Column(JSON))
+
+    # Approval gate
+    requires_approval: bool = Field(default=False)
+
+    # Deduplication
+    idempotency_key: Optional[str] = Field(default=None, max_length=200, index=True)
+
+    # Distributed tracing — inherited from request_id_var when the task is created inside an HTTP request, or from the parent task's trace when an executor enqueues a sub-task. See services/agent/agent_task_service.create_agent_task.
+    trace_id: Optional[str] = Field(default=None, max_length=64, index=True)
+
+    # Retry
+    attempts: int = Field(default=0)
+    max_attempts: int = Field(default=3)
+    run_after: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    started_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    completed_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+
+
+class AgentApproval(AuditMixin, table=True):
+    """
+    Human-in-the-loop approval gate for high-stakes agent actions.
+
+    Created when an agent produces a task with requires_approval=True.
+    Operators review via the portal and approve or reject. Unreviewed
+    approvals expire after expires_at and are auto-rejected by the worker.
+
+    Status lifecycle:
+      pending → approved | rejected | expired
+    """
+    __tablename__ = "agent_approvals"
+    __table_args__ = (
+        Index("ix_agent_approvals_company_status", "company_id", "status"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    task_id: int = Field(foreign_key="agent_tasks.id", index=True)
+
+    # Action description (human-readable)
+    action_type: str = Field(max_length=100)    # send_email | send_quote | crm_update | ...
+    action_summary: str                          # "Send follow-up to Ravi @ TechCorp"
+    action_payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
+
+    # Decision
+    status: str = Field(default="pending", max_length=30)  # pending | approved | rejected | expired
+    reviewer_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    reviewed_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    reviewer_note: Optional[str] = None
+
+    # Auto-expiry
+    expires_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+
+
+class CompanyUsage(SQLModel, table=True):
+    __tablename__ = "company_usage"
+    __table_args__ = (
+        UniqueConstraint("company_id", "month", "metric", name="uq_company_usage"),
+        Index("ix_company_usage_company_month", "company_id", "month"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id")
+    month: str = Field(max_length=7)    # "2026-04"
+    metric: str = Field(max_length=50)  # "calls_made" | "emails_sent" | "whatsapp_sent"
+    count: int = Field(default=0)
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class CompanyFeatureFlag(SQLModel, table=True):
+    """Explicit per-company overrides that beat the tier default."""
+    __tablename__ = "company_feature_flags"
+    __table_args__ = (
+        UniqueConstraint("company_id", "feature", name="uq_company_feature_flags"),
+        Index("ix_company_feature_flags_company_id", "company_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id")
+    feature: str = Field(max_length=100)   # e.g. "whatsapp", "campaigns", "ai_coach"
+    enabled: bool = Field(default=True)
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class IsmRule(AuditMixin, table=True):
+    """
+    ISM rule — data-driven override for stage-based channel selection.
+
+    When the ISM orchestrator evaluates a lead, it first consults the ordered
+    list of active rules. The first rule whose `when_json` conditions match
+    fires its `then_action`. Rules replace "add a new elif in Python and
+    redeploy" with "ops inserts a row."
+
+    Example:
+        priority=10  name="vip_high_budget"
+        when_json={"stage": "engaged", "budget_usd_min": 50000}
+        then_action="dispatch:send_quote"
+
+        priority=20  name="stuck_lead_handoff"
+        when_json={"stage": "negotiation", "days_since_contact_min": 7}
+        then_action="handoff_to_human"
+
+    when_json DSL (all optional, AND-combined):
+        stage: str                              — exact match on Lead.ism_stage
+        stages: list[str]                       — any match
+        budget_usd_min: int                     — LeadRequirement.budget_range ≥ this
+        budget_usd_max: int                     — ≤ this
+        urgency: str in {urgent, routine}       — classified from timeline
+        days_since_contact_min: int             — lead.last_outreach_at at-least N days ago
+        days_since_contact_max: int             — at-most
+        has_email: bool                         — lead.email non-empty
+        has_phone: bool                         — lead.normalized_phone non-empty
+        lead_score_min: float                   — Lead.lead_score ≥ this
+        lead_score_max: float                   — ≤ this
+
+    then_action format:
+        "advance_to:<stage>"                    — transition lead to <stage>
+        "dispatch:<task_type>"                  — enqueue an agent task
+        "handoff_to_human"                      — create approval task, stop
+        "skip"                                  — no-op (useful for testing)
+    """
+    __tablename__ = "ism_rules"
+    __table_args__ = (
+        Index("ix_ism_rules_company_active_priority", "company_id", "is_active", "priority"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    name: str = Field(max_length=200)
+    description: Optional[str] = None
+    priority: int = Field(default=10)
+    when_json: dict = Field(default_factory=dict, sa_column=Column(JSON))
+    then_action: str = Field(max_length=200)
+    is_active: bool = Field(default=True)
+
+
+class FeedbackCreate(SQLModel):
+    lead_id: Optional[int] = None
+    interaction_id: Optional[int] = None
+    feedback_type: str = "general"
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    disposition: Optional[str] = None
+    tags: Optional[dict] = None
+
+
+class FeedbackUpdate(SQLModel):
+    rating: Optional[int] = None
+    comment: Optional[str] = None
+    disposition: Optional[str] = None
+    tags: Optional[dict] = None
+    status: Optional[str] = None
+    assignee_user_id: Optional[int] = None
+    close_loop_status: Optional[str] = None
+    status_note: Optional[str] = None
+    follow_up_task_id: Optional[int] = None
+
+
+class FeedbackCloseLoopUpdate(SQLModel):
+    assignee_user_id: Optional[int] = None
+    close_loop_status: Optional[str] = None
+    status_note: Optional[str] = None
+    create_follow_up_task: bool = False
+
+
+class CsatSendRequest(SQLModel):
+    lead_id: int
+    interaction_id: Optional[int] = None
+    expires_hours: int = 72
+
+
+class CsatSubmitRequest(SQLModel):
+    rating: int          # 1–5
+    comment: Optional[str] = None
+
+
+class CompanySettingUpsert(SQLModel):
+    key: str
+    value: str
+    is_secret: bool = False
+
+
+class CompanySettingsBulkUpsert(SQLModel):
+    items: list[CompanySettingUpsert]
+
+
+class RoleCreate(SQLModel):
+    name: str
+    description: Optional[str] = None
+    permission_keys: list[str] = []
+
+
+class RoleUpdate(SQLModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    permission_keys: Optional[list[str]] = None
+
+
+class AssignRoleRequest(SQLModel):
+    role_id: int
+
+
+class UserUpdateStatus(SQLModel):
+    is_active: bool
+
+
+class CampaignCreate(SQLModel):
+    name: str
+    channel: str
+    objective: str
+    description: Optional[str] = None
+    target_audience_rule: Optional[str] = None
+
+
+class CampaignStepCreate(SQLModel):
+    step_order: int
+    channel: str
+    template_id: Optional[int] = None
+    delay_hours: int = 0
+    objective: Optional[str] = None
+
+
+class CampaignStepUpdate(SQLModel):
+    channel: Optional[str] = None
+    delay_hours: Optional[int] = None
+    template_id: Optional[int] = None
+    objective: Optional[str] = None
+
+
+class CampaignStepsReorder(SQLModel):
+    step_ids: list[int]
+
+
+class TemplateCreate(SQLModel):
+    channel: str
+    name: str
+    subject_template: Optional[str] = None
+    body_template: str
+    variables_schema: Optional[dict] = None
+
+
+class TemplateRenderRequest(SQLModel):
+    lead_id: Optional[int] = None
+    quote_id: Optional[int] = None
+    product_id: Optional[int] = None
+
+
+class LeadRequirementUpsert(SQLModel):
+    lead_id: int
+    interaction_id: Optional[int] = None
+    use_case: Optional[str] = None
+    budget_range: Optional[str] = None
+    timeline: Optional[str] = None
+    decision_maker: Optional[str] = None
+    competitors: Optional[str] = None
+    pain_points: Optional[str] = None
+    required_products: Optional[str] = None
+    notes: Optional[str] = None
+    structured_data: Optional[dict] = None
+
+
+class QuoteItemCreate(SQLModel):
+    product_id: Optional[int] = None
+    product_name_snapshot: str
+    sku_snapshot: Optional[str] = None
+    quantity: int = 1
+    unit_price: Decimal = Decimal("0.00")
+    discount_percent: Decimal = Decimal("0.00")
+    notes: Optional[str] = None
+
+
+class QuoteCreate(SQLModel):
+    lead_id: int
+    account_id: Optional[int] = None
+    currency: str = "INR"
+    valid_until: Optional[datetime] = None
+    notes: Optional[str] = None
+    items: list[QuoteItemCreate]
+
+
+class QuoteSendRequest(SQLModel):
+    channels: list[str]
+    subject: Optional[str] = None
+    message: Optional[str] = None
+
+
+class BulkQuotePdfRequest(SQLModel):
+    quote_ids: list[int]
+
+
+class CallTaskCreate(SQLModel):
+    lead_id: int
+    campaign_id: Optional[int] = None
+    campaign_step_id: Optional[int] = None
+    assigned_user_id: Optional[int] = None
+    scheduled_at: Optional[datetime] = None
+    notes: Optional[str] = None
+
+
+class CallTaskStatusUpdate(SQLModel):
+    interaction_id: Optional[int] = None
+    outcome: Optional[str] = None
+
+
+class BatchCallTaskCreate(SQLModel):
+    lead_ids: list[int]
+    assigned_user_id: Optional[int] = None
+    batch_id: Optional[str] = None
+    scheduled_at: Optional[datetime] = None
+    notes: Optional[str] = None
+    dialer_source: str = "batch_dialer"
+
+
+class CallOutcomeApplyRequest(SQLModel):
+    interaction_id: Optional[int] = None
+    raw_status: Optional[str] = None
+    transcript: Optional[str] = None
+
+
+class LeadOptOutRequest(SQLModel):
+    reason: Optional[str] = None
