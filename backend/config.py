@@ -32,9 +32,12 @@ class AppConfig(BaseSettings):
         extra="ignore",
     )
 
-    # Core (required)
-    DATABASE_URL: str
-    SECRET_KEY: str
+    # Core.  These have CI/test-friendly defaults; production .env / env
+    # overrides them.  The database.py fallback uses the same sqlite://
+    # sentinel when DATABASE_URL is unset.  SECRET_KEY default is throwaway
+    # and not used by anything that signs tokens at test time.
+    DATABASE_URL: str = "sqlite://"
+    SECRET_KEY: str = "ci-only-not-used-by-tests"
 
     # Server
     PORT: int = 6060
