@@ -94,7 +94,6 @@ def _match_products(
 
 
 # Quote builder
-
 def _build_quote_items(
     matched_products: list[Product],
     required_products_text: Optional[str],
@@ -128,7 +127,6 @@ def _build_quote_items(
 
 
 # Public entry point
-
 async def auto_generate_and_send_quote(
     session: Session,
     company_id: int,

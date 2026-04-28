@@ -174,7 +174,7 @@ def generate_quote_pdf(
                 header_right_content.append([img])
                 header_right_content.append([Spacer(1, 4)])
         except Exception:
-            pass  # logo load failed — skip silently
+            pass
 
     header_right_content.append([Paragraph(co_lines[0], s_cn)])
     header_right_content.append([Spacer(1, 3)])

@@ -17,13 +17,26 @@ load_dotenv(os.path.join(current_dir, ".env"))
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise RuntimeError("DATABASE_URL is required")
+    # CI / unit-test fallback: use in-memory SQLite so test files that transitively import database (e.g. via agents.ism_orchestrator → services.communication.* → database) can collect without a real DB.
+    # Tests that genuinely need Postgres opt in via TEST_POSTGRES_URL.
+    DATABASE_URL = "sqlite://"
+    logger.warning(
+        "[database] DATABASE_URL unset — falling back to in-memory SQLite. "
+        "Set DATABASE_URL in .env for development/production."
+    )
 
-engine = create_engine(
-    DATABASE_URL,
-    echo=os.getenv("SQL_ECHO", "0") == "1",
-    pool_pre_ping=True,
-)
+# SQLite (in-memory or file) doesn't support pool_pre_ping or large pools; Postgres needs both for connection liveness + concurrency.
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+_engine_kwargs: dict = {"echo": os.getenv("SQL_ECHO", "0") == "1"}
+if _is_sqlite:
+    from sqlalchemy.pool import StaticPool
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+    if DATABASE_URL == "sqlite://":
+        _engine_kwargs["poolclass"] = StaticPool
+else:
+    _engine_kwargs["pool_pre_ping"] = True
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
 rls_company_id: ContextVar[Optional[int]] = ContextVar("rls_company_id", default=None)
 

@@ -25,8 +25,7 @@ MISSED_CALL_OUTCOMES = {
 
 DEFAULT_EXPIRY_HOURS = 72
 
-# Outcomes where the customer was actually engaged enough to give feedback.
-# Broader than POSITIVE_OUTCOMES — includes neutral and negative dispositions because qualitative feedback from an unhappy caller is more valuable than silence.  Excludes no_answer / voicemail (no conversation happened).
+# Outcomes where the customer was actually engaged enough to give feedback. Broader than POSITIVE_OUTCOMES — includes neutral and negative dispositions because qualitative feedback from an unhappy caller is more valuable than silence.  Excludes no_answer / voicemail (no conversation happened).
 ENGAGED_OUTCOMES = {
     "answered_interested",
     "answered_callback_requested",
@@ -199,7 +198,7 @@ def maybe_send_auto_csat(
                 sent_channels.append("whatsapp")
             except Exception as ex:
                 logger.warning("[AutoCSAT] whatsapp send failed lead=%s: %s", lead_id, ex)
-                # WhatsApp failed (feature flag, opt-out, no creds) — fall back to email if we haven't already sent it.
+
                 if "email" not in sent_channels and has_email and channel == "auto":
                     try:
                         html = get_styled_html(

@@ -324,7 +324,6 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 if target_user and not lead and db_interaction.lead_id:
                     lead = session.get(Lead, db_interaction.lead_id)
 
-        # We require a target_user to attribute the call to (audit, RLS, billing).  Reject with 4401 (custom: "unauthorized call context") rather than silently picking an arbitrary user — that would cross tenant boundaries.
         if not target_user:
             logger.warning(
                 "[Pipeline] rejecting call: no target_user resolvable (user_id=%s lead_id=%s interaction_id=%s source=%s)",
@@ -390,7 +389,6 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             else None
         ) or "cartesia"
 
-        # Multi-language override: if lead has a preferred non-English language, then switch STT and TTS to Sarvam which supports Indian regional languages. Sarvam language codes: hi-IN, ta-IN, te-IN, kn-IN, mr-IN, gu-IN, bn-IN, pa-IN, ml-IN, en-IN
         SARVAM_LANGUAGE_CODES = {
             "hi": "hi-IN", "ta": "ta-IN", "te": "te-IN",
             "kn": "kn-IN", "mr": "mr-IN", "gu": "gu-IN",
@@ -414,7 +412,6 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 + system_prompt
             )
 
-        # Mistral TTS runs a content classifier on every synthesis request that over-triggers on commercial copy (e.g. "hottest models" → 403). Steer the LLM away from the words that trip it. Only needed for mistral TTS.
         if tts_provider == "mistral":
             system_prompt += (
                 "\n\n### VOICE-SAFE WORD CHOICE\n"
@@ -445,7 +442,6 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             lead_language=lead_language_code,
         )
 
-        # Publish "connected" — audio stream is live, customer answered
         try:
             _ct_conn = (
                 session.get(CallTask, int(call_task_id))
@@ -665,7 +661,6 @@ app.include_router(ism_rules_routes.router, prefix="/crm")
 from routes import agent_analytics as agent_analytics_routes
 app.include_router(agent_analytics_routes.router, prefix="/crm")
 
-# MCP server — mount SSE transport at /mcp (optional, degrades gracefully)
 try:
     from mcp_server import get_mcp_asgi_app
     _mcp_app = get_mcp_asgi_app()
@@ -718,7 +713,7 @@ async def health_check():
         "worker_paused":                     wh.get("paused"),
     })
 
-    # Mark degraded if worker has never completed a cycle after 5 minutes of uptime or if the last cycle itself reported a failure.
+
     if wh.get("last_cycle_status") in ("never", None) and _process_start_time and \
             time.time() - _process_start_time > 300:
         degraded = True
@@ -732,7 +727,6 @@ async def health_check():
     except Exception as exc:  # noqa: BLE001
         result["mistral_429_last_15min"] = f"error:{exc}"
 
-    # Chroma RAG heartbeat — best-effort.  In-process; ms latency.
     try:
         from services.rag.collections import get_or_create_collection  # noqa: F401
         # Lightweight: list collections via the in-process client.

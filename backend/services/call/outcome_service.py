@@ -283,7 +283,7 @@ def get_retry_policy(
         "max_attempts_reached": bool,
     }
     """
-    # Retry configuration by outcome
+
     retry_config = {
         OUTCOME_NO_ANSWER: {"max_attempts": 6, "retry_hours": [1, 2, 4, 8, 16, 24]},
         OUTCOME_BUSY: {"max_attempts": 4, "retry_hours": [2, 4, 8, 24]},
@@ -339,7 +339,6 @@ def advance_ism_stage(lead: Lead, target_stage: str) -> bool:
     return False
 
 
-# Outcome → ISM stage target
 _OUTCOME_ISM_STAGE: dict[str, str] = {
     OUTCOME_INTERESTED:        "engaged",
     OUTCOME_CALLBACK_REQUESTED: "contacted",

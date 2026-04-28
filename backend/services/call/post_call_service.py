@@ -99,8 +99,7 @@ def _regex_extract_verbal_rating(transcript: str | None) -> int | None:
     return last_match
 
 
-# Cue words customers use when explaining a rating.  Used by the regex
-# comment-extraction fallback.
+# Cue words customers use when explaining a rating. Used by the regex comment-extraction fallback.
 _REASON_CUES = re.compile(
     r"\b(because|since|didn'?t|wasn'?t|too|kept|never|always|you (?:didn'?t|did not)|"
     r"you (?:were|are)|terrible|awful|bad|poor|frustrat|annoying|interrupt|listen|"
@@ -216,7 +215,6 @@ async def extract_and_save_requirements(
             data=payload,
         )
 
-        # Save verbal feedback (rating and/or qualitative comment) if the customer gave any during the call.  Save ONE row per (interaction, customer-source) to prevent duplicates when post_call retries.
         verbal_rating = structured.get("verbal_rating")
         try:
             verbal_rating = int(verbal_rating) if verbal_rating is not None else None
@@ -241,9 +239,6 @@ async def extract_and_save_requirements(
                     verbal_rating, lead_id,
                 )
 
-        # Reason fallback: when LLM returned no comment but we have a rating
-        # (from LLM or regex), grab the customer's stated reason from nearby
-        # User: lines so the feedback row carries WHY they rated that way.
         if verbal_comment is None and verbal_rating is not None:
             reason = _regex_extract_verbal_reason(transcript)
             if reason:
@@ -265,9 +260,7 @@ async def extract_and_save_requirements(
                         Feedback.feedback_type == "csat",
                     ).limit(1)
                 ).first()
-                # If we have a real customer reason, use it.  Only fall back
-                # to the boilerplate when the customer truly said nothing
-                # qualitative (just a bare number).
+
                 comment_text = verbal_comment or "Verbal rating given on call (no reason captured)"
                 if existing:
                     existing.rating = verbal_rating if verbal_rating is not None else existing.rating
@@ -299,7 +292,7 @@ async def extract_and_save_requirements(
             except Exception as fb_exc:
                 logger.warning("[PostCall] Failed to save verbal feedback: %s", fb_exc)
 
-        # Auto-generate and send quote if AI detected "send_quote" intent
+
         if structured.get("next_action") == "send_quote":
             try:
                 from services.quote.voice_quote_service import auto_generate_and_send_quote
@@ -315,11 +308,11 @@ async def extract_and_save_requirements(
             except Exception as vq_exc:
                 logger.warning("[PostCall] Voice quote dispatch failed: %s", vq_exc)
 
-        # Throttle between LLM calls — free-tier Mistral caps at ~1 req/sec. Without this delay the worker fires 5 back-to-back calls per post-call job and burns through the quota in seconds.
+
         _THROTTLE_SECONDS = 1.2
 
         await asyncio.sleep(_THROTTLE_SECONDS)
-        # Fire-and-forget objection extraction using the same LLM service (the LLM message history is already reset by the new prompt above, so we re-instantiate a lightweight version via the same instance)
+
         try:
             from services.ai.llm import get_llm_service
             objection_llm = get_llm_service(

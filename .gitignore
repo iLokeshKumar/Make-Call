@@ -11,8 +11,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
+**/python*/lib/
+**/python*/lib64/
+# (the bare `lib/` rule was also hiding frontend/src/lib/ which contains
+# shadcn helpers like utils.ts — broke CI tsc.  Scope to repo-root + Python
+# venv paths only.)
 parts/
 sdist/
 var/

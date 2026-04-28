@@ -44,7 +44,6 @@ def get_or_create_pending_csat(
     window_hours = dedupe_window_hours or get_csat_dedupe_window_hours()
     window_start = now - timedelta(hours=window_hours)
 
-    # Dedupe by (lead, interaction) — same call shouldn't get two rows, but different calls within the window MUST each get their own feedback request (otherwise outbox dedupes and the customer never sees it). When called with no interaction_id, fall back to lead-level dedup.
     base_filters = [
         Feedback.company_id == company_id,
         Feedback.lead_id == lead_id,

@@ -1,6 +1,3 @@
-"""
-Quote automation — intent detection and auto-quote creation from inbound interactions.
-"""
 from __future__ import annotations
 
 import logging
