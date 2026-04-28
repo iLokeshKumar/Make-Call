@@ -38,6 +38,14 @@ jobs:
 
       - name: Run tests (DB-dependent tests skip without DATABASE_URL)
         working-directory: backend
+        env:
+          # AppConfig (pydantic-settings) requires these at import time —
+          # main.py and a few sibling modules instantiate it on import.
+          # Use a throwaway sqlite URL so import succeeds; tests that need
+          # a real Postgres opt in via TEST_POSTGRES_URL.
+          DATABASE_URL: sqlite://
+          SECRET_KEY: ci-only-not-used-by-tests
+          RLS_WARN_ON_MISSING: "0"
         run: pytest --ignore=test/test_auth.py -q
 
   frontend:
