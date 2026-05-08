@@ -79,8 +79,7 @@ async def get_async_checkpointer():
     if mode == "postgres":
         db_url = os.getenv("DATABASE_URL", "")
         if not db_url or db_url.startswith("sqlite"):
-            # If DB URL is wrong, we can't do async postgres, fall back to sync memory 
-            # via a temporary async wrapper or just return MemorySaver
+            # If DB URL is wrong, we can't do async postgres, fall back to sync memory via a temporary async wrapper or just return MemorySaver
             from langgraph.checkpoint.memory import MemorySaver
             _async_checkpointer = MemorySaver()
             return _async_checkpointer

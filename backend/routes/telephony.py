@@ -139,9 +139,11 @@ async def twilio_status_callback(
     # Always persist status on the interaction — needed for real-time polling by frontend.
     actor_user = session.get(User, int(user_id)) if user_id and user_id.isdigit() else None
     db_interaction = None
+    company_id = None
     if interaction_id and interaction_id.isdigit():
         db_interaction = session.get(Interaction, int(interaction_id))
         if db_interaction:
+            company_id = db_interaction.company_id
             db_interaction.metadata_json = {
                 **(db_interaction.metadata_json or {}),
                 "call_sid": CallSid,

@@ -99,5 +99,7 @@ class ElevenLabsTTS:
                     await communicator.send_media(base64.b64encode(msg.data).decode())
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                     break
+                logger.debug(f"🔊 [ElevenLabsTTS WS] Received message type: {msg.type}")
+                logger.info(f"🔊 [ElevenLabsTTS WS] Done. First-byte: {first_byte_time:.3f}s" if first_byte_time else "🔊 [ElevenLabsTTS WS] Done (no audio received).")
         except Exception as e:
             logger.error(f"❌ [ElevenLabsTTS WS] Error: {e}")

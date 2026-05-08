@@ -78,7 +78,7 @@ export default function SloStatusPage() {
             <ArrowLeft className="h-4 w-4" /> Back to admin
           </Link>
           <h1 className="flex items-center gap-2 text-3xl font-bold tracking-tight text-slate-900 dark:text-white">
-            <Activity className="h-7 w-7 text-violet-500" /> SLO Status
+            <Activity className="h-7 w-7 text-violet-500" /> Status
           </h1>
           <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
             Service-level targets for API availability, voice latency, dashboard load, and agent-task health.

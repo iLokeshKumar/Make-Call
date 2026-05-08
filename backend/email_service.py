@@ -121,11 +121,11 @@ def _markdown_to_html(text: str) -> str:
     )
 
     # Bold:
-    text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
-    text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)
+    text = re.sub(r'\*\*(?=\S)(.+?)(?<=\S)\*\*', r'<strong>\1</strong>', text)
+    text = re.sub(r'__(?=\S)(.+?)(?<=\S)__', r'<strong>\1</strong>', text)
     # Italic:
-    text = re.sub(r'\*(.+?)\*', r'<em>\1</em>', text)
-    text = re.sub(r'_(.+?)_', r'<em>\1</em>', text)
+    text = re.sub(r'\*(?=\S)(.+?)(?<=\S)\*', r'<em>\1</em>', text)
+    text = re.sub(r'\b_(?=\S)(.+?)(?<=\S)_\b', r'<em>\1</em>', text)
     # Headings:
     text = re.sub(r'^### (.+)$', r'<h3 style="margin:16px 0 6px;color:#1e293b;">\1</h3>', text, flags=re.MULTILINE)
     text = re.sub(r'^## (.+)$',  r'<h2 style="margin:20px 0 8px;color:#1e293b;">\1</h2>', text, flags=re.MULTILINE)
