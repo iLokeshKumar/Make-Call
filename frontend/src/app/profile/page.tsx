@@ -11,7 +11,7 @@ import {
 import clsx from "clsx";
 import MFASetup from "@/components/MFASetup";
 import { useEffect } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { maskEmail, maskPhone } from "@/utils/security";
 
 import { apiFetch } from "@/utils/apiFetch";
@@ -39,7 +39,6 @@ export default function ProfilePage() {
     const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
     const [otpError, setOtpError] = useState("");
     const searchParams = useSearchParams();
-    const router = useRouter();
 
     const [formData, setFormData] = useState({
         first_name: user?.first_name || "",
@@ -128,39 +127,7 @@ export default function ProfilePage() {
         }
     };
 
-    // Add this near the top of ProfilePage component
-    const hasHandledCode = useRef(false);
-
-    useEffect(() => {
-        const code = searchParams.get("code");
-        if (code && user && !hasHandledCode.current) {
-            hasHandledCode.current = true;  // ← blocks second fire
-            const finalizeGoogleAuth = async () => {
-                setIsConnectingGoogle(true);
-                try {
-                    const res = await apiFetch("http://localhost:6060/auth/google/callback", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json" },
-                        body: JSON.stringify({ code }) });
-                    if (res.ok) {
-                        setMessage({ type: 'success', text: "Google account connected successfully! 📅" });
-                        await refreshUser();
-                        router.replace("/profile");
-                    } else {
-                        const err = await res.json();
-                        setMessage({ type: 'error', text: err.detail || "Failed to connect Google account." });
-                    }
-                } catch (err) {
-                    setMessage({ type: 'error', text: "An error occurred during Google connection." });
-                } finally {
-                    setIsConnectingGoogle(false);
-                    await refreshGoogleStatus();
-                }
-            };
-            finalizeGoogleAuth();
-        }
-    }, [searchParams, user]);
+    const hasHandledGoogleCallback = useRef(false);
 
     useEffect(() => {
         if (user) {
@@ -198,19 +165,30 @@ export default function ProfilePage() {
     useEffect(() => {
         const code = searchParams.get("code");
         const state = searchParams.get("state");
-        if (!code ) return;
+        if (!code || hasHandledGoogleCallback.current) return;
+        hasHandledGoogleCallback.current = true;
         const submitCallback = async () => {
+            setIsConnectingGoogle(true);
             try {
                 const res = await apiFetch("http://localhost:6060/auth/google/callback", {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json" },
                     body: JSON.stringify({ code, state }) });
-                if (!res.ok) throw new Error("Failed to finish Google OAuth.");
+                if (!res.ok) {
+                    let detail = "Failed to finish Google OAuth.";
+                    try {
+                        const err = await res.json();
+                        detail = err.detail || detail;
+                    } catch {}
+                    throw new Error(detail);
+                }
                 await refreshUser();
                 await refreshGoogleStatus();
+                setMessage({ type: 'success', text: "Google account connected successfully!" });
             } catch (err) {
                 console.error("Google callback error:", err);
+                setMessage({ type: 'error', text: err instanceof Error ? err.message : "An error occurred during Google connection." });
             } finally {
                 setIsConnectingGoogle(false);
                 const params = new URLSearchParams(window.location.search);
@@ -221,7 +199,7 @@ export default function ProfilePage() {
             }
         };
         submitCallback();
-    }, [searchParams.toString(), user, refreshUser, refreshGoogleStatus]);
+    }, [searchParams, refreshUser, refreshGoogleStatus]);
 
     const handleDisconnectGoogle = async () => {
         if (!window.confirm("Disconnect your Google account? You won't be able to generate Meet links automatically.")) return;
@@ -663,12 +641,12 @@ export default function ProfilePage() {
                                             )}
                                         </div>
                                         <p className="text-xs text-slate-500">
-                                            {user?.google_account_email ? `Connected: ${user.google_account_email}` : "For Google Meet integration"}
+                                            {googleStatus?.email ? `Connected: ${googleStatus.email}` : "For Google Meet integration"}
                                         </p>
                                     </div>
                                 </div>
 
-                                {user?.google_account_email ? (
+                                {googleStatus?.status && googleStatus.status !== "disconnected" ? (
                                     <button
                                         type="button"
                                         onClick={handleDisconnectGoogle}

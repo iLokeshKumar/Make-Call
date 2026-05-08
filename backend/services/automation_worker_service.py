@@ -1005,6 +1005,8 @@ def _execute_post_call_job(session: Session, job: BackgroundJob) -> dict:
     # sync entry point (standalone worker process) or from within a running
     # FastAPI event loop (e.g. POST /automation/run-cycle). _run_coro_sync
     # picks the right execution strategy for both.
+    # It always returns the LeadRequirement if one was created/updated, but
+    # it ALSO saves Feedback (verbal rating/comment) to the database independently.
     saved = _run_coro_sync(
         extract_and_save_requirements(
             session=session,
@@ -1017,20 +1019,33 @@ def _execute_post_call_job(session: Session, job: BackgroundJob) -> dict:
         )
     )
 
-    if not saved:
-        return {"status": "no_requirements_extracted", "interaction_id": interaction_id}
+    # Check if feedback was saved (even if requirements extraction failed)
+    from models.models import Feedback
+    feedback = session.exec(
+        select(Feedback).where(
+            Feedback.company_id == job.company_id,
+            Feedback.interaction_id == interaction_id,
+        ).limit(1)
+    ).first()
 
-    dispatch_result = dispatch_next_action(
-        session=session,
-        company_id=job.company_id,
-        actor_user_id=actor_user_id,
-        lead_id=lead_id,
-        requirement=saved,
-    )
+    if not saved and not feedback:
+        return {"status": "no_data_extracted", "interaction_id": interaction_id}
+
+    dispatch_result = None
+    if saved:
+        dispatch_result = dispatch_next_action(
+            session=session,
+            company_id=job.company_id,
+            actor_user_id=actor_user_id,
+            lead_id=lead_id,
+            requirement=saved,
+        )
+
     return {
         "status": "processed",
         "interaction_id": interaction_id,
-        "requirement_id": saved.id,
+        "requirement_id": saved.id if saved else None,
+        "feedback_id": feedback.id if feedback else None,
         "dispatch_result": dispatch_result,
     }
 

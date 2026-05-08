@@ -88,6 +88,13 @@ def send_email_to_lead(
 
     tracking_token = ensure_interaction_tracking_token(session, interaction)
     tracking_base = _resolve_tracking_base(company)
+    
+    # Track the CTA URL if provided and not already a tracking link
+    tracked_cta_url = cta_url
+    if cta_url and "/tracking/" not in cta_url:
+        from services.analytics.email_tracking_service import build_email_click_tracking_url
+        tracked_cta_url = build_email_click_tracking_url(tracking_base, tracking_token, cta_url)
+
     tracked_body = rewrite_click_tracking_links(body, tracking_base, tracking_token)
     unsubscribe_url = build_unsubscribe_url(tracking_base, tracking_token, "email")
 
@@ -101,7 +108,7 @@ def send_email_to_lead(
         lead_name=lead.name,
         company_name=company_name,
         company_website=company_website,
-        cta_url=cta_url,
+        cta_url=tracked_cta_url,
         cta_label=cta_label,
         unsubscribe_url=unsubscribe_url,
     ) + build_open_tracking_pixel(tracking_base, tracking_token)

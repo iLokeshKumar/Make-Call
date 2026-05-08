@@ -2,6 +2,13 @@ import os
 import sys
 import time
 import asyncio
+# On Windows, use the Selector event loop so psycopg's async code is compatible.
+# Must be set before any async pools or libraries are imported/initialized.
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -388,8 +395,11 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             "\n\n### LIVE CALL BEHAVIOR\n"
             "Respect the configured AI_VERBOSITY level for length. Even at the highest verbosity, keep spoken replies easy to follow.\n"
             "Ask at most one question before pausing for the customer.\n"
+            "Do not speak in numbered menus, multi-option lists, or long branching choices unless the customer explicitly asks for options.\n"
+            "For simple confirmations, answer directly in one short sentence and stop.\n"
             "If the customer interrupts, changes topic, says 'move on', 'other product', 'get to the point', or similar, acknowledge the switch and do not repeat the previous product summary.\n"
             "If the customer asks whether you can be heard, whether you are there, or says the line dropped, answer that directly first.\n"
+            "When discussing appointments, reminders, or reschedules, use the lead's local timezone from system context. If tool output or stored data is in ISO/UTC form, translate it into the lead's local time before speaking.\n"
             "Do not invent product specs, availability, comparisons, pricing, or version support from memory. Use get_product_info first when giving product details or comparing models. If the catalog does not confirm it, say you need to check.\n"
             "Never continue speaking in long multi-part lists unless the customer explicitly asked for a detailed walkthrough.\n"
             "If the customer uses slang, jokes, or off-topic phrases, do not mirror them. Reply professionally and either steer back to the request or close politely."
@@ -405,9 +415,9 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             else None
         ) or "2"
         verbosity_rules = {
-            "1": "ULTRA-CONCISE: Maximum 5-10 words. Direct answers only. No long explanations.",
-            "2": "BALANCED: Usually 1-2 sentences. Keep spoken replies compact and easy to interrupt.",
-            "3": "DETAILED: Give more detail when asked, but still keep spoken turns structured and not rambling.",
+            "1": "ULTRA-CONCISE: Usually one short sentence. No lists, no multiple options, no filler, no repeated restatement.",
+            "2": "BALANCED: Usually 1-2 short sentences. Keep spoken replies compact, direct, and easy to interrupt.",
+            "3": "DETAILED: Up to 3 short sentences when needed. Still avoid rambling, menus, and long spoken lists unless explicitly requested.",
         }
         system_prompt += f"\n\n### VERBOSITY\n{verbosity_rules.get(str(verbosity_level), verbosity_rules['2'])}"
 
@@ -567,21 +577,41 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             # Enqueue post-call processing as a crash-safe background job. The automation worker picks this up and runs extract_and_save_requirements + dispatch_next_action. Writing the job row is synchronous and survives a FastAPI process restart — unlike an in-process asyncio.create_task.
             if db_interaction and db_interaction.lead_id and db_interaction.transcript and target_user:
                 try:
-                    job = BackgroundJob(
-                        company_id=target_user.company_id,
-                        job_type="post_call_workflow",
-                        payload={
-                            "interaction_id": db_interaction.id,
-                            "lead_id": db_interaction.lead_id,
-                            "actor_user_id": target_user.id,
-                        },
-                    )
-                    session.add(job)
-                    session.commit()
-                    logger.info(
-                        "[PostCall] Queued background_job id=%s for interaction %s lead %s",
-                        job.id, db_interaction.id, db_interaction.lead_id,
-                    )
+                    # Deduplicate: skip if a job for this interaction is already pending or running.
+                    # This prevents double-triggers (e.g. from both provider webhooks and client-side signals)
+                    # from hammering the LLM and causing duplicate downstream actions.
+                    from sqlalchemy import text
+                    duplicate = session.exec(
+                        select(BackgroundJob).where(
+                            BackgroundJob.company_id == target_user.company_id,
+                            BackgroundJob.job_type == "post_call_workflow",
+                            BackgroundJob.status.in_(["pending", "running"]),
+                        ).where(
+                            text("payload->>'interaction_id' = :id").bindparams(id=str(db_interaction.id))
+                        )
+                    ).first()
+
+                    if duplicate:
+                        logger.info(
+                            "[PostCall] Skipping duplicate background job for interaction %s (existing job id=%s status=%s)",
+                            db_interaction.id, duplicate.id, duplicate.status
+                        )
+                    else:
+                        job = BackgroundJob(
+                            company_id=target_user.company_id,
+                            job_type="post_call_workflow",
+                            payload={
+                                "interaction_id": db_interaction.id,
+                                "lead_id": db_interaction.lead_id,
+                                "actor_user_id": target_user.id,
+                            },
+                        )
+                        session.add(job)
+                        session.commit()
+                        logger.info(
+                            "[PostCall] Queued background_job id=%s for interaction %s lead %s",
+                            job.id, db_interaction.id, db_interaction.lead_id,
+                        )
                 except Exception as exc:
                     logger.warning(
                         "Failed to queue post-call background job for interaction %s: %s",

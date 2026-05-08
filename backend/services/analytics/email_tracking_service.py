@@ -17,7 +17,7 @@ TRACKABLE_URL_RE = re.compile(r"https?://[^\s<>\")\]]+")
 
 
 def generate_tracking_token() -> str:
-    return token_urlsafe(24)
+    return token_urlsafe(16)
 
 
 def ensure_interaction_tracking_token(

@@ -14,6 +14,11 @@ from credentials_service import get_company_setting_value
 from models.models import Appointment, Interaction, LatencyLog, Lead, Product, User, utc_now
 from services.communication.communication_service import send_email_to_lead, send_whatsapp_to_lead
 from utils.phone import normalize_phone
+from utils.timezone_utils import (
+    format_datetime_for_timezone,
+    localize_datetime,
+    resolve_lead_timezone,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -109,15 +114,32 @@ def _parse_iso_datetime(value: str) -> datetime | None:
 
 async def resolve_meeting_time(raw_value: str) -> datetime:
     parsed = _parse_iso_datetime(raw_value)
+    timezone_str = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
     if parsed:
-        return parsed
+        return localize_datetime(parsed, timezone_str)
     if normalize_date_ai:
         normalized = await normalize_date_ai(raw_value)
         if normalized:
-            if normalized.tzinfo is None:
-                return normalized.replace(tzinfo=timezone.utc)
-            return normalized
-    return utc_now() + timedelta(days=1)
+            return localize_datetime(normalized, timezone_str)
+    return localize_datetime(datetime.now(), timezone_str) + timedelta(days=1)
+
+
+async def resolve_meeting_time_for_lead(
+    session: Session,
+    company_id: int,
+    lead: Lead,
+    raw_value: str,
+) -> datetime:
+    timezone_str = resolve_lead_timezone(lead, session=session, company_id=company_id)
+    parsed = _parse_iso_datetime(raw_value)
+    if parsed:
+        return localize_datetime(parsed, timezone_str)
+    if normalize_date_ai:
+        normalized = await normalize_date_ai(raw_value)
+        if normalized:
+            return localize_datetime(normalized, timezone_str)
+    fallback_local = localize_datetime(datetime.now(), timezone_str) + timedelta(days=1)
+    return fallback_local
 
 
 def check_icp_qualification(
@@ -333,7 +355,9 @@ async def book_meeting(
             "duplicate": True,
         }
 
-    appointment_time = await resolve_meeting_time(proposed_time)
+    appointment_time = await resolve_meeting_time_for_lead(session, company_id, lead, proposed_time)
+    timezone_str = resolve_lead_timezone(lead, session=session, company_id=company_id)
+    appointment_time_text = format_datetime_for_timezone(appointment_time, timezone_str)
     # Use structured notes format so the journey parser renders correctly
     appointment = Appointment(
         company_id=company_id,
@@ -368,7 +392,7 @@ async def book_meeting(
                 actor_user_id=actor_user_id,
                 lead_id=lead.id,
                 subject=f"{meeting_type.title()} scheduled",
-                body=f"Your {meeting_type} is scheduled for {appointment_time.isoformat()}.",
+                body=f"Your {meeting_type} is scheduled for {appointment_time_text}.",
             )
             email_sent = True
         except Exception:
@@ -412,6 +436,26 @@ async def book_demo(
     )
     actual_lead_id = int(lead_info["lead_id"]) if lead_info.get("lead_id") else lead_id
     lead = get_lead_or_404(session, company_id, actual_lead_id)
+    lead_updated = False
+    if city and not lead.city:
+        lead.city = city
+        lead_updated = True
+    if state and not lead.state:
+        lead.state = state
+        lead_updated = True
+    if pincode and not lead.pincode:
+        lead.pincode = pincode
+        lead_updated = True
+    if email and not lead.email:
+        lead.email = email.strip().lower()
+        lead_updated = True
+    if lead_updated or not lead.timezone:
+        lead.timezone = resolve_lead_timezone(lead, session=session, company_id=company_id)
+        lead.updated_at = utc_now()
+        lead.updated_by = actor_user_id
+        session.add(lead)
+        session.commit()
+        session.refresh(lead)
 
     # Dedup: if a scheduled appointment with overlapping products already exists, return it
     existing = _find_existing_appointment(session, company_id, lead.id, products=products)
@@ -434,7 +478,9 @@ async def book_demo(
             "duplicate": True,
         }
 
-    appointment_time = await resolve_meeting_time(demo_date)
+    appointment_time = await resolve_meeting_time_for_lead(session, company_id, lead, demo_date)
+    timezone_str = resolve_lead_timezone(lead, session=session, company_id=company_id)
+    appointment_time_text = format_datetime_for_timezone(appointment_time, timezone_str)
     location_parts = [part for part in [city, state, pincode] if part]
     location_text = ", ".join(location_parts) if location_parts else "online"
     appointment = Appointment(
@@ -499,7 +545,7 @@ async def book_demo(
                 subject=f"{demo_type} demo scheduled",
                 body=(
                     f"Your {demo_type.lower()} demo for {products} is scheduled for "
-                    f"{appointment_time.isoformat()}."
+                    f"{appointment_time_text}."
                 ),
             )
             email_sent = True

@@ -8,7 +8,8 @@ from utils.config import get_mistral_client
 
 logger = logging.getLogger(__name__)
 
-# Sentence splitting regex for low-latency streaming
+# Sentence/Phrase splitting regex for low-latency streaming.
+# Splitting on commas and semicolons enables "prefix-emit" streaming to TTS providers.
 SENTENCE_SPLIT_REGEX = re.compile(r'([.?!,;])\s+')
 
 class LLMService:

@@ -19,7 +19,7 @@ class CartesiaTTS:
         if not self.api_key:
             logger.warning("CartesiaTTS initialized without an API key! Streams will fail.")
 
-    async def speak(self, text: str, communicator, ws_to_use=None, context_id=None, **kwargs):
+    async def speak(self, text: str, communicator, ws_to_use=None, context_id=None, is_final=True, **kwargs):
         try:
             start_time = time.time()
             first_byte_time = 0
@@ -36,6 +36,7 @@ class CartesiaTTS:
                 },
                 "language": "en",
                 "context_id": ctx,
+                "continue": not is_final, # Cartesia-specific: don't close context yet if not final
             }
 
             async def _stream_on_ws(ws):
@@ -43,6 +44,9 @@ class CartesiaTTS:
                 resample_state = None
                 await ws.send_json(payload)
 
+                # Only listen for audio if we sent a chunk. 
+                # If we are just streaming in, we might want to listen in a separate loop.
+                # For now, we'll listen until this chunk's audio is mostly done or context closes.
                 async for msg in ws:
                     if msg.type == aiohttp.WSMsgType.TEXT:
                         data = json.loads(msg.data)
@@ -58,7 +62,7 @@ class CartesiaTTS:
                             mulaw = audioop.lin2ulaw(pcm_8k, 2)
                             await communicator.send_media(base64.b64encode(mulaw).decode())
 
-                        if data.get("done"):
+                        if data.get("done") or (is_final and data.get("type") == "done"):
                             break
                     elif msg.type in [aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR]:
                         break

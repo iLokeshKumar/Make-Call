@@ -67,14 +67,17 @@ class ElevenLabsTTS:
             if should_close:
                 await session.close()
 
-    async def _speak_ws(self, text: str, communicator, ws):
-        logger.info("🔊 [ElevenLabsTTS WS] Streaming via websocket.")
+    async def _speak_ws(self, text: str, communicator, ws, is_final=True):
+        logger.info(f"🔊 [ElevenLabsTTS WS] Streaming chunk: '{text[:20]}...' (final={is_final})")
         start_time = time.time()
         first_byte_time = None
         try:
-            # Send text chunk then flush to trigger generation
+            # Send text chunk
             await ws.send_json({"text": text})
-            await ws.send_json({"text": "", "flush": True})
+            if is_final:
+                # Only flush if we are done with the logical turn
+                await ws.send_json({"text": "", "flush": True})
+            
             async for msg in ws:
                 if msg.type == aiohttp.WSMsgType.TEXT:
                     data = json.loads(msg.data)
@@ -85,16 +88,16 @@ class ElevenLabsTTS:
                             self.last_latency = first_byte_time
                         audio_bytes = base64.b64decode(audio_b64)
                         await communicator.send_media(base64.b64encode(audio_bytes).decode())
+                    
+                    # ElevenLabs sends 'isFinal' when a flush is completed or context ends
                     if data.get("isFinal"):
                         break
                 elif msg.type == aiohttp.WSMsgType.BINARY:
-                    # Fallback: some ElevenLabs configs send raw binary
                     if first_byte_time is None:
                         first_byte_time = time.time() - start_time
                         self.last_latency = first_byte_time
                     await communicator.send_media(base64.b64encode(msg.data).decode())
                 elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                     break
-            logger.info(f"🔊 [ElevenLabsTTS WS] Done. First-byte: {first_byte_time:.3f}s" if first_byte_time else "🔊 [ElevenLabsTTS WS] Done (no audio received).")
         except Exception as e:
             logger.error(f"❌ [ElevenLabsTTS WS] Error: {e}")

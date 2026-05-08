@@ -13,6 +13,7 @@ from models.models import Interaction, Lead
 from .state import RioState, empty_state
 from .checkpointer import get_checkpointer
 from utils.tracing import traceable, traceable_async
+from utils.timezone_utils import resolve_lead_timezone
 logger = logging.getLogger(__name__)
 
 def _lead_to_dict(lead: Lead) -> dict:
@@ -22,7 +23,10 @@ def _lead_to_dict(lead: Lead) -> dict:
         "ism_stage": lead.ism_stage, "source": lead.source,
         "company_name": lead.company_name, "job_title": lead.job_title,
         "enrichment_status": lead.enrichment_status, "lead_score": float(lead.lead_score or 0),
-        "notes": lead.notes,
+        "notes": lead.notes, "city": lead.city, "state": lead.state,
+        "country": lead.country, "pincode": lead.pincode,
+        "preferred_language": lead.preferred_language,
+        "timezone": lead.timezone,
     }
 
 @traceable(name="knowledge_node", run_type="chain", tags=["pre_call", "rag"])
@@ -67,6 +71,11 @@ def researcher_node(state: RioState) -> RioState:
             lead = session.get(Lead, lead_id)
             if lead:
                 state["lead_data"] = _lead_to_dict(lead)
+                state["lead_data"]["effective_timezone"] = resolve_lead_timezone(
+                    lead,
+                    session=session,
+                    company_id=company_id,
+                )
             interactions = session.exec(
                 select(Interaction)
                 .where(Interaction.lead_id == lead_id)
@@ -106,8 +115,8 @@ try:
     _wf.set_entry_point("knowledge")
     _wf.add_edge("knowledge", "researcher")
     _wf.add_edge("researcher", END)
-    pre_call_app = _wf.compile(checkpointer=get_checkpointer())
-    logger.info = lambda *a, **k: None  # suppress at import time
+    # This pre_call_app will be re-compiled in run_pre_call_workflow with the async checkpointer
+    pre_call_app = None 
     _PRE_CALL_AVAILABLE = True
 except Exception as _e:
     pre_call_app = None
@@ -123,9 +132,27 @@ async def run_pre_call_workflow(
     Entry point called by dialer_service before placing an outbound call.
     Returns the populated RioState as a dict (icp_score, kb_context, lead_data).
     """
+    from utils.precall_cache import get as cache_get
+    from .checkpointer import get_async_checkpointer
+
+    # 1. Latency Reduction: Check cache first. If we have fresh data (TTL handled in cache.get), 
+    # return it immediately to speed up the dialer response.
+    cached = cache_get(company_id, lead_id)
+    if cached:
+        logger.info("[PreCall] Returning cached research for lead %s (company %s)", lead_id, company_id)
+        return cached
+
     state = empty_state(company_id=company_id, actor_user_id=actor_user_id, lead_id=lead_id)
-    if pre_call_app:
+    
+    # 2. Graph Execution (with persistence)
+    global pre_call_app
+    if _PRE_CALL_AVAILABLE:
         try:
+            # Compile on-demand if needed (dynamic checkpointer support)
+            if pre_call_app is None:
+                checkpointer = await get_async_checkpointer()
+                pre_call_app = _wf.compile(checkpointer=checkpointer)
+
             config = {"configurable": {"thread_id": f"pre_call_{company_id}_{lead_id}"}}
             final = await pre_call_app.ainvoke(state, config=config)
             return {
@@ -136,9 +163,10 @@ async def run_pre_call_workflow(
                 "interaction_history": final.get("interaction_history", []),
             }
         except Exception as exc:
-            import logging as _lg
-            _lg.getLogger(__name__).warning("[PreCall] Graph failed: %s", exc)
-    # Fallback: run nodes sequentially
+            logger.warning("[PreCall] Graph engine failed (falling back to sequential nodes): %s", exc)
+
+    # 3. Fallback: run nodes sequentially (maximum reliability)
+    # This runs if the graph library is missing, or if the engine crashes (e.g. Postgres down).
     state = knowledge_node(state)
     state = researcher_node(state)
     return {

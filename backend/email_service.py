@@ -26,11 +26,22 @@ _GREETING_RE = re.compile(
 
 
 def _linkify(text: str) -> str:
-    """Wrap bare http(s) URLs in <a> tags. Skips URLs already inside an HTML tag."""
-    return _URL_RE.sub(
-        lambda m: f'<a href="{m.group(1)}" style="color:#7c3aed;word-break:break-all;">{m.group(1)}</a>',
-        text,
-    )
+    """Wrap bare http(s) URLs in <a> tags. 
+    
+    Tries to skip URLs already inside an HTML tag (like in href or src) 
+    by checking for a preceding quote or equals sign.
+    """
+    def _replace(m: re.Match) -> str:
+        url = m.group(1)
+        # Look behind in the original text to see if we're inside a tag attribute
+        # This is a heuristic: if the URL is immediately preceded by '="' or '"', skip it.
+        start = m.start()
+        if start > 0 and text[start-1] in ('"', "'", "="):
+            return m.group(0)
+        
+        return f'<a href="{url}" style="color:#7c3aed;word-break:break-all;">{url}</a>'
+
+    return _URL_RE.sub(_replace, text)
 
 
 def _markdown_table_to_html(text: str) -> str:
@@ -101,6 +112,14 @@ def _markdown_to_html(text: str) -> str:
     """Convert a small subset of markdown to HTML suitable for email."""
     # Tables (must run before newline→<br> conversion):
     text = _markdown_table_to_html(text)
+    
+    # Markdown links: [text](url)
+    text = re.sub(
+        r'\[(.+?)\]\((https?://[^\s<>\")\]]+)\)', 
+        r'<a href="\2" style="color:#7c3aed;text-decoration:none;font-weight:600;">\1</a>', 
+        text
+    )
+
     # Bold:
     text = re.sub(r'\*\*(.+?)\*\*', r'<strong>\1</strong>', text)
     text = re.sub(r'__(.+?)__', r'<strong>\1</strong>', text)

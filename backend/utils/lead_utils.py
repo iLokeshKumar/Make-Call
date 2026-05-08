@@ -3,6 +3,7 @@ import logging
 from sqlmodel import Session, select
 
 from models.models import Appointment, Interaction, Lead
+from utils.timezone_utils import format_datetime_for_timezone, resolve_lead_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,19 @@ def get_comprehensive_lead_context(session: Session, lead_id: int) -> str | None
         parts = [f"Name: {lead.name}", f"Phone: {lead.normalized_phone}"]
         if lead.email:
             parts.append(f"Email: {lead.email}")
+        timezone_str = resolve_lead_timezone(lead, session=session, company_id=lead.company_id)
+        if timezone_str:
+            parts.append(f"Timezone: {timezone_str}")
+        if lead.preferred_language:
+            parts.append(f"Preferred Language: {lead.preferred_language}")
+        if lead.city:
+            parts.append(f"City: {lead.city}")
+        if lead.state:
+            parts.append(f"State: {lead.state}")
+        if lead.country:
+            parts.append(f"Country: {lead.country}")
+        if lead.pincode:
+            parts.append(f"Pincode: {lead.pincode}")
         if lead.job_title:
             parts.append(f"Title: {lead.job_title}")
         if lead.industry:
@@ -45,7 +59,7 @@ def get_comprehensive_lead_context(session: Session, lead_id: int) -> str | None
             .where(Appointment.status.in_(["scheduled", "Scheduled"]))
         ).all()
         appointment_list = "\n".join(
-            f"- {item.appointment_time.strftime('%Y-%m-%d %H:%M')}: {item.status} - {item.notes or 'No notes'}"
+            f"- {format_datetime_for_timezone(item.appointment_time, timezone_str)}: {item.status} - {item.notes or 'No notes'}"
             for item in appointments
         )
 

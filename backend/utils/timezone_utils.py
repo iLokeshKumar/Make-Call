@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import datetime
+from typing import Any
 
 # Country ISO-2 / common name → IANA timezone
 _COUNTRY_TZ: dict[str, str] = {
@@ -79,6 +80,20 @@ _CITY_TZ: dict[str, str] = {
     "riyadh": "Asia/Riyadh", "doha": "Asia/Qatar",
 }
 
+_LANGUAGE_TZ: dict[str, str] = {
+    # Strong default for Indian-market voice calls when geo is missing.
+    "hi": "Asia/Kolkata",
+    "ta": "Asia/Kolkata",
+    "te": "Asia/Kolkata",
+    "kn": "Asia/Kolkata",
+    "mr": "Asia/Kolkata",
+    "gu": "Asia/Kolkata",
+    "bn": "Asia/Kolkata",
+    "pa": "Asia/Kolkata",
+    "ml": "Asia/Kolkata",
+    "en-in": "Asia/Kolkata",
+}
+
 
 def detect_timezone(city: str | None, state: str | None, country: str | None) -> str:
     """
@@ -106,6 +121,105 @@ def detect_timezone(city: str | None, state: str | None, country: str | None) ->
             return tz
 
     return os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
+
+
+def infer_timezone_from_language(language: str | None) -> str | None:
+    if not language:
+        return None
+    key = str(language).strip().lower()
+    if not key:
+        return None
+    return _LANGUAGE_TZ.get(key) or _LANGUAGE_TZ.get(key.split("-", 1)[0])
+
+
+def infer_timezone_from_pincode(pincode: str | None) -> str | None:
+    if not pincode:
+        return None
+    digits = "".join(ch for ch in str(pincode) if ch.isdigit())
+    if len(digits) == 6:
+        return "Asia/Kolkata"
+    return None
+
+
+def infer_timezone_from_phone(phone: str | None) -> str | None:
+    if not phone:
+        return None
+    normalized = "".join(ch for ch in str(phone) if ch.isdigit() or ch == "+")
+    if normalized.startswith("+91") or normalized.startswith("91"):
+        return "Asia/Kolkata"
+    return None
+
+
+def resolve_lead_timezone(
+    lead: Any | None,
+    *,
+    session=None,
+    company_id: int | None = None,
+) -> str:
+    """Resolve the best available timezone for a lead.
+
+    Priority:
+    1. lead.timezone
+    2. lead city/state/country
+    3. lead pincode
+    4. lead preferred_language
+    5. lead phone country code
+    6. company login-history timezone
+    7. DEFAULT_TIMEZONE
+    """
+    default_tz = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
+    if not lead:
+        if session is not None and company_id:
+            return get_company_timezone_from_login_history(session, company_id) or default_tz
+        return default_tz
+
+    tz = getattr(lead, "timezone", None)
+    if tz:
+        return tz
+
+    tz = detect_timezone(
+        getattr(lead, "city", None),
+        getattr(lead, "state", None),
+        getattr(lead, "country", None),
+    )
+    if tz != default_tz:
+        return tz
+
+    inferred = (
+        infer_timezone_from_pincode(getattr(lead, "pincode", None))
+        or infer_timezone_from_language(getattr(lead, "preferred_language", None))
+        or infer_timezone_from_phone(getattr(lead, "normalized_phone", None))
+    )
+    if inferred:
+        return inferred
+
+    if session is not None and company_id:
+        return get_company_timezone_from_login_history(session, company_id) or default_tz
+    return default_tz
+
+
+def localize_datetime(dt: datetime.datetime, timezone_str: str) -> datetime.datetime:
+    """Attach/convert *dt* into the given timezone without losing the intended wall clock."""
+    tz = ZoneInfo(timezone_str)
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=tz)
+    return dt.astimezone(tz)
+
+
+def format_datetime_for_timezone(
+    dt: datetime.datetime | None,
+    timezone_str: str,
+    *,
+    include_timezone: bool = True,
+) -> str:
+    if not dt:
+        return ""
+    localized = localize_datetime(dt, timezone_str)
+    fmt = "%B %d, %Y %I:%M %p"
+    rendered = localized.strftime(fmt).replace(" 0", " ")
+    if include_timezone:
+        rendered = f"{rendered} {localized.tzname() or timezone_str}"
+    return rendered
 
 
 def get_company_timezone_from_login_history(session, company_id: int) -> str | None:

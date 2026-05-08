@@ -19,9 +19,8 @@ from utils.phone import normalize_phone
 from utils.url_utils import normalize_base_url
 from utils.timezone_utils import (
     business_hours_config_for_company,
-    detect_timezone,
-    get_company_timezone_from_login_history,
     is_within_business_hours,
+    resolve_lead_timezone,
 )
 from services.leads.opt_out_service import is_lead_opted_out
 from services.core.usage_service import check_and_increment
@@ -45,12 +44,7 @@ def is_lead_callable(session: Session, company_id: int, lead_id: int) -> tuple[b
     if (lead.status or "").lower() in {"closed_won", "closed_lost", "do_not_call"}:
         return False, "lead_closed"
 
-    tz_str = lead.timezone
-    if not tz_str:
-        tz_str = detect_timezone(lead.city, lead.state, lead.country)
-        if tz_str == os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata"):
-
-            tz_str = get_company_timezone_from_login_history(session, company_id) or tz_str
+    tz_str = resolve_lead_timezone(lead, session=session, company_id=company_id)
     bh = business_hours_config_for_company(session, company_id)
     if not is_within_business_hours(
         tz_str,

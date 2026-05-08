@@ -191,29 +191,31 @@ async def extract_and_save_requirements(
         structured = _safe_parse_json(result_text)
 
         if not structured:
-            logger.warning("Post-call extraction did not return valid JSON")
-            return None
+            logger.warning("Post-call extraction did not return valid JSON - proceeding with regex fallbacks")
+            structured = {}
 
-        payload = LeadRequirementUpsert(
-            lead_id=lead_id,
-            interaction_id=interaction_id,
-            use_case=structured.get("use_case"),
-            budget_range=structured.get("budget_range"),
-            timeline=structured.get("timeline"),
-            decision_maker=structured.get("decision_maker"),
-            competitors=structured.get("competitors"),
-            pain_points=structured.get("pain_points"),
-            required_products=structured.get("required_products"),
-            notes="Auto-extracted from post-call transcript",
-            structured_data=structured,
-        )
+        saved = None
+        if structured:
+            payload = LeadRequirementUpsert(
+                lead_id=lead_id,
+                interaction_id=interaction_id,
+                use_case=structured.get("use_case"),
+                budget_range=structured.get("budget_range"),
+                timeline=structured.get("timeline"),
+                decision_maker=structured.get("decision_maker"),
+                competitors=structured.get("competitors"),
+                pain_points=structured.get("pain_points"),
+                required_products=structured.get("required_products"),
+                notes="Auto-extracted from post-call transcript",
+                structured_data=structured,
+            )
 
-        saved = upsert_lead_requirements(
-            session=session,
-            company_id=company_id,
-            actor_user_id=actor_user_id,
-            data=payload,
-        )
+            saved = upsert_lead_requirements(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                data=payload,
+            )
 
         verbal_rating = structured.get("verbal_rating")
         try:

@@ -126,6 +126,12 @@ async def twilio_status_callback(
     CallSid: str = Form(...),
     session: Session = Depends(get_session),
 ):
+    """Handle Twilio call status updates. 
+    Synchronous for UI updates (ringing/status), async via AgentTask for heavy outcome processing.
+    """
+    # form = await request.form()
+    # payload = {key: value for key, value in form.items()}
+    
     call_task_id = request.query_params.get("call_task_id")
     interaction_id = request.query_params.get("interaction_id")
     user_id = request.query_params.get("user_id")
@@ -146,6 +152,29 @@ async def twilio_status_callback(
                 db_interaction.updated_by = actor_user.id
             session.add(db_interaction)
             session.commit()
+
+    # 1. ALWAYS persist status on interaction synchronously — needed for real-time polling.
+    # actor_user = session.get(User, int(user_id)) if user_id and user_id.isdigit() else None
+    # db_interaction = None
+    # company_id = None
+
+    # if interaction_id and interaction_id.isdigit():
+    #     db_interaction = session.get(Interaction, int(interaction_id))
+    #     if db_interaction:
+    #         company_id = db_interaction.company_id
+    #         db_interaction.metadata_json = {
+    #             **(db_interaction.metadata_json or {}),
+    #             "call_sid": CallSid,
+    #             "provider_call_status": CallStatus,
+    #         }
+    #         db_interaction.updated_at = utc_now()
+    #         if actor_user:
+    #             db_interaction.updated_by = actor_user.id
+    #         session.add(db_interaction)
+    #         session.commit()
+
+    if not company_id and actor_user:
+        company_id = actor_user.company_id
 
     # Call monitor: publish "ringing" and "ended" (unanswered) events. "connected" and "ended" (answered) are published by run_media_stream. "completed" terminal state is also handled by run_media_stream, so skip it here.
     _UNANSWERED = {"busy", "no-answer", "failed", "canceled"}
@@ -191,7 +220,7 @@ async def twilio_status_callback(
 
     if not actor_user:
         return {"status": "tracked", "call_status": CallStatus}
-
+    
     transcript = db_interaction.transcript if db_interaction else None
     interaction_id_int = int(interaction_id) if interaction_id and interaction_id.isdigit() else None
     has_call_task = bool(call_task_id and call_task_id.isdigit() and int(call_task_id) != 0)
@@ -212,7 +241,7 @@ async def twilio_status_callback(
     lead_id_from_interaction = db_interaction.lead_id if db_interaction else None
     if not lead_id_from_interaction:
         return {"status": "tracked", "call_status": CallStatus}
-
+    
     result = apply_lead_only_outcome(
         session=session,
         company_id=actor_user.company_id,
@@ -223,6 +252,53 @@ async def twilio_status_callback(
         transcript=transcript,
     )
     return {"status": "processed_lead_only", "result": result}
+
+    # 2. Synchronous Real-time Broadcast (Ringing / Ended)
+    # _UNANSWERED = {"busy", "no-answer", "failed", "canceled"}
+    # if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and company_id:
+    #     if CallStatus == "ringing" or CallStatus in _UNANSWERED:
+    #         try:
+    #             from services.call import call_status_broadcaster
+    #             _task = session.get(CallTask, int(call_task_id))
+    #             if _task:
+    #                 _lead = session.get(Lead, _task.lead_id) if _task.lead_id else None
+    #                 _monitor_status = "ringing" if CallStatus == "ringing" else "ended"
+    #                 _monitor_outcome = CallStatus.replace("-", "_") if CallStatus in _UNANSWERED else None
+    #                 call_status_broadcaster.publish(
+    #                     company_id=_task.company_id,
+    #                     campaign_id=_task.campaign_id,
+    #                     call_task_id=_task.id,
+    #                     interaction_id=interaction_id,
+    #                     lead_id=_task.lead_id,
+    #                     lead_name=_lead.name if _lead else None,
+    #                     status=_monitor_status,
+    #                     outcome=_monitor_outcome,
+    #                 )
+    #         except Exception as exc:
+    #             logger.warning("[Telephony] Real-time broadcast failed: %s", exc)
+
+    # 3. Queue heavy outcome processing for terminal states only
+    # TERMINAL = {"completed", "busy", "no-answer", "failed", "canceled"}
+    # if CallStatus in TERMINAL and company_id:
+    #     from services.agent.agent_task_service import create_agent_task
+    #     create_agent_task(
+    #         session=session,
+    #         company_id=company_id,
+    #         task_type="process_call_status",
+    #         assigned_agent="webhook_handlers",
+    #         input_json={
+    #             "payload": payload,
+    #             "query_params": {
+    #                 "call_task_id": call_task_id,
+    #                 "interaction_id": interaction_id,
+    #                 "user_id": user_id,
+    #             }
+    #         },
+    #         idempotency_key=f"call_status:{CallSid}:{CallStatus}",
+    #         requires_approval=False,
+    #     )
+
+    # return {"status": "queued" if CallStatus in TERMINAL else "tracked"}
 
 
 @router.get("/call-status")

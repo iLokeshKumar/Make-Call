@@ -5,8 +5,9 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
-# Sentence splitting regex for low-latency streaming
-SENTENCE_SPLIT_REGEX = re.compile(r'([.?!,;])\s+')
+# Sentence splitting regex for low-latency streaming.
+# Do not split on commas/semicolons; that creates robotic, clause-by-clause TTS.
+SENTENCE_SPLIT_REGEX = re.compile(r'([.?!])\s+')
 
 class BaseLLM(ABC):
     def __init__(self, system_prompt: str):

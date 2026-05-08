@@ -14,7 +14,7 @@ import aiohttp
 import audioop
 from sqlmodel import Session, select
 
-from models.models import CompanySetting, Interaction, LatencyLog, User, utc_now
+from models.models import CompanySetting, Interaction, LatencyLog, Lead, User, utc_now
 from services.ai.llm import get_llm_service
 from services.ai.stt import get_stt_service
 from services.ai.tts import get_tts_service
@@ -22,6 +22,7 @@ from tool_adapter import execute_mcp_tool, get_mistral_tools
 from utils.encryption import decrypt_value
 from utils.audio import clean_voice_text
 from utils.lead_utils import get_comprehensive_lead_context
+from utils.timezone_utils import format_datetime_for_timezone, resolve_lead_timezone
 from utils import settings_cache as _sc
 from services.call import sentiment_broadcaster
 
@@ -97,6 +98,7 @@ class VoicePipeline:
         self.user_id = user_id
         self.lead_id = lead_id
         self.company_id = user.company_id if user else None
+        self.lead_timezone = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
 
         company_id = user.company_id if user else None
         all_settings = _load_company_settings(session, company_id)
@@ -215,8 +217,17 @@ class VoicePipeline:
             f"{self.stt_provider.upper()} STT model",
         )
 
-        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
-        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
+        if self.lead_id:
+            try:
+                lead = self.session.get(Lead, self.lead_id)
+                self.lead_timezone = resolve_lead_timezone(
+                    lead,
+                    session=self.session,
+                    company_id=self.company_id,
+                )
+            except Exception:
+                pass
+        time_context = self._build_time_context()
         
         full_system_prompt = system_prompt + time_context
         self.llm_service = get_llm_service(self.llm_provider, full_system_prompt, api_key=llm_api_key, model=llm_model)
@@ -327,7 +338,7 @@ class VoicePipeline:
             self._sentences_emitted_this_turn = 0
             self.transcript_accumulator.append(f"Rio: {fast_path}")
             self.save_transcript()
-            await self.sentence_queue.put(fast_path)
+            await self.sentence_queue.put((fast_path, True))
             return
         if self.current_llm_task and not self.current_llm_task.done():
             self.current_llm_task.cancel()
@@ -395,15 +406,30 @@ class VoicePipeline:
         )
         
         # Re-build full system prompt
-        now_str = datetime.now().strftime("%A, %B %d, %Y %I:%M %p")
-        time_context = f"\n\n[SYSTEM CONTEXT]: Current Time is {now_str}. Use this to resolve relative dates like 'tomorrow' or 'next Tuesday' into ISO strings for tool calls."
-        
+        time_context = self._build_time_context()
+
         full_system_prompt = self.system_prompt + time_context + prospect_context
         # Ensure llm_service is already initialized before calling this
         if hasattr(self, 'llm_service') and self.llm_service:
             self.llm_service.update_system_prompt(full_system_prompt)
         self.lead_context = context
         logger.info(f"📋 [Pipeline] Assertive lead context injected into system prompt")
+
+    def _build_time_context(self) -> str:
+        localized_now = format_datetime_for_timezone(
+            datetime.now(),
+            self.lead_timezone,
+            include_timezone=True,
+        )
+        return (
+            "\n\n[SYSTEM CONTEXT]: "
+            f"The lead's local timezone is {self.lead_timezone}. "
+            f"The current local time for this lead is {localized_now}. "
+            "Use this local timezone to resolve relative dates like 'tomorrow' or "
+            "'next Tuesday' into ISO strings for tool calls. When speaking about "
+            "appointments, confirmations, reminders, or reschedules, always say the "
+            "time in the lead's local timezone unless the customer explicitly asks for another timezone."
+        )
 
     def _normalize_text(self, text: str | None) -> str:
         if not text:
@@ -570,6 +596,16 @@ class VoicePipeline:
 
         logger.info(f"🔍 [Pipeline] Loading context for Lead #{lead_id}...")
 
+        try:
+            lead = self.session.get(Lead, lead_id)
+            self.lead_timezone = resolve_lead_timezone(
+                lead,
+                session=self.session,
+                company_id=self.company_id,
+            )
+        except Exception as exc:
+            logger.debug("[Pipeline] Lead timezone resolution failed (non-blocking): %s", exc)
+
         
         context = get_comprehensive_lead_context(self.session, lead_id)
         if context:
@@ -670,7 +706,7 @@ class VoicePipeline:
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse lead name for greeting: {e}")
         
-        await self.sentence_queue.put(greeting)
+        await self.sentence_queue.put((greeting, True))
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
 
@@ -1001,7 +1037,7 @@ class VoicePipeline:
                     phrase = "I'm still here. Take your time."
 
                 logger.info(f"🔔 [Silence Watcher] {silence_since_rio_finished:.1f}s since Rio finished — re-engaging")
-                await self.sentence_queue.put(phrase)
+                await self.sentence_queue.put((phrase, True))
                 self.silence_reengage_count += 1
 
                 # Reset so it doesn't fire again immediately
@@ -1097,9 +1133,17 @@ class VoicePipeline:
                         p.cancel()
 
                     if sentence_task in done:
-                        sentence = sentence_task.result()
-                        if sentence is None:
+                        queue_item = sentence_task.result()
+                        if queue_item is None:
                             break
+                        
+                        # Unpack (text, is_final) tuple.
+                        # For robustness, handle cases where a single string might still be in the queue.
+                        if isinstance(queue_item, tuple):
+                            text_to_speak, is_final = queue_item
+                        else:
+                            text_to_speak, is_final = queue_item, True
+
                         # Delivery still gated — wait for resume if paused.
                         if not self.resume_event.is_set():
                             await self.resume_event.wait()
@@ -1107,9 +1151,12 @@ class VoicePipeline:
                         # resume signaled with empty queue — loop back.
                         continue
 
-                    # Track what we actually emit to TTS this turn.  On confirmed barge-in this buffer feeds "you were saying X" into the next LLM call so the agent can acknowledge being cut off.
-                    if isinstance(sentence, str) and sentence.strip():
-                        self.last_rio_spoken.append(sentence.strip())
+                    # Track what we actually emit to TTS this turn.
+                    if isinstance(text_to_speak, str) and text_to_speak.strip():
+                        self.last_rio_spoken.append(text_to_speak.strip())
+                    elif isinstance(text_to_speak, tuple):
+                        logger.error("🚨 [VoicePipeline] Unexpected tuple in speaker loop: %r", text_to_speak)
+                        text_to_speak = str(text_to_speak[0]) if text_to_speak else ""
 
                     if not self.communicator.stream_sid:
                         logger.warning("⚠️ Speaker loop waiting for stream_sid...")
@@ -1188,8 +1235,8 @@ class VoicePipeline:
                                     sv_ws = None
                                     logger.error(f"❌ Sarvam TTS WebSocket reconnect failed: {exc}")
                 
-                    tts_text = clean_voice_text(sentence) if sentence else ""
-                    logger.info(f"🗣️ [Speaker Loop] Starting TTS for: '{tts_text}'")
+                    tts_text = clean_voice_text(text_to_speak) if text_to_speak else ""
+                    logger.info(f"🗣️ [Speaker Loop] Starting TTS for: '{tts_text}' (final={is_final})")
                     normalized_sentence = self._normalize_text(tts_text)
                     if normalized_sentence:
                         self.last_rio_sentences.append(normalized_sentence)
@@ -1208,6 +1255,7 @@ class VoicePipeline:
                                 communicator=self.communicator,
                                 ws_to_use=c_ws,
                                 context_id=turn_context_id,
+                                is_final=is_final,
                                 aiohttp_session=session
                             )
                         )
@@ -1235,8 +1283,9 @@ class VoicePipeline:
                                 text=tts_text,
                                 communicator=self.communicator,
                                 ws_to_use=active_ws,
-                                context_id=turn_context_id, #if self.tts_provider == "cartesia" else None,
-                                aiohttp_session=session, #if self.tts_provider == "cartesia" else None
+                                context_id=turn_context_id,
+                                is_final=is_final,
+                                aiohttp_session=session,
                             )
                         )
                         try:
@@ -1544,13 +1593,6 @@ class VoicePipeline:
                 if self._is_low_value_fragment(clean_sentence):
                     logger.info("[VoicePipeline] Dropping low-value fragment: %r", clean_sentence)
                     continue
-                if self._sentences_emitted_this_turn >= self.max_sentences_per_turn:
-                    logger.info(
-                        "[VoicePipeline] Sentence cap reached for turn (%s). Dropping: %r",
-                        self.max_sentences_per_turn,
-                        clean_sentence,
-                    )
-                    continue
 
                 if (
                     self._sentence_says_goodbye(clean_sentence)
@@ -1565,15 +1607,19 @@ class VoicePipeline:
                     self.feedback_asked_this_call = True
                     self.last_rio_sentences.append(self._FORCED_FEEDBACK_PHRASE)
                     self.last_rio_spoken.append(self._FORCED_FEEDBACK_PHRASE)
-                    await self.sentence_queue.put(self._FORCED_FEEDBACK_PHRASE)
+                    await self.sentence_queue.put((self._FORCED_FEEDBACK_PHRASE, True))
 
                 
                 if self._sentence_asks_feedback(clean_sentence):
                     self.feedback_asked_this_call = True
 
-                logger.info("📤 [%s -> Queue] Sentence: %r", self.llm_provider, clean_sentence)
+                # Determine if this phrase is terminal (ends turn) or a prefix chunk.
+                # Splitting on , ; counts as a prefix (is_final=False) to enable seamless TTS streaming.
+                phrase_is_terminal = bool(re.search(r'[.?!]$', clean_sentence))
+
+                logger.info("📤 [%s -> Queue] Phrase: %r (terminal=%s)", self.llm_provider, clean_sentence, phrase_is_terminal)
                 self._sentences_emitted_this_turn += 1
-                await self.sentence_queue.put(clean_sentence)
+                await self.sentence_queue.put((clean_sentence, phrase_is_terminal))
             elif chunk["type"] == "error":
                 self.llm_error_count += 1
                 if self.llm_error_count >= 3:
@@ -1584,7 +1630,7 @@ class VoicePipeline:
                     fallback_sentence = "I'm sorry, I'm having a bit of trouble with my connection. Could you repeat that?"
                     logger.info(f"🔄 [Smart Fallback] Failure #{self.llm_error_count}. Queuing retry message.")
                     self._annotate_trace("error")
-                await self.sentence_queue.put(fallback_sentence)
+                await self.sentence_queue.put((fallback_sentence, True))
                 return
             elif chunk["type"] == "finished":
                 self.llm_error_count = 0
@@ -1664,7 +1710,7 @@ class VoicePipeline:
                         
                         # Only say it if Rio isn't already mid-sentence
                         if self.sentence_queue.empty() and not self.is_rio_speaking:
-                            await self.sentence_queue.put(thinking_msg)
+                            await self.sentence_queue.put((thinking_msg, True))
                             # Small wait so the phrase starts playing before tool execution
                             await asyncio.sleep(0.3)
                         
@@ -1704,7 +1750,7 @@ class VoicePipeline:
 
                         followup_phrase = self._tool_followup_phrase(tool_name, result)
                         if followup_phrase:
-                            await self.sentence_queue.put(followup_phrase)
+                            await self.sentence_queue.put((followup_phrase, True))
                             self.transcript_accumulator.append(f"Rio: {followup_phrase}")
                             self.save_transcript()
                             self._sentences_emitted_this_turn += 1

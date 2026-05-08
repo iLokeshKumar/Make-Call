@@ -102,6 +102,8 @@ docs/SCALING.md
 docs/SLOs.md
 docs/VOICE_TUNING.md
 tools/claude-usage/
+docs/IMPLEMENTATION_PLAN.md
+archi.jpeg
 
 **/CLAUDE.md
 **/.gitignore

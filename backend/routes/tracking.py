@@ -234,6 +234,9 @@ async def email_click_tracking(
     session: Session = Depends(get_session),
 ):
     ip = _client_ip(request)
+    full_url = str(request.url)
+    logger.info("[Tracking] Email click: token=%s, target=%s, ip=%s, full_url=%s", token, target, ip, full_url)
+
     if _is_rate_limited(key=f"email_click:{ip}", limit=30, window_seconds=60):
         return _rate_limit_response()
     try:
@@ -330,15 +333,37 @@ async def whatsapp_inbound_webhook(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    """Receive inbound WhatsApp messages from Twilio."""
+    """Receive inbound WhatsApp messages from Twilio (async via AgentTask)."""
     form = await request.form()
     payload = {key: value for key, value in form.items()}
 
     guard_response = _whatsapp_webhook_guard(request, session, payload)
     if guard_response is not None:
         return guard_response
-
+    
     return ingest_whatsapp_webhook_event(session, payload)
+
+    # from services.agent.agent_task_service import create_agent_task
+    # from services.communication.inbound_whatsapp_service import resolve_company_id_by_whatsapp_number
+    
+    # # Resolve company_id synchronously to route the task to the right tenant
+    # to_number = payload.get("To", "")
+    # company_id = resolve_company_id_by_whatsapp_number(session, to_number)
+    
+    # if not company_id:
+    #     logger.warning("[Tracking] Could not resolve company for WhatsApp message to %s", to_number)
+    #     return {"status": "ignored", "reason": "company_not_found"}
+
+    # create_agent_task(
+    #     session=session,
+    #     company_id=company_id,
+    #     task_type="process_inbound_whatsapp",
+    #     assigned_agent="webhook_handlers",
+    #     input_json={"payload": payload},
+    #     idempotency_key=f"wa_inbound:{payload.get('MessageSid')}",
+    #     requires_approval=False,
+    # )
+    # return {"status": "queued"}
 
 
 @router.post("/whatsapp/status")
@@ -346,59 +371,77 @@ async def whatsapp_status_tracking(
     request: Request,
     session: Session = Depends(get_session),
 ):
-    """Handle WhatsApp delivery status updates from Twilio."""
+    """Handle WhatsApp delivery status updates from Twilio (async via AgentTask)."""
     form = await request.form()
     payload = {key: value for key, value in form.items()}
 
     guard_response = _whatsapp_webhook_guard(request, session, payload)
     if guard_response is not None:
         return guard_response
-
+    
     provider_message_sid = str(payload.get("MessageSid") or payload.get("SmsSid") or "").strip() or None
     provider_status = str(payload.get("MessageStatus") or payload.get("SmsStatus") or "").strip().lower() or None
+
+    # from services.agent.agent_task_service import create_agent_task
+    # from services.communication.inbound_whatsapp_service import resolve_company_id_by_whatsapp_number
+    
+    # company_id = resolve_company_id_by_whatsapp_number(session, payload.get("To"))
+    # if not company_id:
+    #     return {"status": "ignored", "reason": "company_not_found"}
 
     if provider_message_sid and provider_status:
         from models.models import Interaction
         interaction = session.exec(
-            select(Interaction).where(
-                Interaction.metadata_json["provider_message_sid"].as_string() == provider_message_sid
-            )
-        ).first()
+                select(Interaction).where(
+                    Interaction.metadata_json["provider_message_sid"].as_string() == provider_message_sid
+                )
+            ).first()
 
-        if interaction:
-            metadata = dict(interaction.metadata_json or {})
-            metadata.setdefault("provider_events", []).append(dict(payload))
-            metadata["provider_message_sid"] = provider_message_sid
-            metadata["provider_message_status"] = provider_status
-            interaction.metadata_json = metadata
-            interaction.updated_at = utc_now()
+    # create_agent_task(
+    #     session=session,
+    #     company_id=company_id,
+    #     task_type="process_whatsapp_status",
+    #     assigned_agent="webhook_handlers",
+    #     input_json={"payload": payload},
+    #     idempotency_key=f"wa_status:{payload.get('MessageSid')}:{payload.get('MessageStatus')}",
+    #     requires_approval=False,
+    # )
+    # return {"status": "queued"}
 
-            delivery_status_map = {
-                "queued": "pending",
-                "accepted": "sent",
-                "sent": "sent",
-                "delivered": "delivered",
-                "read": "read",
-                "failed": "failed",
-                "undelivered": "failed",
-            }
-            if provider_status in delivery_status_map:
-                interaction.delivery_status = delivery_status_map[provider_status]
-                if provider_status in {"failed", "undelivered"}:
-                    interaction.status = "failed"
-                elif provider_status in {"sent", "delivered", "read"}:
-                    interaction.status = "completed"
-
-            session.add(interaction)
-            session.commit()
-            return {
-                "status": "status_recorded",
-                "interaction_id": interaction.id,
-                "company_id": interaction.company_id,
-                "provider_message_sid": provider_message_sid,
-                "provider_status": provider_status,
-            }
-
+    if interaction:
+                metadata = dict(interaction.metadata_json or {})
+                metadata.setdefault("provider_events", []).append(dict(payload))
+                metadata["provider_message_sid"] = provider_message_sid
+                metadata["provider_message_status"] = provider_status
+                interaction.metadata_json = metadata
+                interaction.updated_at = utc_now()
+    
+                delivery_status_map = {
+                    "queued": "pending",
+                    "accepted": "sent",
+                    "sent": "sent",
+                    "delivered": "delivered",
+                    "read": "read",
+                    "failed": "failed",
+                    "undelivered": "failed",
+                }
+                if provider_status in delivery_status_map:
+                    interaction.delivery_status = delivery_status_map[provider_status]
+                    if provider_status in {"failed", "undelivered"}:
+                        interaction.status = "failed"
+                    elif provider_status in {"sent", "delivered", "read"}:
+                        interaction.status = "completed"
+    
+                session.add(interaction)
+                session.commit()
+                return {
+                    "status": "status_recorded",
+                    "interaction_id": interaction.id,
+                    "company_id": interaction.company_id,
+                    "provider_message_sid": provider_message_sid,
+                    "provider_status": provider_status,
+                }
+    
     return {"status": "ignored", "reason": "unsupported_status_payload"}
 
 
@@ -407,6 +450,7 @@ async def email_tracking_webhook(
     request: Request,
     session: Session = Depends(get_session),
 ):
+    """Handle inbound email webhooks (async via AgentTask)."""
     payload: dict[str, str] = {}
     content_type = request.headers.get("content-type", "").lower()
     if "application/json" in content_type:
@@ -431,8 +475,23 @@ async def email_tracking_webhook(
             status_code=403,
             content={"status": "unauthorized", "reason": "no_email_secret_strict_mode"},
         )
-
+    
     return ingest_email_webhook_event(session, payload, forced_company_id=company_id)
+
+    # if not company_id:
+    #     return {"status": "ignored", "reason": "company_not_found"}
+
+    # from services.agent.agent_task_service import create_agent_task
+    # create_agent_task(
+    #     session=session,
+    #     company_id=company_id,
+    #     task_type="process_inbound_email",
+    #     assigned_agent="webhook_handlers",
+    #     input_json={"payload": payload, "forced_company_id": company_id},
+    #     idempotency_key=f"email_inbound:{payload.get('Message-ID') or hash(json.dumps(payload))}",
+    #     requires_approval=False,
+    # )
+    # return {"status": "queued"}
 
 
 @router.post("/quote/accept/{token}")

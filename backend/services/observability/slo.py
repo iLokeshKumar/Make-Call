@@ -30,7 +30,7 @@ from typing import Any
 
 from sqlmodel import Session, select
 
-from models.models import BackgroundJob, LatencyLog, UiLatencyLog, utc_now
+from models.models import AgentTask, LatencyLog, UiLatencyLog, utc_now
 from services.observability import get_availability_snapshot
 
 MIN_SAMPLES = 10
@@ -128,9 +128,9 @@ def _slo_login_dashboard_p95(session: Session, company_id: int | None) -> dict[s
 
 def _slo_dead_letter_rate(session: Session, company_id: int | None) -> dict[str, Any]:
     cutoff = utc_now() - timedelta(days=7)
-    query = select(BackgroundJob).where(BackgroundJob.created_at >= cutoff)
+    query = select(AgentTask).where(AgentTask.created_at >= cutoff)
     if company_id is not None:
-        query = query.where(BackgroundJob.company_id == company_id)
+        query = query.where(AgentTask.company_id == company_id)
     rows = session.exec(query).all()
     total = len(rows)
     target = 0.005  # 0.5% — lower is better
@@ -144,7 +144,8 @@ def _slo_dead_letter_rate(session: Session, company_id: int | None) -> dict[str,
     }
     if total < MIN_SAMPLES:
         return {**base, "actual": None, "status": "insufficient_data"}
-    dead = sum(1 for r in rows if (r.status or "").lower() == "dead_letter")
+    # For AgentTask, 'failed' is the terminal failure state (dead letter)
+    dead = sum(1 for r in rows if (r.status or "").lower() == "failed")
     actual = dead / total
     return {**base, "actual": actual, "status": _classify_lower_is_better(actual, target)}
 

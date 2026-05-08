@@ -54,6 +54,7 @@ _AGENT_MODULES: dict[str, str] = {
     # Webhook audit sink — Phase 1 no-op; Phase 2 (Week 3+) replaces with
     # per-event-type handlers reading from AgentTask.input_json["payload"].
     "webhook_sink": "agents.webhook_sink",
+    "webhook_handlers": "agents.webhook_handlers",
     # Week 7 — three-agent split. outreacher + closer carry ISM dispatch + deal
     # closure; reply_classifier buckets inbound replies into roadmap intents.
     "outreacher":       "agents.outreacher",

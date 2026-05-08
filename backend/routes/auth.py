@@ -36,6 +36,8 @@ from auth import (
     verify_password,
 )
 from credentials_service import get_company_credential
+from utils.encryption import encrypt_value
+from utils import settings_cache as _sc
 
 from database import get_session
 from models.models import (
@@ -144,6 +146,7 @@ GOOGLE_SCOPES = [
     "openid",
 ]
 GOOGLE_STATE_CACHE: dict[int, str] = {}
+GOOGLE_PKCE_CACHE: dict[int, dict[str, str]] = {}
 
 
 def _serialize_user(session: Session, user: User) -> dict:
@@ -164,9 +167,14 @@ def _load_google_client_config() -> dict:
     return json.loads(GOOGLE_CREDENTIALS_PATH.read_text(encoding="utf-8"))
 
 
-def _get_google_flow() -> Flow:
+def _get_google_flow(state: str | None = None) -> Flow:
     config = _load_google_client_config()
-    return Flow.from_client_config(config, scopes=GOOGLE_SCOPES, redirect_uri=GOOGLE_REDIRECT_URI)
+    return Flow.from_client_config(
+        config,
+        scopes=GOOGLE_SCOPES,
+        state=state,
+        redirect_uri=GOOGLE_REDIRECT_URI,
+    )
 
 
 def _upsert_company_setting(
@@ -182,23 +190,24 @@ def _upsert_company_setting(
     existing = session.exec(
         select(CompanySetting).where(CompanySetting.company_id == company_id, CompanySetting.key == key)
     ).first()
+    stored_value = encrypt_value(value) if is_secret else value
     if existing:
-        existing.value = value
+        existing.value = stored_value
         existing.is_secret = is_secret
         existing.updated_by = user_id
         existing.updated_at = utc_now()
         session.add(existing)
     else:
         session.add(
-            CompanySetting(
-                company_id=company_id,
-                key=key,
-                value=value,
-                is_secret=is_secret,
-                created_by=user_id,
-                updated_by=user_id,
+                CompanySetting(
+                    company_id=company_id,
+                    key=key,
+                    value=stored_value,
+                    is_secret=is_secret,
+                    created_by=user_id,
+                    updated_by=user_id,
+                )
             )
-        )
 
 
 def _get_company_setting_value(session: Session, company_id: int, key: str) -> str | None:
@@ -1094,8 +1103,33 @@ def _build_google_status(session: Session, company_id: int) -> dict:
     access_token = _get_company_setting_value(session, company_id, "GOOGLE_ACCESS_TOKEN")
     expiry = _get_company_setting_value(session, company_id, "GOOGLE_TOKEN_EXPIRY")
     email = _get_company_setting_value(session, company_id, "GOOGLE_USER_EMAIL")
-    status = "connected" if refresh_token else "disconnected"
-    message = "Google linked" if refresh_token else "Google integration is not configured"
+    status = "disconnected"
+    message = "Google integration is not configured"
+
+    expiry_dt = None
+    if expiry:
+        try:
+            expiry_dt = datetime.fromisoformat(expiry.replace("Z", "+00:00"))
+            if expiry_dt.tzinfo is None:
+                expiry_dt = expiry_dt.replace(tzinfo=timezone.utc)
+        except ValueError:
+            expiry_dt = None
+
+    if refresh_token:
+        status = "valid"
+        message = "Google linked"
+    elif access_token:
+        now = datetime.now(timezone.utc)
+        if expiry_dt and expiry_dt <= now:
+            status = "expired"
+            message = "Google access expired and no refresh token is available."
+        elif expiry_dt and expiry_dt <= now + timedelta(minutes=5):
+            status = "expiring_soon"
+            message = "Google access will expire soon and no refresh token is available."
+        else:
+            status = "valid"
+            message = "Google access token is present."
+
     return {"status": status, "email": email, "expiry": expiry, "message": message, "access_token": access_token}
 
 
@@ -1112,8 +1146,18 @@ async def google_auth_url(
     current_user: User = Depends(get_current_user),
 ):
     flow = _get_google_flow()
-    auth_url, state = flow.authorization_url(access_type="offline", include_granted_scopes=True, prompt="consent")
+    auth_url, state = flow.authorization_url(
+        access_type="offline",
+        include_granted_scopes="true",
+        prompt="consent",
+    )
     GOOGLE_STATE_CACHE[current_user.id] = state
+    code_verifier = getattr(flow, "code_verifier", None)
+    if code_verifier:
+        GOOGLE_PKCE_CACHE[current_user.id] = {
+            "state": state,
+            "code_verifier": code_verifier,
+        }
     return {"auth_url": auth_url, "state": state}
 
 
@@ -1128,11 +1172,17 @@ async def google_callback(
     expected_state = GOOGLE_STATE_CACHE.get(current_user.id)
     if expected_state and data.state != expected_state:
         raise HTTPException(status_code=400, detail="Invalid state token")
-    flow = _get_google_flow()
+    flow = _get_google_flow(state=data.state)
+    pkce_entry = GOOGLE_PKCE_CACHE.get(current_user.id) or {}
+    code_verifier = pkce_entry.get("code_verifier") if pkce_entry.get("state") == data.state else None
     try:
-        flow.fetch_token(code=data.code)
+        if code_verifier:
+            flow.fetch_token(code=data.code, code_verifier=code_verifier)
+        else:
+            flow.fetch_token(code=data.code)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail="Token exchange failed") from exc
+        logger.exception("Google token exchange failed for user=%s company=%s", current_user.id, current_user.company_id)
+        raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}") from exc
     creds = flow.credentials
     refresh_token = creds.refresh_token or _get_company_setting_value(session, current_user.company_id, "GOOGLE_REFRESH_TOKEN")
     _upsert_company_setting(session, current_user.company_id, "GOOGLE_REFRESH_TOKEN", refresh_token, current_user.id, True)
@@ -1151,7 +1201,10 @@ async def google_callback(
         logger.warning("Unable to fetch Google profile for user %s", current_user.id)
     if user_email:
         _upsert_company_setting(session, current_user.company_id, "GOOGLE_USER_EMAIL", user_email, current_user.id)
+    session.commit()
+    _sc.invalidate_user(current_user.company_id)
     GOOGLE_STATE_CACHE.pop(current_user.id, None)
+    GOOGLE_PKCE_CACHE.pop(current_user.id, None)
     return {"status": "connected", "email": user_email}
 
 
@@ -1169,6 +1222,8 @@ async def google_disconnect(
     ]
     for key in keys:
         _delete_company_setting(session, current_user.company_id, key)
+    GOOGLE_STATE_CACHE.pop(current_user.id, None)
+    GOOGLE_PKCE_CACHE.pop(current_user.id, None)
     return {"status": "disconnected"}
 
 
@@ -1189,9 +1244,11 @@ async def google_url_alias(
 
 @router.post("/auth/google/callback")
 async def google_callback_alias(
+    data: GoogleAuthRequest,
+    session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
 ):
-    return await google_callback(current_user=current_user)
+    return await google_callback(data=data, session=session, current_user=current_user)
 
 
 @router.delete("/auth/google/disconnect")

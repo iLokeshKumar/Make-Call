@@ -23,7 +23,7 @@ from models.models import (
     User,
     utc_now,
 )
-from utils.timezone_utils import detect_timezone
+from utils.timezone_utils import resolve_lead_timezone
 from services.core.auth_service import user_has_any_permission
 from services.leads.demand_generation_service import enrich_lead_if_needed, score_lead, trigger_new_lead_outreach
 from services.leads.opt_out_service import unsubscribe_lead
@@ -906,7 +906,7 @@ async def get_lead_context(
         raise HTTPException(status_code=404, detail="Lead not found")
 
     # Detect / confirm timezone
-    effective_tz = lead.timezone or detect_timezone(lead.city, lead.state, lead.country)
+    effective_tz = resolve_lead_timezone(lead, session=session, company_id=current_user.company_id)
 
     # Interactions (most recent first)
     interactions = session.exec(
