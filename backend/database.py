@@ -130,6 +130,8 @@ _SALES_REP_PERMISSIONS = {
     "analytics.read_own",
     "requirements.read", "requirements.manage",
     "user.read",
+    "agent.manage",
+    "agent.review",
 }
 
 

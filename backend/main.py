@@ -405,6 +405,13 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             "If the customer uses slang, jokes, or off-topic phrases, do not mirror them. Reply professionally and either steer back to the request or close politely."
         )
         system_prompt += (
+            "\n\n### CONVERSATIONAL PACING\n"
+            "You must sound natural and unhurried. Speak at a calm, measured pace. "
+            "Do NOT deliver long blocks of text. If you have a lot of information, give a 1-sentence summary first and ask if the customer wants more details. "
+            "Always pause and listen after making a point. Give the customer space to speak. "
+            "Avoid being aggressive or pushy; your goal is a helpful, natural conversation."
+        )
+        system_prompt += (
             "\n\n### FOLLOW-UP AND SCHEDULING\n"
             "Do not promise that a follow-up call, reminder, or future outreach has been scheduled unless a booking or scheduling tool result in this call confirms it.\n"
             "If no scheduling tool was used, say you can note the preference or that someone will follow up, but do not claim the event is already scheduled."

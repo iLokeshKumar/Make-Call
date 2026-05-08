@@ -1097,12 +1097,17 @@ async def get_login_history_alias(
 ):
     return await get_login_history(limit=limit, offset=offset, session=session, current_user=current_user)
 
-
 def _build_google_status(session: Session, company_id: int) -> dict:
     refresh_token = _get_company_setting_value(session, company_id, "GOOGLE_REFRESH_TOKEN")
     access_token = _get_company_setting_value(session, company_id, "GOOGLE_ACCESS_TOKEN")
     expiry = _get_company_setting_value(session, company_id, "GOOGLE_TOKEN_EXPIRY")
     email = _get_company_setting_value(session, company_id, "GOOGLE_USER_EMAIL")
+
+# def _build_google_status(session: Session, user_id: int) -> dict:
+#     refresh_token = _get_user_setting_value(session, user_id, "GOOGLE_REFRESH_TOKEN")
+#     access_token = _get_user_setting_value(session, user_id, "GOOGLE_ACCESS_TOKEN")
+#     expiry = _get_user_setting_value(session, user_id, "GOOGLE_TOKEN_EXPIRY")
+#     email = _get_user_setting_value(session, user_id, "GOOGLE_USER_EMAIL")
     status = "disconnected"
     message = "Google integration is not configured"
 

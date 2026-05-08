@@ -125,7 +125,7 @@ class VoicePipeline:
         self.pending_user_turn_text = ""
         self.pending_llm_latency = 0.0
         self.llm_dispatch_task: asyncio.Task | None = None
-        self.post_stt_grace = 0.5
+        self.post_stt_grace = 1.5
         self.interrupt_pending = False
         self.pause_playback = False
         self.resume_event = asyncio.Event()
