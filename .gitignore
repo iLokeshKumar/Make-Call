@@ -77,6 +77,14 @@ overall_architecture.md
 .gstack/
 Claude.md
 
+# Gemini & Tools
+.gemini/
+GEMINI.md
+**/GEMINI.md
+graphify-out/
+Voice/
+.obsidian/
+
 # Test/cache
 .pytest_cache/
 **/.pytest_cache/
@@ -96,6 +104,11 @@ backend/quotes/*.pdf
 # Windows
 desktop.ini
 
+PHASE*_COMPLETE.md
+ENGINEERING_FIXES_SUMMARY.md
+FINAL_SUMMARY.md
+backend/utils/ASYNC_BRIDGE_GUIDE.md
+backend/pipelines/voice/INTEGRATION_GUIDE.md
 docs/ARCHITECTURE.md
 docs/ROADMAP.md
 docs/SCALING.md

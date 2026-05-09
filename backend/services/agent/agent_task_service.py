@@ -267,10 +267,8 @@ def run_agent_tasks(
 
         claim_task(session, task)
         try:
-            import asyncio
-            import concurrent.futures
-            import contextvars
             from agents.orchestrator import run_agent
+            from utils.async_bridge import run_async_from_sync
 
             coro = run_agent(
                 agent_name=task.assigned_agent,
@@ -280,14 +278,7 @@ def run_agent_tasks(
                 lead_id=task.lead_id,
                 **{k: v for k, v in task.input_json.items() if k not in ("query", "summary")},
             )
-            try:
-                asyncio.get_running_loop()
-                # Worker invoked from a FastAPI route — hand the coro to a fresh-loop thread, carrying ContextVars (request_id_var) across the boundary so trace_id propagation survives.
-                ctx = contextvars.copy_context()
-                with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-                    output = pool.submit(ctx.run, asyncio.run, coro).result()
-            except RuntimeError:
-                output = asyncio.run(coro)
+            output = run_async_from_sync(coro)
             complete_task(session, task, output)
             results["done"] += 1
             logger.info("[AgentTask] Task %s (%s) done", task.id, task.task_type)

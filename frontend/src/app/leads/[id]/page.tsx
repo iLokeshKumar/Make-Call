@@ -748,8 +748,8 @@ export default function LeadDetailPage() {
         return;
       }
 
-      if (!response.ok) throw new Error("Call could not be started");
       const data = await response.json();
+      if (!response.ok) throw new Error(data.detail || data.message || "Call could not be started");
       setCallMessage(`Calling ${lead.name} at ${lead.normalized_phone}...`);
       if (data.interaction_id) setCallInteractionId(data.interaction_id);
     } catch (callError) {

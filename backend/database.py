@@ -34,7 +34,14 @@ if _is_sqlite:
     if DATABASE_URL == "sqlite://":
         _engine_kwargs["poolclass"] = StaticPool
 else:
-    _engine_kwargs["pool_pre_ping"] = True
+    _engine_kwargs.update({
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "3600")),
+        "pool_pre_ping": True,
+        "echo_pool": os.getenv("SQL_ECHO_POOL", "0") == "1",
+    })
 
 engine = create_engine(DATABASE_URL, **_engine_kwargs)
 
@@ -54,7 +61,10 @@ def _apply_rls_context(session: _SASession, transaction, connection) -> None:  #
     """
     cid = rls_company_id.get()
     if cid is not None:
-        connection.execute(sa_text(f"SET LOCAL app.current_company_id = {int(cid)}"))
+        connection.execute(
+            sa_text("SET LOCAL app.current_company_id = :cid"),
+            {"cid": int(cid)}
+        )
     elif _RLS_WARN_ENABLED:
         logger.warning(
             "DB session opened without rls_company_id — RLS policies will "

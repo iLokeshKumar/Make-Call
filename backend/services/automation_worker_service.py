@@ -8,27 +8,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-
-def _run_coro_sync(coro):
-    """
-    Run an async coroutine from sync context.
-
-    Works whether or not an event loop is already running in the current thread.
-    When a loop is running (e.g. the worker was invoked from a FastAPI route),
-    we hand the coroutine off to a one-shot worker thread with its own fresh
-    loop. ContextVars (request_id_var, trace_id) are copied across the thread
-    boundary so logging + tracing remain coherent.
-    """
-    import contextvars
-
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-    ctx = contextvars.copy_context()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(ctx.run, asyncio.run, coro).result()
-
 from sqlalchemy import func, text
 from sqlmodel import Session, select
 
@@ -40,6 +19,7 @@ from services.campaign.dialer_service import run_batch_dialer
 from services.communication.email_outbox_service import process_outbox_batch
 from services.agent.agent_task_service import run_agent_tasks
 from services.agent.agent_approval_service import expire_stale as expire_stale_approvals
+from utils.async_bridge import run_async_from_sync
 
 logger = logging.getLogger(__name__)
 
@@ -197,7 +177,12 @@ def _slo_alerts_enabled() -> bool:
         if threshold.tzinfo is None:
             threshold = threshold.replace(tzinfo=timezone.utc)
         return utc_now() >= threshold
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        logger.warning(
+            "Failed to parse SLO alert enabled_at timestamp: %s",
+            str(e),
+            extra={"raw_value": raw}
+        )
         # Bad ISO → fail-safe enable so a typo doesn't permanently silence alerts.
         return True
 
@@ -1003,11 +988,11 @@ def _execute_post_call_job(session: Session, job: BackgroundJob) -> dict:
 
     # extract_and_save_requirements is async. The worker may be invoked from a
     # sync entry point (standalone worker process) or from within a running
-    # FastAPI event loop (e.g. POST /automation/run-cycle). _run_coro_sync
-    # picks the right execution strategy for both.
+    # FastAPI event loop (e.g. POST /automation/run-cycle). run_async_from_sync
+    # picks the right execution strategy for both using a shared thread pool.
     # It always returns the LeadRequirement if one was created/updated, but
     # it ALSO saves Feedback (verbal rating/comment) to the database independently.
-    saved = _run_coro_sync(
+    saved = run_async_from_sync(
         extract_and_save_requirements(
             session=session,
             llm_service=llm_service,

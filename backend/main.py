@@ -67,8 +67,12 @@ class _RequestContextMiddleware(BaseHTTPMiddleware):
         try:
             from services.observability import record_response as _rec
             _rec(request.method, response.status_code)
-        except Exception:  # noqa: BLE001
-            pass
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Observability recording failed: %s",
+                str(e),
+                extra={"method": request.method, "status": response.status_code}
+            )
 
         if not request.url.path.startswith("/uploads"):
             logger.info(
@@ -660,6 +664,7 @@ async def lifespan(app: FastAPI):
     import asyncio as _asyncio
     from services.communication.email_outbox_service import email_outbox_loop
     from services.communication.imap_poller_service import imap_poll_loop
+    from utils.async_bridge import cleanup_bridge_executor
 
     _log_startup_checks()
     init_db()
@@ -677,6 +682,7 @@ async def lifespan(app: FastAPI):
         for task in (imap_task, outbox_task):
             if task:
                 task.cancel()
+        cleanup_bridge_executor()
 
 
 app = FastAPI(title="Multi-Tenant CRM API", lifespan=lifespan)

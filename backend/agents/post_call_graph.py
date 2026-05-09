@@ -125,7 +125,7 @@ try:
                               {"book_demo": "book_demo", "nurture": "nurture"})
     _wf.add_edge("book_demo", END)
     _wf.add_edge("nurture", END)
-    post_call_app = _wf.compile(checkpointer=get_checkpointer())
+    post_call_app = None
     _POST_CALL_AVAILABLE = True
 except Exception as _e:
     post_call_app = None
@@ -151,6 +151,7 @@ async def run_post_call_workflow(
     Entry point called by post_call_service after a call ends.
     Preserves the same signature as langgraph_orchestrator.run_post_call_workflow.
     """
+    from .checkpointer import get_async_checkpointer
     state = empty_state(company_id=company_id, actor_user_id=actor_user_id, lead_id=lead_id)
     state.update({
         "lead_data": {"name": lead_name, "email": lead_email},
@@ -163,8 +164,14 @@ async def run_post_call_workflow(
         "questions_asked": questions_asked,
         "bant_answers": bant_answers,
     })
-    if post_call_app:
+
+    global post_call_app
+    if _POST_CALL_AVAILABLE:
         try:
+            if post_call_app is None:
+                checkpointer = await get_async_checkpointer()
+                post_call_app = _wf.compile(checkpointer=checkpointer)
+
             config = {"configurable": {"thread_id": f"post_call_{company_id}_{lead_id}"}}
             final = await post_call_app.ainvoke(state, config=config)
             return {

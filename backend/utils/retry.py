@@ -195,7 +195,7 @@ async def with_fallback(
                 await asyncio.sleep(delay)
                 delay *= 2.0
             else:
-                logger.error("[%s] all %d attempts failed: %s", agent_name, max_attempts, exc)
+                logger.error("[%s] all %d attempts failed: %s", agent_name, max_attempts, exc, exc_info=True)
 
     fb = fallback()
     return await fb if asyncio.iscoroutine(fb) else fb

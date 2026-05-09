@@ -73,7 +73,7 @@ def _get_agent_module(name: str):
 
 # Build the full multi-agent StateGraph
 
-def _build_orchestrator_graph(session: Session, company_id: int):
+async def _build_orchestrator_graph(session: Session, company_id: int):
     """
     Compile the supervisor-coordinated multi-agent StateGraph.
 
@@ -86,7 +86,7 @@ def _build_orchestrator_graph(session: Session, company_id: int):
         from langgraph.graph import StateGraph, END
         from langchain_core.messages import HumanMessage
         from agents.llm_factory import get_agent_llm
-        from agents.checkpointer import get_checkpointer
+        from agents.checkpointer import get_async_checkpointer
     except ImportError as exc:
         raise RuntimeError(f"LangGraph/LangChain not available: {exc}") from exc
 
@@ -106,7 +106,7 @@ def _build_orchestrator_graph(session: Session, company_id: int):
                 f"Perform your {agent_name} responsibilities for this lead."
             )
             try:
-                agent = mod.create_agent(llm, company_id)
+                agent = await mod.create_agent(llm, company_id)
                 config = {"configurable": {"thread_id": f"{agent_name}_{company_id}_{lead_id}"}}
                 result = await agent.ainvoke(
                     {"messages": [HumanMessage(content=query)]},
@@ -142,7 +142,7 @@ def _build_orchestrator_graph(session: Session, company_id: int):
     for name in agent_names:
         wf.add_edge(name, "supervisor")
 
-    return wf.compile(checkpointer=get_checkpointer())
+    return wf.compile(checkpointer=await get_async_checkpointer())
 
 
 # Public entry points
@@ -174,7 +174,7 @@ async def run_pre_call(
     state["agent_results"]["_task_type"] = "pre_call"
 
     with Session(engine) as session:
-        graph = _build_orchestrator_graph(session, company_id)
+        graph = await _build_orchestrator_graph(session, company_id)
 
     config = {"configurable": {"thread_id": f"pre_call_{company_id}_{lead_id}"}}
     try:
@@ -253,7 +253,7 @@ async def run_post_call(
     })
 
     with Session(engine) as session:
-        graph = _build_orchestrator_graph(session, company_id)
+        graph = await _build_orchestrator_graph(session, company_id)
 
     config = {"configurable": {"thread_id": f"post_call_{company_id}_{lead_id}"}}
     try:
@@ -340,7 +340,7 @@ async def ask(
     async def _run():
         # Graph build is inside _run so LLM/import errors are caught by with_fallback
         with Session(engine) as session:
-            graph = _build_orchestrator_graph(session, company_id)
+            graph = await _build_orchestrator_graph(session, company_id)
         final = await graph.ainvoke(state, config=cfg)
         msgs = final.get("messages", [])
         output = msgs[-1].content if msgs else ""

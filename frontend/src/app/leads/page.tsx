@@ -223,8 +223,8 @@ export default function LeadsPage() {
         return;
       }
 
-      if (!res.ok) throw new Error("Call could not be started");
       const data = await res.json();
+      if (!res.ok) throw new Error(data.detail || data.message || "Call could not be started");
       setMessage(`Calling ${lead.name} at ${lead.normalized_phone}...`);
       if (data.interaction_id) setCallInteractionId(data.interaction_id);
     } catch (error) {

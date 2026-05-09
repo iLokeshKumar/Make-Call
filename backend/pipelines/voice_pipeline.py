@@ -25,6 +25,11 @@ from utils.lead_utils import get_comprehensive_lead_context
 from utils.timezone_utils import format_datetime_for_timezone, resolve_lead_timezone
 from utils import settings_cache as _sc
 from services.call import sentiment_broadcaster
+from pipelines.voice.stt_handler import STTHandler
+from pipelines.voice.tts_handler import TTSHandler
+from pipelines.voice.llm_handler import LLMHandler
+from pipelines.voice.interrupt_manager import InterruptManager
+from pipelines.voice.transcript_manager import TranscriptManager
 
 logger = logging.getLogger(__name__)
 
@@ -225,8 +230,13 @@ class VoicePipeline:
                     session=self.session,
                     company_id=self.company_id,
                 )
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning(
+                    "Failed to load lead context for interaction %s: %s",
+                    self.interaction_id,
+                    str(e),
+                    extra={"lead_id": lead_id}
+                )
         time_context = self._build_time_context()
         
         full_system_prompt = system_prompt + time_context
@@ -267,6 +277,41 @@ class VoicePipeline:
         # Trace context — one trace_id per call, turn_index increments each turn
         self.trace_id = _uuid.uuid4().hex
         self.turn_index = 0
+        
+        # Initialize handlers (Phase 3 refactoring)
+        self.stt_handler = STTHandler(
+            stt_service=self.stt_service,
+            communicator=self.communicator,
+            audio_encoding=self.audio_encoding,
+            audio_sample_rate=self.audio_sample_rate
+        )
+        
+        self.tts_handler = TTSHandler(
+            tts_service=self.tts_service,
+            communicator=self.communicator
+        )
+        
+        self.llm_handler = LLMHandler(
+            llm_service=self.llm_service,
+            max_sentences_per_turn=self.max_sentences_per_turn
+        )
+        
+        self.interrupt_manager = InterruptManager(
+            rms_threshold=self.barge_rms_threshold,
+            frames_needed=self.barge_frames_needed,
+            silence_reset_frames=self.barge_silence_reset_frames,
+            tts_guard_ms=self.barge_tts_guard_ms,
+            post_speech_cooldown_ms=self.barge_post_speech_cooldown_ms,
+            clear_cooldown_ms=self.barge_clear_cooldown_ms,
+            retrigger_cooldown_ms=self.barge_retrigger_cooldown_ms,
+            use_silero_vad=self.use_silero_vad,
+            disabled=self.disable_barge_in
+        )
+        
+        self.transcript_manager = TranscriptManager(
+            interaction_id=self.interaction_id,
+            session=self.session
+        )
 
     def _silero_confirms(self, audio_chunk: bytes) -> bool:
         """Wrap Silero VAD with the same encoding the barge-in loop receives.

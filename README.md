@@ -36,7 +36,38 @@ Our goal is to transform Rio from a simple assistant into a fully **Autonomous S
 
 ---
 
-## 🛠️ Installation & Setup
+## 🏗️ Core Architecture & Engineering
+
+This project is engineered for production-grade reliability and security:
+
+### 🔒 Enterprise-Grade Security (RLS)
+Unlike simple "WHERE" filters, Rio uses **Postgres Row-Level Security (RLS)** at the database layer. 
+- **Tenant Isolation**: Every database session is scoped to a specific `company_id` via a ContextVar-driven middleware.
+- **Fail-Safe**: Even if an application bug occurs, one company cannot access another's data.
+
+### 🧠 Advanced AI Orchestration (LangGraph)
+The multi-agent system is built using **LangGraph**, providing:
+- **Stateful Workflows**: Agents (Knowledge, Researcher, Outreacher, Coach) share a unified `RioState`.
+- **Human-in-the-Loop**: High-stakes actions (like sending quotes) are routed through an approval queue.
+- **Durable Task Queue**: All long-running agent tasks are processed via a robust `AgentTask` bus with automatic retries and exponential backoff.
+
+### 📊 Observability & Performance
+- **Real-Time Sentiment**: Pub/Sub-based sentiment analysis for live voice calls.
+- **Latency Monitoring**: Granular tracking of LLM, TTS, and STT performance metrics.
+- **Circuit Breakers**: Protection against cascading failures in external AI APIs.
+
+---
+
+## 📂 Project Structure
+
+- `backend/`: FastAPI server with SQLModel, LangGraph agents, and voice pipelines.
+- `frontend/`: Next.js 16 dashboard with TanStack Query and Shadcn UI.
+- `docs/`: Detailed implementation plans, architecture diagrams, and scaling strategies.
+- `labs/`: Experimental voice and agent prototypes.
+
+---
+
+## 🚀 Installation & Setup
 
 ### Prerequisites
 -   Python 3.12+

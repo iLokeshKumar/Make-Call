@@ -121,14 +121,14 @@ _ANALYTICS_SYSTEM_PROMPT = (
 )
 
 
-def create_agent(llm, company_id: int = 0):
+async def create_agent(llm, company_id: int = 0):
     from langchain.agents import create_agent
-    from agents.checkpointer import get_checkpointer
+    from agents.checkpointer import get_async_checkpointer
     return create_agent(
         llm,
         tools=ANALYTICS_TOOLS,
         system_prompt=_ANALYTICS_SYSTEM_PROMPT,
-        checkpointer=get_checkpointer(),
+        checkpointer=await get_async_checkpointer(),
     )
 
 
@@ -154,7 +154,7 @@ async def run(
     config = {"configurable": {"thread_id": thread_id or f"analytics_{company_id}"}}
     with Session(engine) as session:
         llm = get_agent_llm(session, company_id)
-    agent = create_agent(llm, company_id)
+    agent = await create_agent(llm, company_id)
     try:
         result = await agent.ainvoke(
             {"messages": [HumanMessage(content=query)]},
