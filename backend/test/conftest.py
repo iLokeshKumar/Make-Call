@@ -18,6 +18,12 @@ from decimal import Decimal
 from typing import Optional
 
 import pytest
+import sys, asyncio
+if sys.platform.startswith("win"):
+    try:
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    except Exception:
+        pass
 
 # Path setup: backend/ and backend/services/ must be importable
 

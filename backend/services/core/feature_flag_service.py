@@ -34,10 +34,10 @@ logger = logging.getLogger(__name__)
 # List features that are OFF for a tier. Everything else defaults to ON. "enterprise" has no restrictions.
 
 _TIER_OFF: dict[str, set[str]] = {
-    "starter": {},
-    "growth": {},
-    "professional": {},
-    "enterprise": {},
+    "starter": set(),
+    "growth": set(),
+    "professional": set(),
+    "enterprise": set(),
 }
 
 # Global fallback for unknown tiers: treat like starter

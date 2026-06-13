@@ -7,6 +7,9 @@ from .openrouter import OpenRouterLLM
 from .mimo import MimoLLM
 from .sarvam import SarvamLLM
 from .groq import GroqLLM
+from .azure import AzureLLM
+from .smallest import SmallestLLM
+from .airllm import AirLLMLLM
 
 def get_llm_service(provider: str, system_prompt: str, api_key: str = None, model: str = None):
     """Factory to get the requested LLM service."""
@@ -29,6 +32,17 @@ def get_llm_service(provider: str, system_prompt: str, api_key: str = None, mode
         return SarvamLLM(system_prompt, api_key=api_key, model=model)
     elif provider == "groq":
         return GroqLLM(system_prompt, api_key=api_key, model=model)
+    elif provider == "azure":
+        return AzureLLM(system_prompt, api_key=api_key, model=model)
+    elif provider == "smallest":
+        return SmallestLLM(system_prompt, api_key=api_key, model=model)
+    elif provider == "airllm":
+        return AirLLMLLM(system_prompt, api_key=api_key, model=model)
     else:
-        # Default fallback
-        return MistralLLM(system_prompt, api_key=api_key, model=model)
+        # No silent fallback - misconfiguration must be loud or you end up
+        # debugging "why is my Claude prompt answering like Mistral".
+        raise ValueError(
+            f"Unknown LLM provider: {provider!r}. "
+            f"Valid: mistral, anthropic|claude, google|gemini, perplexity, "
+            f"cerebras, openrouter, mimo, sarvam, groq, azure, smallest, airllm"
+        )

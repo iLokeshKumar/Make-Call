@@ -22,6 +22,20 @@ const CSRF_COOKIE = "rio_csrf";
 const CSRF_HEADER = "X-CSRF-Token";
 const SAFE_METHODS = new Set(["GET", "HEAD", "OPTIONS"]);
 
+/**
+ * Thrown when `fetch()` fails at the network level — the API server is
+ * unreachable (down, connection refused, DNS failure). This is distinct from
+ * an HTTP error status: a 4xx/5xx resolves normally and never lands here.
+ * Callers can `instanceof ApiNetworkError` to show a "backend unreachable"
+ * state instead of treating it like a generic failure.
+ */
+export class ApiNetworkError extends Error {
+    constructor(url: string, options?: { cause?: unknown }) {
+        super(`Cannot reach the API server at ${url}. Is the backend running?`, options);
+        this.name = "ApiNetworkError";
+    }
+}
+
 /** Read a cookie by name. Returns null in SSR / if not present. */
 export function readCookie(name: string): string | null {
     if (typeof document === "undefined") return null;
@@ -64,9 +78,26 @@ export async function apiFetch(
         headers.set("Content-Type", "application/json");
     }
 
-    return fetch(input, {
-        ...init,
-        credentials: "include",
-        headers,
-    });
+    try {
+        return await fetch(input, {
+            ...init,
+            credentials: "include",
+            headers,
+        });
+    } catch (err) {
+        // fetch() rejects with a TypeError only on a network-level failure
+        // (server unreachable, connection refused, DNS). HTTP error statuses
+        // do not reject. Rethrow as a clear, catchable error; pass anything
+        // else (e.g. AbortError) through untouched.
+        if (err instanceof TypeError) {
+            const url =
+                typeof input === "string"
+                    ? input
+                    : input instanceof URL
+                      ? input.href
+                      : (input as Request).url;
+            throw new ApiNetworkError(url, { cause: err });
+        }
+        throw err;
+    }
 }

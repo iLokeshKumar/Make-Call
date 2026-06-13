@@ -130,7 +130,8 @@ class BaseLLM(ABC):
             # But in our case, if it's the LAST message, it's definitely interrupted.
             logger.info(f"🧹 [BaseLLM] Cleaning interrupted tool calls from last assistant message.")
             last_msg.pop("tool_calls", None)
-            # Optional: if the content is also empty, we might want to remove the message entirely, but usually it has a "Thinking..." phrase.
+            if not last_msg.get("content"):
+                self.messages.remove(last_msg)
 
     def get_safe_history(self, limit: int = 10) -> List[Dict[str, Any]]:
         """

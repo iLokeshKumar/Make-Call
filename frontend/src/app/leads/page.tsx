@@ -8,7 +8,7 @@ import { useAuth } from "@/context/AuthContext";
 import ImportLeadsModal from "@/components/leads/ImportLeadsModal";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 /** Strip system-appended log lines from lead notes before displaying. */
 function cleanNotes(notes: string | null | undefined): string {
@@ -171,15 +171,32 @@ export default function LeadsPage() {
   }
 
   const CALL_STATUS_LABELS: Record<string, string> = {
+    // pre-call
+    prepared:     "Prepared",
+    scheduled:    "Scheduled",
+    queued:       "Queued",
     initiated:    "Calling...",
     ringing:      "Ringing...",
-    "in-progress":"In conversation",
+    // active
+    "in-progress":"In conversation",    // Twilio native (legacy)
+    in_progress:  "In conversation",
+    connected:    "In conversation",
+    // terminal
     completed:    "Call completed",
-    "no-answer":  "No answer",
+    "no-answer":  "No answer",          // legacy
+    no_answer:    "No answer",
     busy:         "Line busy",
     failed:       "Call failed",
-    canceled:     "Call canceled" };
-  const TERMINAL_STATUSES = new Set(["completed", "no-answer", "busy", "failed", "canceled"]);
+    canceled:     "Call canceled",      // legacy
+    cancelled:    "Call cancelled",
+    error:        "Call error",
+    low_balance:  "Low balance",
+    stopped:      "Stopped",
+  };
+  const TERMINAL_STATUSES = new Set([
+    "completed", "no-answer", "no_answer", "busy",
+    "failed", "canceled", "cancelled", "error", "low_balance", "stopped",
+  ]);
 
   useEffect(() => {
     if (!callInteractionId ) return;
@@ -338,8 +355,8 @@ export default function LeadsPage() {
           {message && (
             <div className={`mb-4 rounded-xl border px-4 py-3 text-sm flex items-center gap-2 ${
               callStatus === "completed" ? "border-green-200 bg-green-50 text-green-700 dark:border-green-500/20 dark:bg-green-500/10 dark:text-green-300"
-              : callStatus === "no-answer" || callStatus === "busy" || callStatus === "failed" ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
-              : callStatus === "in-progress" ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300"
+              : (callStatus === "no-answer" || callStatus === "no_answer" || callStatus === "busy" || callStatus === "failed" || callStatus === "error" || callStatus === "low_balance") ? "border-red-200 bg-red-50 text-red-700 dark:border-red-500/20 dark:bg-red-500/10 dark:text-red-300"
+              : (callStatus === "in-progress" || callStatus === "in_progress" || callStatus === "connected") ? "border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-500/20 dark:bg-blue-500/10 dark:text-blue-300"
               : "border-violet-200 bg-violet-50 text-violet-700 dark:border-violet-500/20 dark:bg-violet-500/10 dark:text-violet-200"
             }`}>
               {callInteractionId && !TERMINAL_STATUSES.has(callStatus ?? "") && (

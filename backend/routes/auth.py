@@ -139,7 +139,7 @@ def _get_user_role(session: Session, user_id: int) -> str:
 
 BASE_DIR = Path(__file__).resolve().parents[1]
 GOOGLE_CREDENTIALS_PATH = BASE_DIR / "google_credentials.json"
-GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:3006/profile")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_PROFILE_REDIRECT_URI") or os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:3006/profile")
 GOOGLE_SCOPES = [
     "https://www.googleapis.com/auth/calendar",
     "https://www.googleapis.com/auth/userinfo.email",
@@ -1190,11 +1190,17 @@ async def google_callback(
         raise HTTPException(status_code=400, detail=f"Token exchange failed: {exc}") from exc
     creds = flow.credentials
     refresh_token = creds.refresh_token or _get_company_setting_value(session, current_user.company_id, "GOOGLE_REFRESH_TOKEN")
+    expiry = creds.expiry.isoformat() if creds.expiry else None
     _upsert_company_setting(session, current_user.company_id, "GOOGLE_REFRESH_TOKEN", refresh_token, current_user.id, True)
     _upsert_company_setting(session, current_user.company_id, "GOOGLE_ACCESS_TOKEN", creds.token, current_user.id, True)
-    expiry = creds.expiry.isoformat() if creds.expiry else None
     _upsert_company_setting(session, current_user.company_id, "GOOGLE_TOKEN_EXPIRY", expiry, current_user.id)
     _upsert_company_setting(session, current_user.company_id, "GOOGLE_TOKEN_SCOPE", " ".join(creds.scopes or []), current_user.id)
+    # Mirror to GCAL_* keys so the calendar booking service can use this connection too
+    _upsert_company_setting(session, current_user.company_id, "GCAL_ACCESS_TOKEN", creds.token, current_user.id, True)
+    if refresh_token:
+        _upsert_company_setting(session, current_user.company_id, "GCAL_REFRESH_TOKEN", refresh_token, current_user.id, True)
+    if expiry:
+        _upsert_company_setting(session, current_user.company_id, "GCAL_TOKEN_EXPIRY", expiry, current_user.id)
     user_email = None
     try:
         headers = {"Authorization": f"Bearer {creds.token}"}
@@ -1206,6 +1212,7 @@ async def google_callback(
         logger.warning("Unable to fetch Google profile for user %s", current_user.id)
     if user_email:
         _upsert_company_setting(session, current_user.company_id, "GOOGLE_USER_EMAIL", user_email, current_user.id)
+        _upsert_company_setting(session, current_user.company_id, "GCAL_EMAIL", user_email, current_user.id)
     session.commit()
     _sc.invalidate_user(current_user.company_id)
     GOOGLE_STATE_CACHE.pop(current_user.id, None)

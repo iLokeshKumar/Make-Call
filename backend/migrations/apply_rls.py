@@ -79,6 +79,19 @@ ALL_TENANT_TABLES: list[str] = [
     "roles",
     "sentiment_events",
     "users",
+    "voice_agent_execution_events",
+    "voice_agent_extraction_results",
+    "voice_agent_extraction_templates",
+    "voice_agent_graphs",
+    "voice_agent_prompt_versions",
+    "voice_agent_runtime_configs",
+    "voice_agent_tools",
+    "voice_agent_voice_presets",
+    "voice_agents",
+    "provider_phone_numbers",
+    "campaign_schedules",
+    "sip_trunks",
+    "compliance_applications",
 ]
 
 POLICY_NAME = "tenant_isolation"

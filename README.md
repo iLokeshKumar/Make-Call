@@ -29,10 +29,10 @@
 
 Our goal is to transform Rio from a simple assistant into a fully **Autonomous Sales Operation** capable of handling the entire top-of-funnel lifecycle:
 
-- **Phase 1: Prospecting & Enrichment**: Full "Waterfall" enrichment (Local -> Apollo -> Lusha -> Validation) to ensure high-quality contact data.
-- **Phase 2: Multi-Channel Sequence**: Automated follow-ups via Voice, WhatsApp, and Email based on customer sentiment.
-- **Phase 3: Live Handoff**: Intelligent escalation to human sales reps for high-value leads with real-time context transfer.
-- **Phase 4: Quote to Close**: Automated PDF quotation generation and CRM conversion using deep tool-calling integrations.
+- **Prospecting & Enrichment**: Full "Waterfall" enrichment (Local -> Apollo -> Lusha -> Validation) to ensure high-quality contact data.
+- **Multi-Channel Sequence**: Automated follow-ups via Voice, WhatsApp, and Email based on customer sentiment.
+- **Live Handoff**: Intelligent escalation to human sales reps for high-value leads with real-time context transfer.
+- **Quote to Close**: Automated PDF quotation generation and CRM conversion using deep tool-calling integrations.
 
 ---
 
@@ -110,4 +110,4 @@ Run `start_servers.bat` to launch both the Backend (6060) and Frontend (3006).
 - [Talentrus Distribution](https://distribution.talentrus.net/)
 
 ## 📄 License
-This project is licensed under the MIT License.
+PROPRIETARY AND CONFIDENTIAL. All rights reserved. See [LICENSE](LICENSE) for details.

@@ -6,7 +6,8 @@ import { usePathname } from "next/navigation";
 import {
   LayoutDashboard, Users, Phone, Settings, Sparkles, Package, LogOut, Activity,
   ChevronLeft, ChevronRight, User as UserIcon, Mail, Smartphone, Eye, EyeOff, ShieldCheck, X, Loader2, Clock, UserCog, Building2, Megaphone,
-  FileText, Layout, Cpu, BookOpen, LayoutGrid, MessageSquare, Database, Bot, Inbox
+  FileText, Layout, Cpu, BookOpen, LayoutGrid, MessageSquare, Database, Bot,
+  ShoppingCart, Receipt, CreditCard, Ticket, Wrench, UserCheck, ClipboardCheck
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -18,8 +19,10 @@ const navItems = [
   { name: "Leads", href: "/leads", icon: Users },
   { name: "Campaigns", href: "/campaigns", icon: Megaphone },
   { name: "Calls", href: "/calls", icon: Phone },
+  { name: "Voice Agent", href: "/voice-agents", icon: Sparkles },
   { name: "Inventory", href: "/inventory", icon: Package, adminOnly: true },
   { name: "Analytics", href: "/analytics", icon: Activity },
+  { name: "Evaluations", href: "/evals", icon: ClipboardCheck, adminOnly: true },
   { name: "Quotes", href: "/quotes", icon: FileText },
   { name: "Accounts", href: "/accounts", icon: Building2 },
   { name: "Templates", href: "/templates", icon: Layout, adminOnly: true },
@@ -28,8 +31,13 @@ const navItems = [
   { name: "Feedback", href: "/feedback", icon: MessageSquare },
   { name: "Objections", href: "/objections", icon: BookOpen },
   { name: "Knowledge", href: "/knowledge", icon: Database },
+  { name: "Orders", href: "/orders", icon: ShoppingCart },
+  { name: "Invoices", href: "/invoices", icon: Receipt },
+  { name: "Payments", href: "/payments", icon: CreditCard },
+  { name: "Tickets", href: "/tickets", icon: Ticket },
+  { name: "Installations", href: "/installations", icon: Wrench },
+  { name: "Contacts", href: "/contacts", icon: UserCheck },
   { name: "Agent Tasks", href: "/agent-tasks", icon: Bot },
-  { name: "Approvals", href: "/agents/approvals", icon: Inbox },
   { name: "Activity", href: "/agents/activity", icon: Activity },
   { name: "Admin", href: "/admin", icon: ShieldCheck, adminOnly: true },
   { name: "Profile", href: "/profile", icon: UserCog },
@@ -40,6 +48,7 @@ const navItems = [
 export default function Sidebar() {
   const pathname = usePathname();
   const { user, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   // Resizing State
@@ -98,7 +107,7 @@ export default function Sidebar() {
     setOtpError("");
 
     try {
-      const res = await apiFetch("http://localhost:6060/auth/reveal/request", {
+      const res = await apiFetch(`${API_BASE}/auth/reveal/request`, {
         method: "POST"
       });
       if (!res.ok) throw new Error("Failed to send OTP");
@@ -114,7 +123,7 @@ export default function Sidebar() {
     setOtpError("");
 
     try {
-      const res = await apiFetch("http://localhost:6060/auth/reveal/verify", {
+      const res = await apiFetch(`${API_BASE}/auth/reveal/verify`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json" },
@@ -352,7 +361,7 @@ export default function Sidebar() {
             </div>
 
             <p className="text-sm text-slate-500 dark:text-slate-400">
-              We've sent a 6-digit verification code to <strong>{maskEmail(user?.email || '')}</strong>. Enter it below to reveal your sensitive details.
+              We&apos;ve sent a 6-digit verification code to <strong>{maskEmail(user?.email || '')}</strong>. Enter it below to reveal your sensitive details.
             </p>
 
             <div className="space-y-4">
@@ -388,7 +397,7 @@ export default function Sidebar() {
             </div>
 
             <p className="text-[10px] text-center text-slate-400 dark:text-slate-500">
-              This code will expire in 10 minutes. Haven't received it? Check your spam folder.
+              This code will expire in 10 minutes. Haven&apos;t received it? Check your spam folder.
             </p>
           </div>
         </div>

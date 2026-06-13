@@ -3,7 +3,7 @@ from sqlmodel import Session, select
 
 from auth import PermissionChecker, get_current_user
 from database import get_session
-from models.models import CompanySetting, CompanySettingsBulkUpsert, User, utc_now
+from models.models import CompanySetting, CompanySettingsBulkUpsert, User, utc_now, CompanySettingAudit, CompanyPrompt
 from utils.encryption import decrypt_value, encrypt_value
 from utils import settings_cache as _sc
 
@@ -27,6 +27,17 @@ ALL_INTEGRATION_KEYS = {
     "ENABLEX_APP_ID",
     "ENABLEX_APP_KEY",
     "ENABLEX_FROM_NUMBER",
+    # Plivo
+    "PLIVO_AUTH_ID",
+    "PLIVO_AUTH_TOKEN",
+    "PLIVO_PHONE_NUMBER",
+    # Vobiz
+    "VOBIZ_AUTH_ID",
+    "VOBIZ_AUTH_TOKEN",
+    "VOBIZ_PHONE_NUMBER",
+    # Human handoff / warm transfer
+    "WARM_TRANSFER_NUMBER",
+    "WARM_TRANSFER_NAME",
     # STT
     "DEEPGRAM_API_KEY",
     "SARVAM_API_KEY",
@@ -38,6 +49,19 @@ ALL_INTEGRATION_KEYS = {
     "SARVAM_VOICE_ID",
     "SMALLEST_STT_MODEL",
     "SMALLEST_VOICE_ID",
+    "ASSEMBLYAI_API_KEY",
+    "ASSEMBLYAI_STT_MODEL",
+    "GLADIA_API_KEY",
+    "GLADIA_STT_MODEL",
+    "RINGG_AI_API_KEY",
+    "RINGG_AI_STT_MODEL",
+    "INWORLD_API_KEY",
+    "INWORLD_STT_MODEL",
+    "AZURE_SPEECH_API_KEY",
+    "AZURE_SPEECH_API_VERSION",
+    "AZURE_SPEECH_REGION",
+    "AZURE_STT_MODEL",
+    "AZURE_SPEECH_ENDPOINT",
     # TTS
     "CARTESIA_API_KEY",
     "ELEVENLABS_API_KEY",
@@ -53,6 +77,21 @@ ALL_INTEGRATION_KEYS = {
     "MISTRAL_TTS_MODEL",
     "SMALLEST_API_KEY",
     "SMALLEST_TTS_MODEL",
+    "INWORLD_TTS_MODEL",
+    "INWORLD_VOICE_ID",
+    "RIME_API_KEY",
+    "RIME_TTS_MODEL",
+    "RIME_VOICE_ID",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_DEFAULT_REGION",
+    "POLLY_TTS_MODEL",
+    "POLLY_VOICE_ID",
+    "AZURE_TTS_MODEL",
+    "AZURE_VOICE_ID",
+    "KITTEN_TTS_MODEL",
+    "KITTEN_TTS_VOICE",
+    "MISTRAL_VOICE_ID",
     # LLM
     "OPENAI_API_KEY",
     "MISTRAL_API_KEY",
@@ -75,6 +114,15 @@ ALL_INTEGRATION_KEYS = {
     "GROQ_VOICE",
     "GROQ_API_KEY",
     "GROQ_MODEL",
+    "AZURE_LLM_API_KEY",
+    "AZURE_LLM_ENDPOINT",
+    "AZURE_LLM_API_VERSION",
+    "AZURE_LLM_REGION",
+    "AZURE_LLM_MODEL",
+    "SMALLEST_LLM_MODEL",
+    "AIRLLM_MODEL",
+    "AIRLLM_COMPRESSION",
+    "AIRLLM_MAX_NEW_TOKENS",
     # Email / SMTP
     "SMTP_SERVER",
     "SMTP_PORT",
@@ -94,6 +142,7 @@ ALL_INTEGRATION_KEYS = {
 }
 
 SECRET_INTEGRATION_KEYS = {
+    "TWILIO_ACCOUNT_SID",
     "TWILIO_AUTH_TOKEN",
     "EXOTEL_API_KEY",
     "EXOTEL_API_TOKEN",
@@ -120,11 +169,22 @@ SECRET_INTEGRATION_KEYS = {
     "ZOOMINFO_CLIENT_ID",
     "ZOOMINFO_API_KEY",
     "GROQ_API_KEY",
+    "PLIVO_AUTH_TOKEN",
+    "VOBIZ_AUTH_TOKEN",
+    "ASSEMBLYAI_API_KEY",
+    "GLADIA_API_KEY",
+    "RINGG_AI_API_KEY",
+    "RIME_API_KEY",
+    "INWORLD_API_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SECRET_ACCESS_KEY",
+    "AZURE_LLM_API_KEY",
+    "AZURE_SPEECH_API_KEY",
 }
 
 PLAIN_INTEGRATION_KEYS = ALL_INTEGRATION_KEYS - SECRET_INTEGRATION_KEYS
 
-_USER_PERSONAL_KEYS = {"SYSTEM_PROMPT", "AI_VERBOSITY"}
+_USER_PERSONAL_KEYS = {"SYSTEM_PROMPT", "AI_VERBOSITY", "WARM_TRANSFER_NUMBER", "WARM_TRANSFER_NAME"}
 
 _USER_EMAIL_KEYS = [
     "SMTP_HOST", "SMTP_PORT", "SMTP_SECURITY", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL",
@@ -144,6 +204,81 @@ async def get_company_settings(
         select(CompanySetting).where(CompanySetting.company_id == current_user.company_id)
     ).all()
     return {item.key: "***MASKED***" if item.is_secret else item.value for item in settings}
+
+
+@router.get('/company-prompts')
+async def list_company_prompts(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("settings.read_company")),
+):
+    prompts = session.exec(
+        select(CompanyPrompt).where(CompanyPrompt.company_id == current_user.company_id).order_by(CompanyPrompt.version.desc())
+    ).all()
+    return [
+        {
+            "id": p.id,
+            "version": p.version,
+            "prompt_text": p.prompt_text,
+            "author_id": p.author_id,
+            "change_reason": p.change_reason,
+            "is_active": p.is_active,
+            "published_at": p.published_at.isoformat() if p.published_at else None,
+            "created_at": p.created_at.isoformat() if p.created_at else None,
+        }
+        for p in prompts
+    ]
+
+
+from pydantic import BaseModel
+
+class CompanyPromptCreate(BaseModel):
+    prompt_text: str
+    change_reason: str | None = None
+
+@router.post('/company-prompts')
+async def create_company_prompt(
+    body: CompanyPromptCreate,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("settings.manage_company")),
+):
+    # Determine next version
+    last = session.exec(select(CompanyPrompt.version).where(CompanyPrompt.company_id == current_user.company_id).order_by(CompanyPrompt.version.desc()).limit(1)).first()
+    next_version = (last or 0) + 1
+    prompt = CompanyPrompt(
+        company_id=current_user.company_id,
+        version=next_version,
+        prompt_text=body.prompt_text,
+        author_id=current_user.id,
+        change_reason=body.change_reason,
+        is_active=False,
+        published_at=None,
+    )
+    session.add(prompt)
+    session.commit()
+    session.refresh(prompt)
+    return {"id": prompt.id, "version": prompt.version}
+
+
+@router.post('/company-prompts/{prompt_id}/activate')
+async def activate_company_prompt(
+    prompt_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("settings.manage_company")),
+):
+    prompt = session.get(CompanyPrompt, prompt_id)
+    if not prompt or prompt.company_id != current_user.company_id:
+        raise HTTPException(status_code=404, detail="Prompt not found")
+    # Deactivate other versions for this company
+    other_prompts = session.exec(select(CompanyPrompt).where(CompanyPrompt.company_id == current_user.company_id, CompanyPrompt.is_active == True)).all()
+    for p in other_prompts:
+        p.is_active = False
+        session.add(p)
+
+    prompt.is_active = True
+    prompt.published_at = utc_now()
+    session.add(prompt)
+    session.commit()
+    return {"status": "activated", "id": prompt.id}
 
 
 @router.patch("/company-settings")
@@ -181,6 +316,31 @@ async def upsert_company_settings(
 
     session.commit()
     _sc.invalidate_user(current_user.company_id)
+
+    # Propagate global provider changes to all VoiceAgentRuntimeConfig rows so
+    # that stale per-row defaults (set at agent-creation time) don't shadow the
+    # company-level setting.  Per-agent customisations can still be re-applied
+    # from the Voice Agents page.
+    _PROVIDER_MAPPING = {
+        "LLM_PROVIDER": "llm_provider",
+        "STT_PROVIDER": "stt_provider",
+        "TTS_PROVIDER": "tts_provider",
+    }
+    changed_provider_cols = [
+        col for key, col in _PROVIDER_MAPPING.items()
+        if any(item.key == key for item in payload.items)
+    ]
+    if changed_provider_cols:
+        from models.models import VoiceAgentRuntimeConfig as _VARConfig
+        runtimes = session.exec(
+            select(_VARConfig).where(_VARConfig.company_id == current_user.company_id)
+        ).all()
+        for rt in runtimes:
+            for col in changed_provider_cols:
+                setattr(rt, col, None)
+            session.add(rt)
+        session.commit()
+
     return {"message": "Company settings updated"}
 
 
@@ -255,6 +415,22 @@ async def update_company_integrations(
         ).first()
 
         if existing:
+            old_val = existing.value
+            if old_val != stored_value and normalized_key in ("ASR_STORE_RAW_JSON", "ASR_OVERLAP_THRESHOLD"):
+                # record audit row for sensitive ASR setting changes
+                try:
+                    audit = CompanySettingAudit(
+                        company_id=current_user.company_id,
+                        key=normalized_key,
+                        old_value=str(old_val) if old_val is not None else None,
+                        new_value=str(stored_value) if stored_value is not None else None,
+                        changed_by=current_user.id,
+                    )
+                    session.add(audit)
+                except Exception:
+                    # never raise to caller on audit failure
+                    import logging as _logging
+                    _logging.getLogger(__name__).exception("Failed to write CompanySettingAudit")
             existing.value = stored_value
             existing.is_secret = is_secret
             existing.updated_at = utc_now()
@@ -271,6 +447,20 @@ async def update_company_integrations(
                     updated_by=current_user.id,
                 )
             )
+            if normalized_key in ("ASR_STORE_RAW_JSON", "ASR_OVERLAP_THRESHOLD"):
+                try:
+                    audit = CompanySettingAudit(
+                        company_id=current_user.company_id,
+                        key=normalized_key,
+                        old_value=None,
+                        new_value=str(stored_value) if stored_value is not None else None,
+                        changed_by=current_user.id,
+                    )
+                    session.add(audit)
+                except Exception:
+                    import logging as _logging
+                    _logging.getLogger(__name__).exception("Failed to write CompanySettingAudit")
+
 
     session.commit()
     _sc.invalidate_user(current_user.company_id)

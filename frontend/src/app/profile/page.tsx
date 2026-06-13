@@ -1,17 +1,16 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import {
     User as UserIcon, Mail, Smartphone, Globe, Building2,
     Lock, Save, Loader2, CheckCircle2, AlertCircle, Camera,
-    Shield, Trash2, ExternalLink, RefreshCw, XCircle,
+    Shield, Trash2,
     Eye, EyeOff, ShieldCheck, X, Clock
 } from "lucide-react";
 import clsx from "clsx";
 import MFASetup from "@/components/MFASetup";
 import { useEffect } from "react";
-import { useSearchParams } from "next/navigation";
 import { maskEmail, maskPhone } from "@/utils/security";
 
 import { apiFetch } from "@/utils/apiFetch";
@@ -26,9 +25,9 @@ type LoginHistoryEntry = {
 };
 
 export default function ProfilePage() {
-    const { user, refreshUser, googleStatus, refreshGoogleStatus, logoutAll, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    const { user, refreshUser, logoutAll, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
     const [isSaving, setIsSaving] = useState(false);
-    const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
     const [otpValue, setOtpValue] = useState("");
@@ -38,8 +37,6 @@ export default function ProfilePage() {
     const [isRequestingOtp, setIsRequestingOtp] = useState(false);
     const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
     const [otpError, setOtpError] = useState("");
-    const searchParams = useSearchParams();
-
     const [formData, setFormData] = useState({
         first_name: user?.first_name || "",
         last_name: user?.last_name || "",
@@ -59,7 +56,7 @@ export default function ProfilePage() {
         uploadData.append("file", file);
 
         try {
-            const res = await apiFetch("http://localhost:6060/auth/upload-avatar", {
+            const res = await apiFetch(`${API_BASE}/auth/upload-avatar`, {
                 method: "POST",
                 headers: {
                 },
@@ -96,7 +93,7 @@ export default function ProfilePage() {
         if (!user) return;
         setIsHistoryLoading(true);
         try {
-            const res = await apiFetch("http://localhost:6060/auth/login-history", {
+            const res = await apiFetch(`${API_BASE}/auth/login-history`, {
             });
             if (res.ok) {
                 setLoginHistory(await res.json());
@@ -127,96 +124,11 @@ export default function ProfilePage() {
         }
     };
 
-    const hasHandledGoogleCallback = useRef(false);
-
     useEffect(() => {
         if (user) {
-            refreshGoogleStatus();
             fetchLoginHistory();
         }
     }, [user]);
-
-    const handleConnectGoogle = async () => {
-        setIsConnectingGoogle(true);
-        try {
-            const res = await apiFetch("http://localhost:6060/auth/google/url", {
-            });
-            const data = await res.json();
-            if (data.auth_url) {
-                // Open in a new window/tab
-                const authWindow = window.open(data.auth_url, '_blank', 'width=600,height=700');
-
-                // Set up a listener for the callback
-                const checkWindow = setInterval(async () => {
-                    if (authWindow?.closed) {
-                        clearInterval(checkWindow);
-                        setIsConnectingGoogle(false);
-                        await refreshUser();
-                        await refreshGoogleStatus();
-                    }
-                }, 1000);
-            }
-        } catch (err) {
-            console.error("Google Auth error:", err);
-            setIsConnectingGoogle(false);
-        }
-    };
-
-    useEffect(() => {
-        const code = searchParams.get("code");
-        const state = searchParams.get("state");
-        if (!code || hasHandledGoogleCallback.current) return;
-        hasHandledGoogleCallback.current = true;
-        const submitCallback = async () => {
-            setIsConnectingGoogle(true);
-            try {
-                const res = await apiFetch("http://localhost:6060/auth/google/callback", {
-                    method: "POST",
-                    headers: {
-                        "Content-Type": "application/json" },
-                    body: JSON.stringify({ code, state }) });
-                if (!res.ok) {
-                    let detail = "Failed to finish Google OAuth.";
-                    try {
-                        const err = await res.json();
-                        detail = err.detail || detail;
-                    } catch {}
-                    throw new Error(detail);
-                }
-                await refreshUser();
-                await refreshGoogleStatus();
-                setMessage({ type: 'success', text: "Google account connected successfully!" });
-            } catch (err) {
-                console.error("Google callback error:", err);
-                setMessage({ type: 'error', text: err instanceof Error ? err.message : "An error occurred during Google connection." });
-            } finally {
-                setIsConnectingGoogle(false);
-                const params = new URLSearchParams(window.location.search);
-                params.delete("code");
-                params.delete("state");
-                const base = window.location.pathname;
-                window.history.replaceState({}, "", `${base}?${params.toString()}`);
-            }
-        };
-        submitCallback();
-    }, [searchParams, refreshUser, refreshGoogleStatus]);
-
-    const handleDisconnectGoogle = async () => {
-        if (!window.confirm("Disconnect your Google account? You won't be able to generate Meet links automatically.")) return;
-
-        try {
-            const res = await apiFetch("http://localhost:6060/auth/google/disconnect", {
-                method: "DELETE"
-            });
-            if (res.ok) {
-                setMessage({ type: 'success', text: "Google account disconnected." });
-                await refreshUser();
-                await refreshGoogleStatus();
-            }
-        } catch (err) {
-            setMessage({ type: 'error', text: "Failed to disconnect." });
-        }
-    };
 
     const handleRequestReveal = async () => {
         if (showPersonalDetails) {
@@ -229,7 +141,7 @@ export default function ProfilePage() {
         setOtpError("");
 
         try {
-            const res = await apiFetch("http://localhost:6060/auth/reveal/request", {
+            const res = await apiFetch(`${API_BASE}/auth/reveal/request`, {
                 method: "POST"
             });
             if (!res.ok) throw new Error("Failed to send OTP");
@@ -245,7 +157,7 @@ export default function ProfilePage() {
         setOtpError("");
 
         try {
-            const res = await apiFetch("http://localhost:6060/auth/reveal/verify", {
+            const res = await apiFetch(`${API_BASE}/auth/reveal/verify`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json" },
@@ -272,7 +184,7 @@ export default function ProfilePage() {
         }
 
         try {
-            const res = await apiFetch("http://localhost:6060/auth/me", {
+            const res = await apiFetch(`${API_BASE}/auth/me`, {
                 method: "DELETE"
             });
 
@@ -297,7 +209,7 @@ export default function ProfilePage() {
         setMessage(null);
 
         try {
-            const res = await apiFetch("http://localhost:6060/users/me", {
+            const res = await apiFetch(`${API_BASE}/users/me`, {
                 method: "PATCH",
                 headers: {
                     "Content-Type": "application/json" },
@@ -587,86 +499,6 @@ export default function ProfilePage() {
                                 <span className="text-xs font-bold uppercase tracking-wider">Security</span>
                             </div>
                             <MFASetup />
-                        </div>
-
-                        {/* Google Integration */}
-                        <div className="glass-panel p-8 rounded-3xl space-y-4">
-                            <div className="flex items-center space-x-2 text-slate-400">
-                                <Globe size={16} />
-                                <span className="text-xs font-bold uppercase tracking-wider">Google Integration</span>
-                            </div>
-
-                            {/* Proactive Warning Banner */}
-                            {googleStatus && googleStatus.status !== "valid" && googleStatus.status !== "disconnected" && (
-                                <div className={clsx(
-                                    "p-4 rounded-2xl border flex items-start gap-3 animate-in fade-in slide-in-from-top-2",
-                                    googleStatus.status === "expiring_soon" ? "bg-amber-500/10 border-amber-500/20 text-amber-200" : "bg-red-500/10 border-red-500/20 text-red-200"
-                                )}>
-                                    <AlertCircle className={googleStatus.status === "expiring_soon" ? "text-amber-500" : "text-red-500"} size={20} />
-                                    <div className="space-y-1">
-                                        <p className="text-sm font-bold">
-                                            {googleStatus.status === "expiring_soon" ? "Connection Expiring Soon" : "Connection Expired"}
-                                        </p>
-                                        <p className="text-xs opacity-80 leading-relaxed">
-                                            {googleStatus.message} Reconnect now to ensure your Google Meet links are generated without issues.
-                                        </p>
-                                        <button 
-                                            onClick={handleConnectGoogle}
-                                            className="mt-2 text-xs font-black uppercase tracking-widest py-1.5 px-3 rounded-lg bg-white/10 hover:bg-white/20 transition-all border border-white/10"
-                                        >
-                                            Reconnect Now
-                                        </button>
-                                    </div>
-                                </div>
-                            )}
-
-                            <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-violet-500/30 transition-all group">
-                                <div className="flex items-center space-x-4">
-                                    <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-white text-slate-900 font-bold shadow-lg">
-                                        G
-                                    </div>
-                                    <div>
-                                        <div className="flex items-center gap-2">
-                                            <p className="font-bold text-white">Google Calendar</p>
-                                            {googleStatus && (
-                                                <span className={clsx(
-                                                    "text-[10px] px-2 py-0.5 rounded-full font-bold uppercase tracking-tighter",
-                                                    googleStatus.status === "valid" ? "bg-emerald-500/20 text-emerald-400" :
-                                                    googleStatus.status === "expiring_soon" ? "bg-amber-500/20 text-amber-400" :
-                                                    googleStatus.status === "expired" ? "bg-red-500/20 text-red-400" :
-                                                    "bg-slate-500/20 text-slate-400"
-                                                )}>
-                                                    {googleStatus.status.replace("_", " ")}
-                                                </span>
-                                            )}
-                                        </div>
-                                        <p className="text-xs text-slate-500">
-                                            {googleStatus?.email ? `Connected: ${googleStatus.email}` : "For Google Meet integration"}
-                                        </p>
-                                    </div>
-                                </div>
-
-                                {googleStatus?.status && googleStatus.status !== "disconnected" ? (
-                                    <button
-                                        type="button"
-                                        onClick={handleDisconnectGoogle}
-                                        className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500 hover:text-white transition-all"
-                                    >
-                                        <XCircle size={14} />
-                                        <span>Disconnect</span>
-                                    </button>
-                                ) : (
-                                    <button
-                                        type="button"
-                                        onClick={handleConnectGoogle}
-                                        disabled={isConnectingGoogle}
-                                        className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
-                                    >
-                                        {isConnectingGoogle ? <RefreshCw size={14} className="animate-spin" /> : <ExternalLink size={14} />}
-                                        <span>Connect Google</span>
-                                    </button>
-                                )}
-                            </div>
                         </div>
 
                         {/* Danger Zone */}

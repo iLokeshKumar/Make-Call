@@ -92,7 +92,14 @@ def set_ism_stage(lead_id: int, company_id: int, new_stage: str, actor_user_id: 
         return f"Stage update failed: {exc}"
 
 
-ISM_TOOLS = [advance_ism_stage, get_ism_stage, set_ism_stage]
+try:
+    from agents.proposal import draft_proposal, send_proposal_for_approval
+    _PROPOSAL_TOOLS = [draft_proposal, send_proposal_for_approval]
+except Exception:  # pragma: no cover - keeps legacy ISM importable if proposal deps are unavailable
+    _PROPOSAL_TOOLS = []
+
+
+ISM_TOOLS = [advance_ism_stage, get_ism_stage, set_ism_stage, *_PROPOSAL_TOOLS]
 
 
 @traceable(name="ism_node", run_type="chain", tags=['ism'])
@@ -121,9 +128,13 @@ _ISM_SYSTEM_PROMPT = (
     "- advance_ism_stage: run a full ISM cycle (chooses channel, dispatches action)\n"
     "- get_ism_stage: check current stage\n"
     "- set_ism_stage: manually override the stage\n\n"
+    "- draft_proposal: create a validated RFP/RFQ/proposal draft for qualified requirements\n"
+    "- send_proposal_for_approval: queue an approval-gated proposal send\n\n"
     "Rules:\n"
     "- Always check get_ism_stage before deciding to advance.\n"
     "- Use advance_ism_stage for normal progression -- it picks the best outreach channel.\n"
+    "- When a lead asks for an RFP/RFQ/proposal/quote, draft the proposal before sending.\n"
+    "- Never send a proposal that is blocked by validation.\n"
     "- Only use set_ism_stage when explicitly instructed to override.\n"
     "- Never advance a lead that is already closed_won or closed_lost."
 )

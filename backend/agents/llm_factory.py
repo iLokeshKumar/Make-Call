@@ -24,6 +24,7 @@ _PROVIDER_MAP: dict[str, tuple[str, str, str]] = {
     "openai":     ("OPENAI_MODEL",    "OPENAI_API_KEY",    "gpt-4o-mini"),
     "openrouter": ("OPENROUTER_MODEL","OPENROUTER_API_KEY","openai/gpt-4o-mini"),
     "cerebras":   ("CEREBRAS_MODEL",  "CEREBRAS_API_KEY",  "llama-3.3-70b"),
+    "airllm":     ("AIRLLM_MODEL",    "AIRLLM_HF_TOKEN",   ""),
 }
 
 
@@ -105,6 +106,10 @@ def get_agent_llm(session: Session, company_id: int):
         if api_key:
             kwargs["api_key"] = api_key
         return ChatOpenAI(**kwargs)
+
+    if provider == "airllm":
+        from services.ai.llm.airllm_chat_model import AirLLMChatModel
+        return AirLLMChatModel()
 
     # Should never reach here given the guard above
     raise ValueError(f"Unhandled provider: {provider}")

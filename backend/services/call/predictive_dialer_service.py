@@ -131,6 +131,17 @@ _model_cache: dict[int, object] = {}  # company_id → fitted model
 
 def _train_ml_model(X: list, y: list):
     try:
+        from tabpfn import TabPFNClassifier
+        import numpy as np
+        clf = TabPFNClassifier()
+        clf.fit(np.array(X), np.array(y))
+        return clf
+    except ImportError:
+        pass
+    except Exception as exc:
+        logger.warning("[PredictiveDialer] TabPFN training failed: %s", exc)
+    # Fallback: scikit-learn GradientBoosting.
+    try:
         from sklearn.ensemble import GradientBoostingClassifier
         import numpy as np
         clf = GradientBoostingClassifier(n_estimators=50, max_depth=3, random_state=42)
@@ -139,7 +150,7 @@ def _train_ml_model(X: list, y: list):
     except ImportError:
         return None
     except Exception as exc:
-        logger.warning("[PredictiveDialer] ML training failed: %s", exc)
+        logger.warning("[PredictiveDialer] GradientBoosting training failed: %s", exc)
         return None
 
 
@@ -147,7 +158,6 @@ def _ml_score(model, features: list) -> float:
     try:
         import numpy as np
         prob = model.predict_proba(np.array([features]))[0]
-        # prob[1] = probability of class 1 (connected)
         return float(prob[1])
     except Exception:
         return 0.0

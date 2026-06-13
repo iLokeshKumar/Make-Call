@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from langchain_core.tools import tool
 from utils.tracing import traceable, traceable_async
+from agents._format_utils import to_compact
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,7 @@ def get_engagement_summary(company_id: int, days: int = 30) -> str:
         from services.analytics.analytics_service import get_engagement_summary as _get
         with Session(engine) as session:
             result = _get(session=session, company_id=company_id, days=days)
-        return str(result)
+        return to_compact(result)
     except Exception as exc:
         logger.warning("[AnalyticsAgent] get_engagement_summary failed: %s", exc)
         return f"Could not fetch engagement summary: {exc}"
@@ -40,7 +41,7 @@ def get_call_conversion_summary(company_id: int, days: int = 30) -> str:
         from services.analytics.analytics_service import get_call_conversion_summary as _get
         with Session(engine) as session:
             result = _get(session=session, company_id=company_id, days=days)
-        return str(result)
+        return to_compact(result)
     except Exception as exc:
         logger.warning("[AnalyticsAgent] get_call_conversion_summary failed: %s", exc)
         return f"Could not fetch call conversion summary: {exc}"
@@ -63,7 +64,7 @@ def get_pipeline_funnel(company_id: int) -> str:
                 .where(Lead.company_id == company_id)
                 .group_by(Lead.ism_stage)
             ).all()
-        return str({r[0] or "unknown": r[1] for r in rows})
+        return to_compact({r[0] or "unknown": r[1] for r in rows})
     except Exception as exc:
         logger.warning("[AnalyticsAgent] get_pipeline_funnel failed: %s", exc)
         return f"Could not fetch pipeline funnel: {exc}"
@@ -82,7 +83,7 @@ def evaluate_alerts(company_id: int) -> str:
         from services.analytics.analytics_service import evaluate_alerts as _eval
         with Session(engine) as session:
             result = _eval(session=session, company_id=company_id)
-        return str(result)
+        return to_compact(result)
     except Exception as exc:
         logger.warning("[AnalyticsAgent] evaluate_alerts failed: %s", exc)
         return f"Could not evaluate alerts: {exc}"

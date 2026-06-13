@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy import func, text
+from sqlalchemy.exc import ProgrammingError
 from sqlmodel import Session, select
 
 from agents.ism_orchestrator import run_ism_for_company
@@ -18,7 +19,7 @@ from services.campaign.campaign_service import run_due_campaign_recipients
 from services.campaign.dialer_service import run_batch_dialer
 from services.communication.email_outbox_service import process_outbox_batch
 from services.agent.agent_task_service import run_agent_tasks
-from services.agent.agent_approval_service import expire_stale as expire_stale_approvals
+from services.agent.agent_approval_service import expire_and_escalate_approvals
 from utils.async_bridge import run_async_from_sync
 
 logger = logging.getLogger(__name__)
@@ -572,13 +573,31 @@ def run_worker_cycle(
                 })
                 metric["agent_task_results"] = {"error": str(agent_task_err)}
 
-            # Expire stale approval requests past their deadline
+            # Expire stale approval requests past their deadline + escalate past-SLA ones
             try:
-                expired = expire_stale_approvals(session=session, company_id=target_company_id)
-                if expired:
-                    metric["expired_approvals"] = expired
+                approval_result = expire_and_escalate_approvals(session=session, company_id=target_company_id)
+                if approval_result["expired"] or approval_result["escalated"]:
+                    metric["approval_results"] = approval_result
             except Exception as expire_err:  # noqa: BLE001
-                logger.warning("approval expiry failed for company %s: %s", target_company_id, expire_err)
+                logger.warning("approval expiry/escalation failed for company %s: %s", target_company_id, expire_err)
+
+            # SLA breach scanner — escalate tickets past sla_due_at
+            try:
+                from services.service.ticket_service import check_sla_breaches
+                breached = check_sla_breaches(session, target_company_id)
+                if breached:
+                    metric["ticket_sla_breaches"] = breached
+            except Exception:  # noqa: BLE001
+                logger.debug("ticket SLA scan skipped", exc_info=True)
+
+            # Invoice overdue scanner
+            try:
+                from services.order.invoice_service import mark_overdue
+                overdue_count = mark_overdue(session, target_company_id)
+                if overdue_count:
+                    metric["invoices_marked_overdue"] = overdue_count
+            except Exception:  # noqa: BLE001
+                logger.debug("invoice overdue scan skipped", exc_info=True)
 
             # Dead-letter check — runs last so it counts failures from this cycle too
             try:
@@ -660,6 +679,11 @@ def _safe_run_cycle(
     """Run one cycle in a fresh session. Exceptions are logged, never raised
     (the supervisor's outer try/except would restart the whole worker, which
     is overkill for a transient per-cycle failure).
+
+    Unrecoverable schema errors (missing tables) cause the worker to sleep
+    long enough that we don't drown the logs while the operator fixes the
+    database. Without this guard, a misconfigured DATABASE_URL produces a
+    new full traceback every poll_interval seconds.
     """
     try:
         with Session(engine) as session:
@@ -668,7 +692,21 @@ def _safe_run_cycle(
                 company_id=company_id,
                 dial_limit_per_company=dial_limit_per_company,
             )
-    except Exception:  # noqa: BLE001
+    except ProgrammingError as exc:
+        # psycopg2.errors.UndefinedTable etc. - schema not migrated.
+        # This is unrecoverable from inside the loop: re-raise so the supervisor
+        # exits non-zero. Silent retries here mask a broken DATABASE_URL.
+        logger.critical(
+            "[worker] schema error - database is not initialised. "
+            "Trigger=%s company=%s err=%s. Fix DATABASE_URL or run init_db().",
+            trigger, company_id, exc.orig if hasattr(exc, "orig") else exc,
+        )
+        raise
+    except Exception:
+        # All other per-cycle failures are logged with the full traceback and
+        # the loop continues - they are usually transient (network blip, lock
+        # contention). We do NOT swallow them silently: logger.exception emits
+        # the stack at ERROR level so they are always visible.
         logger.exception(
             "[worker] cycle failed",
             extra={"trigger": trigger, "company_id": company_id},
@@ -1166,8 +1204,8 @@ def run_pending_jobs(
                     "worker_name": "automation_worker",
                 })
             else:
-                # Exponential backoff: 1min, 2min, 4min, 8min, …
-                backoff_seconds = 60 * (2 ** job.attempts)
+                # Exponential backoff: 30s, 60s, 120s, 240s, capped at 300s
+                backoff_seconds = min(300, 30 * (2 ** (job.attempts - 1)))
                 job.status = "pending"
                 job.run_after = utc_now() + timedelta(seconds=backoff_seconds)
             job.finished_at = utc_now()

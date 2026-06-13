@@ -7,6 +7,7 @@ import { Shield, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { apiFetch } from "@/utils/apiFetch";
 export default function MFASetup() {
     const { user, refreshUser } = useAuth();
+    const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
     const [setupData, setSetupData] = useState<{ secret: string; qr_code: string } | null>(null);
     const [mfaCode, setMfaCode] = useState("");
     const [error, setError] = useState("");
@@ -20,7 +21,7 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await apiFetch("http://localhost:6060/auth/mfa/setup", {
+            const res = await apiFetch(`${API_BASE}/auth/mfa/setup`, {
                 method: "POST"
             });
             if (res.ok) {
@@ -41,7 +42,7 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await apiFetch("http://localhost:6060/auth/mfa/enable", {
+            const res = await apiFetch(`${API_BASE}/auth/mfa/enable`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json" },
@@ -64,7 +65,7 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await apiFetch("http://localhost:6060/auth/mfa/request-disable", {
+            const res = await apiFetch(`${API_BASE}/auth/mfa/request-disable`, {
                 method: "POST"
             });
             if (res.ok) {
@@ -84,7 +85,7 @@ export default function MFASetup() {
         setLoading(true);
         setError("");
         try {
-            const res = await apiFetch("http://localhost:6060/auth/mfa/disable", {
+            const res = await apiFetch(`${API_BASE}/auth/mfa/disable`, {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json" },

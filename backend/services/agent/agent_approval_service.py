@@ -205,13 +205,23 @@ def get_pending(
     return results
 
 
-def expire_stale(session: Session, company_id: int) -> int:
+def expire_and_escalate_approvals(session: Session, company_id: int) -> dict:
     """
-    Auto-reject approvals past their expires_at deadline.
-    Called by the automation worker once per cycle.
-    Returns the count of approvals expired.
+    Expire and escalate approvals in a single pass.
+
+    - Expired: pending approvals whose expires_at < utc_now().
+      Sets status='expired', linked AgentTask status='rejected'.
+
+    - Escalated: pending approvals not yet expired but past SLA
+      (created_at + 24h < utc_now()).  These get '[ESCALATED]' prepended to
+      reviewer_note so they surface prominently in the approval queue.
+
+    Returns {"expired": <count>, "escalated": <count>}.
     """
     now = utc_now()
+    sla_threshold = now - timedelta(hours=24)
+
+    # ── 1. Expire past-deadline approvals ────────────────────────────────────
     stale = session.exec(
         select(AgentApproval).where(
             AgentApproval.company_id == company_id,
@@ -220,7 +230,7 @@ def expire_stale(session: Session, company_id: int) -> int:
         )
     ).all()
 
-    count = 0
+    expired_count = 0
     for appr in stale:
         appr.status = "expired"
         appr.updated_at = now
@@ -228,16 +238,58 @@ def expire_stale(session: Session, company_id: int) -> int:
 
         task = session.get(AgentTask, appr.task_id)
         if task and task.status == "awaiting_approval":
+            # Keep terminal semantics consistent with manual rejects
             task.status = "rejected"
             task.completed_at = now
             task.error_json = {"reason": "approval_expired"}
             task.updated_at = now
             session.add(task)
 
-        count += 1
+        expired_count += 1
 
-    if count:
+    if expired_count:
         session.commit()
-        logger.info("[AgentApproval] Expired %d stale approvals for company %s", count, company_id)
+        logger.info(
+            "[AgentApproval] Expired %d stale approvals for company %s",
+            expired_count, company_id,
+        )
 
-    return count
+    # ── 2. Escalate past-SLA approvals that are not yet expired ─────────────
+    past_sla = session.exec(
+        select(AgentApproval).where(
+            AgentApproval.company_id == company_id,
+            AgentApproval.status == "pending",
+            AgentApproval.expires_at > now,       # not yet expired
+            AgentApproval.created_at <= sla_threshold,  # created > 24h ago
+        )
+    ).all()
+
+    escalated_count = 0
+    for appr in past_sla:
+        existing_note = appr.reviewer_note or ""
+        if not existing_note.startswith("[ESCALATED]"):
+            appr.reviewer_note = f"[ESCALATED] {existing_note}".strip()
+            appr.updated_at = now
+            session.add(appr)
+            escalated_count += 1
+
+    if escalated_count:
+        session.commit()
+        logger.info(
+            "[AgentApproval] Escalated %d past-SLA approvals for company %s",
+            escalated_count, company_id,
+        )
+
+    return {"expired": expired_count, "escalated": escalated_count}
+
+
+def expire_stale(session: Session, company_id: int) -> int:
+    """
+    Auto-expire approvals past their expires_at deadline.
+    Called by the automation worker once per cycle.
+    Returns the count of approvals expired.
+
+    Delegates to expire_and_escalate_approvals() for combined expiry + SLA escalation.
+    """
+    result = expire_and_escalate_approvals(session=session, company_id=company_id)
+    return result["expired"]

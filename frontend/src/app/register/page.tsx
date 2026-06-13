@@ -6,7 +6,7 @@ import Link from "next/link";
 import { Building2, Eye, EyeOff, Loader2, Lock, Mail, User } from "lucide-react";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 export default function RegisterPage() {
     const [companyName, setCompanyName] = useState("");
@@ -49,9 +49,6 @@ export default function RegisterPage() {
                 const errData = await res.json();
                 throw new Error(errData.detail || "Registration failed");
             }
-            // The server set the session cookie on a successful register, so
-            // navigating to / triggers fetchUser() in AuthContext and the user
-            // is logged in. No client-side token storage required.
             router.push("/");
         } catch (err: any) {
             setError(err.message);
@@ -100,7 +97,7 @@ export default function RegisterPage() {
                                         required
                                         value={companyName}
                                         onChange={(e) => setCompanyName(e.target.value)}
-                                        placeholder="Acme Corp"
+                                        placeholder="Yexis Electronics"
                                         className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
                                     />
                                 </div>
@@ -113,7 +110,7 @@ export default function RegisterPage() {
                                     type="text"
                                     value={companySlug}
                                     onChange={(e) => setCompanySlug(e.target.value)}
-                                    placeholder={derivedSlug || "acme-corp"}
+                                    placeholder={derivedSlug || "yexis-electronics"}
                                     className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 px-4 text-white placeholder-slate-600 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm font-mono"
                                 />
                             </div>
@@ -170,7 +167,7 @@ export default function RegisterPage() {
                                     required
                                     value={email}
                                     onChange={(e) => setEmail(e.target.value)}
-                                    placeholder="john@acme.com"
+                                    placeholder="john@yexis.com"
                                     className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
                                 />
                             </div>

@@ -8,6 +8,10 @@ import {
 import clsx from "clsx";
 
 import { apiFetch } from "@/utils/apiFetch";
+import CampaignStatusTimelineChart from "@/components/analytics/CampaignStatusTimelineChart";
+import CampaignConversionChart from "@/components/analytics/CampaignConversionChart";
+import FunnelChart from "@/components/analytics/FunnelChart";
+import LatencyTrendChart from "@/components/analytics/LatencyTrendChart";
 // Types
 
 interface EngineRow {
@@ -192,7 +196,7 @@ export default function AnalyticsDashboard() {
   const [alertLoading, setAlertLoading] = useState(false);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
 
-  const API_BASE = "http://localhost:6060";
+  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
   const loadSummary = useCallback(async () => {
     if (!user) return;
@@ -536,35 +540,7 @@ export default function AnalyticsDashboard() {
               {data.trend.length === 0 ? (
                 <p className="text-center py-16 text-slate-600">No trend data for this period.</p>
               ) : (
-                <div className="glass rounded-2xl border border-white/10 overflow-hidden">
-                  <table className="w-full text-xs text-slate-300">
-                    <thead>
-                      <tr className="bg-white/5 border-b border-white/10 text-slate-500">
-                        {["Date","Engine","Avg","Turns","Bar"].map(h => (
-                          <th key={h} className="px-4 py-3 text-left font-medium">{h}</th>
-                        ))}
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {data.trend.map((t, i) => {
-                        const maxMs = Math.max(...data.trend.map(x => x.avg_ms)) || 1;
-                        return (
-                          <tr key={i} className="border-b border-white/5 hover:bg-white/5">
-                            <td className="px-4 py-2 font-mono text-slate-400">{t.day}</td>
-                            <td className="px-4 py-2 font-mono text-[10px]" style={{ color: engineColor(t.engine) }}>{t.engine}</td>
-                            <td className="px-4 py-2 font-bold text-slate-200">{fms(t.avg_ms)}</td>
-                            <td className="px-4 py-2 text-slate-500">{t.turns}</td>
-                            <td className="px-4 py-2 w-32">
-                              <div className="h-[4px] rounded bg-white/10 overflow-hidden">
-                                <div className="h-full rounded" style={{ width:`${(t.avg_ms/maxMs)*100}%`, background: engineColor(t.engine) }} />
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+                <LatencyTrendChart trend={data.trend} formatMs={fms} colorForEngine={engineColor} />
               )}
               {data.trend.length > 0 && <DoDSummary trend={data.trend} />}
             </div>
@@ -575,37 +551,18 @@ export default function AnalyticsDashboard() {
                 <h3 className="text-lg font-semibold text-white">Campaign & quote insights</h3>
                 <span className="text-xs text-slate-400">{summaryLoading ? "Loading…" : "Live"}</span>
               </div>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                {summary.campaign_funnel.slice(0, 4).map((item) => (
-                  <div key={item.status} className="rounded-2xl border border-white/10 bg-white/10 p-3 text-sm">
-                    <p className="text-[10px] uppercase tracking-[0.3em] text-slate-500">{item.status}</p>
-                    <p className="text-2xl font-semibold text-white">{item.count}</p>
-                    <p className="text-xs text-slate-400">{item.percent}%</p>
-                  </div>
-                ))}
-              </div>
+              <FunnelChart items={summary.campaign_funnel.slice(0, 5)} compact />
               <div className="grid gap-4 md:grid-cols-2">
                 <div>
                   <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Conversion trends</p>
-                  <div className="mt-2 space-y-2 text-sm text-slate-200">
-                    {summary.campaign_conversion_trends.slice(0, 3).map((row) => (
-                      <div key={row.name} className="flex items-center justify-between">
-                        <span>{row.name}</span>
-                        <span className="text-xs text-slate-400">{row.conversion_rate}%</span>
-                      </div>
-                    ))}
+                  <div className="mt-2">
+                    <CampaignConversionChart rows={summary.campaign_conversion_trends} compact limit={3} />
                   </div>
                 </div>
                 <div>
                   <p className="text-xs uppercase tracking-[0.3em] text-slate-500">Campaign status over time</p>
-                  <div className="mt-2 grid gap-1 text-xs text-slate-400">
-                    {summary.campaign_status_over_time.slice(-4).map((row) => (
-                      <div key={`${row.day}-${row.status}`} className="flex justify-between">
-                        <span>{row.day}</span>
-                        <span>{row.status}</span>
-                        <span>{row.count}</span>
-                      </div>
-                    ))}
+                  <div className="mt-2">
+                    <CampaignStatusTimelineChart rows={summary.campaign_status_over_time} compact limitDays={3} />
                   </div>
                 </div>
               </div>

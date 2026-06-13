@@ -1,24 +1,34 @@
 "use client";
 
 import { useState, useEffect } from "react";
-import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw } from "lucide-react";
+import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw, Calendar, Link2, Link2Off, Gauge, Webhook, Server, Database, ShieldCheck, Layers, Plus, Trash2, Play, RotateCcw, Clock, CheckCircle, XCircle, ExternalLink, Copy, Sparkles } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
+import SubAccountsTab from "@/components/settings/SubAccountsTab";
+import ComplianceTab from "@/components/settings/ComplianceTab";
+import DispositionsTab from "@/components/settings/DispositionsTab";
+import AgentTemplatesTab from "@/components/settings/AgentTemplatesTab";
+import IntegrationsTab from "@/components/settings/IntegrationsTab";
+import CostTab from "@/components/settings/CostTab";
+import FeatureFlagsTab from "@/components/settings/FeatureFlagsTab";
+
 const themeOptions = [
     { value: "light", label: "Light", icon: Sun },
     { value: "dark", label: "Dark", icon: Moon },
     { value: "system", label: "System", icon: Monitor },
 ] as const;
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 const CRM_BASE = `${API_BASE}/crm`;
 
 const COMPANY_SETTING_KEYS = {
     systemInstruction: ["SYSTEM_INSTRUCTION", "system_instruction"],
     sttProvider: ["STT_PROVIDER", "stt_provider"],
     llmProvider: ["LLM_PROVIDER", "llm_provider"],
+    evalJudgeProvider: ["EVAL_JUDGE_PROVIDER", "eval_judge_provider"],
+    evalJudgeModel: ["EVAL_JUDGE_MODEL", "eval_judge_model"],
     ttsProvider: ["TTS_PROVIDER", "tts_provider"],
     telephonyEngine: ["TELEPHONY_ENGINE", "telephony_engine"],
     aiVerbosity: ["AI_VERBOSITY", "ai_verbosity"],
@@ -27,12 +37,23 @@ const COMPANY_SETTING_KEYS = {
     bizSundayBlocked: ["BUSINESS_SUNDAY_BLOCKED", "business_sunday_blocked"],
     bizHoursDisabled: ["DISABLE_BUSINESS_HOURS_GUARD", "disable_business_hours_guard"],
     silenceThreshold: ["SILENCE_THRESHOLD_S", "silence_threshold_s"],
-    silenceCheckInterval: ["SILENCE_CHECK_INTERVAL_S", "silence_check_interval_s"] } as const;
+    silenceCheckInterval: ["SILENCE_CHECK_INTERVAL_S", "silence_check_interval_s"],
+    voicemailDetection: ["VOICEMAIL_DETECTION_ENABLED", "voicemail_detection_enabled"],
+    agentName: ["AGENT_NAME", "agent_name"],
+    callConnectMessage: ["CALL_CONNECT_MESSAGE", "call_connect_message"],
+    agentGreeting: ["AGENT_GREETING", "agent_greeting"],
+    agentPersonalizedGreeting: ["AGENT_PERSONALIZED_GREETING", "agent_personalized_greeting"],
+    // ASR / Transcript tuning and storage (per-company)
+    asrStoreRawJson: ["ASR_STORE_RAW_JSON", "asr_store_raw_json"],
+    asrOverlapThreshold: ["ASR_OVERLAP_THRESHOLD", "asr_overlap_threshold"],
+} as const;
 
 const INTEGRATION_KEY_ALIASES: Record<string, string> = {
-    PHONE_NUMBER_FROM: "TWILIO_PHONE_NUMBER",
-    WHATSAPP_NUMBER_FROM: "WHATSAPP_NUMBER",
     SMTP_SERVER: "SMTP_HOST" };
+
+const INTEGRATION_KEY_MIRRORS: Record<string, string> = {
+    TWILIO_PHONE_NUMBER: "PHONE_NUMBER_FROM",
+    WHATSAPP_NUMBER: "WHATSAPP_NUMBER_FROM" };
 
 function readSettingValue(
     settings: Record<string, string>,
@@ -45,14 +66,13 @@ function readSettingValue(
 function normalizeIntegrationValues(keysData: Record<string, string>) {
     return {
         ...keysData,
-        PHONE_NUMBER_FROM: keysData.PHONE_NUMBER_FROM ?? keysData.TWILIO_PHONE_NUMBER ?? "",
-        WHATSAPP_NUMBER_FROM: keysData.WHATSAPP_NUMBER_FROM ?? keysData.WHATSAPP_NUMBER ?? "",
+        PHONE_NUMBER_FROM: keysData.TWILIO_PHONE_NUMBER ?? keysData.PHONE_NUMBER_FROM ?? "",
+        WHATSAPP_NUMBER_FROM: keysData.WHATSAPP_NUMBER ?? keysData.WHATSAPP_NUMBER_FROM ?? "",
+        TWILIO_PHONE_NUMBER: keysData.TWILIO_PHONE_NUMBER ?? keysData.PHONE_NUMBER_FROM ?? "",
+        WHATSAPP_NUMBER: keysData.WHATSAPP_NUMBER ?? keysData.WHATSAPP_NUMBER_FROM ?? "",
         SMTP_SERVER: keysData.SMTP_SERVER ?? keysData.SMTP_HOST ?? "",
-        SARVAM_STT_MODEL:
-            keysData.SARVAM_STT_MODEL ||
-            keysData.SMALLEST_STT_MODEL ||
-            "",
-        SARVAM_VOICE_ID: keysData.SARVAM_VOICE_ID || keysData.SMALLEST_VOICE_ID || "" };
+        
+        };
 }
 
 function isMaskedValue(value: string) {
@@ -75,6 +95,8 @@ export default function SettingsPage() {
     const [systemInstruction, setSystemInstruction] = useState("");
     const [sttProvider, setSttProvider] = useState("deepgram");
     const [llmProvider, setLlmProvider] = useState("mistral");
+    const [evalJudgeProvider, setEvalJudgeProvider] = useState("");
+    const [evalJudgeModel, setEvalJudgeModel] = useState("");
     const [ttsProvider, setTtsProvider] = useState("cartesia");
     const [telephonyEngine, setTelephonyEngine] = useState("twilio");
     const [aiVerbosity, setAiVerbosity] = useState("1");
@@ -89,6 +111,26 @@ export default function SettingsPage() {
     // seconds of silence post-Rio-utterance.
     const [silenceThreshold, setSilenceThreshold] = useState("6");
     const [silenceCheckInterval, setSilenceCheckInterval] = useState("3");
+    const [voicemailDetection, setVoicemailDetection] = useState("0");
+    const [agentName, setAgentName] = useState("Rio");
+    const [callConnectMessage, setCallConnectMessage] = useState("");
+    const [agentGreeting, setAgentGreeting] = useState("");
+    const [agentPersonalizedGreeting, setAgentPersonalizedGreeting] = useState("");
+
+    // ASR / Transcription controls
+    const [asrStoreRawJson, setAsrStoreRawJson] = useState(false);
+    const [asrOverlapThreshold, setAsrOverlapThreshold] = useState("0.6");
+
+    // Google Calendar
+    const [calendarStatus, setCalendarStatus] = useState<{ connected: boolean; email?: string | null } | null>(null);
+    const [calendarLoading, setCalendarLoading] = useState(false);
+
+    // Usage limits — per-company overrides stored as CompanySetting keys
+    // usage_limit_calls_made, usage_limit_emails_sent, usage_limit_whatsapp_sent.
+    // Empty string means "use tier default".
+    const [usageLimitCalls, setUsageLimitCalls] = useState("");
+    const [usageLimitEmails, setUsageLimitEmails] = useState("");
+    const [usageLimitWhatsapp, setUsageLimitWhatsapp] = useState("");
 
     // API Keys State
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
@@ -98,6 +140,7 @@ export default function SettingsPage() {
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
+    const [saveError, setSaveError] = useState<string | null>(null);
     const [visibleKeys, setVisibleKeys] = useState<Record<string, boolean>>({});
     const [roles, setRoles] = useState<RoleOption[]>([]);
     const [inviteEmail, setInviteEmail] = useState("");
@@ -116,11 +159,52 @@ export default function SettingsPage() {
     const [savingScript, setSavingScript] = useState<string | null>(null);
     const [newCompetitorName, setNewCompetitorName] = useState("");
 
+    // Webhooks tab
+    type WebhookConfig = { id: number; name: string; url: string; events: string[]; is_active: boolean; timeout_seconds: number; agent_filter?: string | null; outcome_filter?: string | null };
+    type WebhookDeliveryLog = { id: number; webhook_id: number; event_type: string; http_status?: number | null; error?: string | null; created_at: string };
+    const [webhooks, setWebhooks] = useState<WebhookConfig[]>([]);
+    const [webhookLogs, setWebhookLogs] = useState<WebhookDeliveryLog[]>([]);
+    const [webhookModal, setWebhookModal] = useState<WebhookConfig | null | "new">(null);
+    const [webhookForm, setWebhookForm] = useState({ name: "", url: "", events: [] as string[], timeout_seconds: 10, is_active: true });
+    const [webhookSaving, setWebhookSaving] = useState(false);
+    const [webhookError, setWebhookError] = useState<string | null>(null);
+    const [availableEvents, setAvailableEvents] = useState<any[]>([]);
+    const [testingWebhook, setTestingWebhook] = useState<number | null>(null);
+
+    // SIP Trunks tab
+    type SipTrunk = { id: number; name: string; host: string; port: number; transport: string; provider: string; username?: string | null; sip_uri?: string | null; codecs: string; dtmf_mode: string; status: string; is_default: boolean };
+    const [sipTrunks, setSipTrunks] = useState<SipTrunk[]>([]);
+    const [sipModal, setSipModal] = useState<SipTrunk | null | "new">(null);
+    const [sipForm, setSipForm] = useState({ name: "", host: "", port: 5060, transport: "udp", provider: "generic_sip", username: "", password: "", sip_uri: "", codecs: "PCMU,PCMA", dtmf_mode: "rfc2833", is_default: false });
+    const [sipSaving, setSipSaving] = useState(false);
+    const [sipError, setSipError] = useState<string | null>(null);
+
+    // Provider Credentials tab
+    type ProviderCred = { id: number; provider: string; key_name: string; created_at?: string };
+    const [providerCreds, setProviderCreds] = useState<ProviderCred[]>([]);
+    const [credForm, setCredForm] = useState({ provider: "deepgram", key_name: "API_KEY", value: "" });
+    const [credSaving, setCredSaving] = useState(false);
+    const [credError, setCredError] = useState<string | null>(null);
+    const [credSuccess, setCredSuccess] = useState(false);
+
+    // Company Prompts (in persona tab)
+    type CompanyPromptVersion = { id: number; version: number; prompt_text: string; is_active: boolean; change_reason?: string | null; created_at?: string };
+    const [companyPrompts, setCompanyPrompts] = useState<CompanyPromptVersion[]>([]);
+    const [newPromptText, setNewPromptText] = useState("");
+    const [newPromptReason, setNewPromptReason] = useState("");
+    const [promptSaving, setPromptSaving] = useState(false);
+    const [promptSaved, setPromptSaved] = useState(false);
+
     // Per-user AI/preference settings (accessible to all roles)
     const [myAiPrompt, setMyAiPrompt] = useState("");
     const [myAiVerbosity, setMyAiVerbosity] = useState("1");
     const [savingMyAi, setSavingMyAi] = useState(false);
     const [myAiSaved, setMyAiSaved] = useState(false);
+    const [myWarmTransfer, setMyWarmTransfer] = useState<Record<string, string>>({
+        WARM_TRANSFER_NUMBER: "",
+        WARM_TRANSFER_NAME: "" });
+    const [savingMyWarmTransfer, setSavingMyWarmTransfer] = useState(false);
+    const [myWarmTransferSaved, setMyWarmTransferSaved] = useState(false);
 
     // Per-user email settings (accessible to all roles)
     const [myEmail, setMyEmail] = useState<Record<string, string>>({
@@ -139,7 +223,7 @@ export default function SettingsPage() {
             }
 
             try {
-                const [settingsRes, keysRes, myEmailRes, myAiRes] = await Promise.all([
+                const [settingsRes, keysRes, myEmailRes, myAiRes, calRes] = await Promise.all([
                     apiFetch(`${CRM_BASE}/company-settings`, {
                     }),
                     apiFetch(`${CRM_BASE}/company-integrations`, {
@@ -148,7 +232,9 @@ export default function SettingsPage() {
                     }),
                     apiFetch(`${CRM_BASE}/me/settings`, {
                     }),
+                    apiFetch(`${CRM_BASE}/calendar/status`, {}).catch(() => null),
                 ]);
+                if (calRes && calRes.ok) setCalendarStatus(await calRes.json());
 
                 if (settingsRes.status === 401 || keysRes.status === 401) {
                     sessionTimeout();
@@ -160,6 +246,8 @@ export default function SettingsPage() {
                     setSystemInstruction(readSettingValue(data, COMPANY_SETTING_KEYS.systemInstruction, ""));
                     setSttProvider(readSettingValue(data, COMPANY_SETTING_KEYS.sttProvider, "deepgram"));
                     setLlmProvider(readSettingValue(data, COMPANY_SETTING_KEYS.llmProvider, "mistral"));
+                    setEvalJudgeProvider(readSettingValue(data, COMPANY_SETTING_KEYS.evalJudgeProvider, ""));
+                    setEvalJudgeModel(readSettingValue(data, COMPANY_SETTING_KEYS.evalJudgeModel, ""));
                     setTtsProvider(readSettingValue(data, COMPANY_SETTING_KEYS.ttsProvider, "cartesia"));
                     setTelephonyEngine(readSettingValue(data, COMPANY_SETTING_KEYS.telephonyEngine, "twilio"));
                     setAiVerbosity(readSettingValue(data, COMPANY_SETTING_KEYS.aiVerbosity, "2"));
@@ -169,6 +257,23 @@ export default function SettingsPage() {
                     setBizHoursDisabled(readSettingValue(data, COMPANY_SETTING_KEYS.bizHoursDisabled, "0"));
                     setSilenceThreshold(readSettingValue(data, COMPANY_SETTING_KEYS.silenceThreshold, "6"));
                     setSilenceCheckInterval(readSettingValue(data, COMPANY_SETTING_KEYS.silenceCheckInterval, "3"));
+                    setVoicemailDetection(readSettingValue(data, COMPANY_SETTING_KEYS.voicemailDetection, "0"));
+                    setAgentName(readSettingValue(data, COMPANY_SETTING_KEYS.agentName, "Rio"));
+                    setCallConnectMessage(readSettingValue(data, COMPANY_SETTING_KEYS.callConnectMessage, ""));
+                    setAgentGreeting(readSettingValue(data, COMPANY_SETTING_KEYS.agentGreeting, ""));
+                    setAgentPersonalizedGreeting(readSettingValue(data, COMPANY_SETTING_KEYS.agentPersonalizedGreeting, ""));
+                    // ASR company-level settings
+                    try {
+                        const raw = readSettingValue(data, COMPANY_SETTING_KEYS.asrStoreRawJson, "0");
+                        setAsrStoreRawJson(raw === "1" || raw === "true");
+                    } catch (e) {
+                        setAsrStoreRawJson(false);
+                    }
+                    setAsrOverlapThreshold(readSettingValue(data, COMPANY_SETTING_KEYS.asrOverlapThreshold, "0.6"));
+
+                    setUsageLimitCalls(data["usage_limit_calls_made"] ?? "");
+                    setUsageLimitEmails(data["usage_limit_emails_sent"] ?? "");
+                    setUsageLimitWhatsapp(data["usage_limit_whatsapp_sent"] ?? "");
                     if (data.COMPETITOR_NAMES) setCompetitorNames(data.COMPETITOR_NAMES);
                 }
 
@@ -196,6 +301,9 @@ export default function SettingsPage() {
                     const myAiData = await myAiRes.json() as Record<string, string>;
                     if (myAiData.SYSTEM_PROMPT) setMyAiPrompt(myAiData.SYSTEM_PROMPT);
                     if (myAiData.AI_VERBOSITY) setMyAiVerbosity(myAiData.AI_VERBOSITY);
+                    setMyWarmTransfer({
+                        WARM_TRANSFER_NUMBER: myAiData.WARM_TRANSFER_NUMBER || "",
+                        WARM_TRANSFER_NAME: myAiData.WARM_TRANSFER_NAME || "" });
                 }
 
                 if (keysRes.ok) {
@@ -220,7 +328,9 @@ export default function SettingsPage() {
                         APOLLO_API_KEY: "",
                         TWILIO_ACCOUNT_SID: "",
                         TWILIO_AUTH_TOKEN: "",
+                        TWILIO_PHONE_NUMBER: "",
                         PHONE_NUMBER_FROM: "",
+                        WHATSAPP_NUMBER: "",
                         WHATSAPP_NUMBER_FROM: "",
                         EXOTEL_ACCOUNT_SID: "",
                         EXOTEL_API_KEY: "",
@@ -256,10 +366,54 @@ export default function SettingsPage() {
                         SMALLEST_API_KEY: "",
                         SMALLEST_STT_MODEL: "",
                         SMALLEST_TTS_MODEL: "",
+                        SMALLEST_LLM_MODEL: "",
                         MISTRAL_TTS_MODEL: "",
                         MISTRAL_VOICE_ID: "",
                         GROQ_API_KEY: "",
-                        GROQ_MODEL: "" };
+                        GROQ_MODEL: "",
+                        PLIVO_AUTH_ID: "",
+                        PLIVO_AUTH_TOKEN: "",
+                        PLIVO_PHONE_NUMBER: "",
+                        VOBIZ_AUTH_ID: "",
+                        VOBIZ_AUTH_TOKEN: "",
+                        VOBIZ_PHONE_NUMBER: "",
+                        WARM_TRANSFER_NUMBER: "",
+                        WARM_TRANSFER_NAME: "",
+                        RINGG_AI_API_KEY: "",
+                        RINGG_AI_STT_MODEL: "",
+                        GLADIA_API_KEY: "",
+                        GLADIA_STT_MODEL: "",
+                        ASSEMBLYAI_API_KEY: "",
+                        ASSEMBLYAI_STT_MODEL: "",
+                        INWORLD_API_KEY: "",
+                        INWORLD_STT_MODEL: "",
+                        INWORLD_TTS_MODEL: "",
+                        INWORLD_VOICE_ID: "",
+                        RIME_API_KEY: "",
+                        RIME_TTS_MODEL: "",
+                        AWS_ACCESS_KEY_ID: "",
+                        AWS_SECRET_ACCESS_KEY: "",
+                        AWS_DEFAULT_REGION: "",
+                        POLLY_TTS_MODEL: "",
+                        POLLY_VOICE_ID: "",
+                        AZURE_TTS_MODEL: "",
+                        AZURE_VOICE_ID: "",
+                        AZURE_STT_MODEL: "",
+                        AZURE_LLM_MODEL: "",
+                        AZURE_SPEECH_ENDPOINT: "",
+                        AZURE_LLM_ENDPOINT: "",
+                        AZURE_LLM_API_KEY: "",
+                        AZURE_LLM_API_VERSION: "",
+                        AZURE_LLM_REGION: "",
+                        AZURE_SPEECH_API_VERSION: "",
+                        AZURE_SPEECH_API_KEY: "",
+                        AZURE_SPEECH_REGION: "",
+                        AIRLLM_MODEL: "",
+                        AIRLLM_COMPRESSION: "",
+                        AIRLLM_MAX_NEW_TOKENS: "",
+                        KITTEN_TTS_MODEL: "",
+                        KITTEN_TTS_VOICE: ""
+                    };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
             } catch (error) {
@@ -302,11 +456,138 @@ export default function SettingsPage() {
         return () => controller.abort();
     }, [user, hasAdminAccess, inviteRoleId]);
 
+    // Load tab-specific data lazily
+    useEffect(() => {
+        if (!user || !hasAdminAccess) return;
+        if (activeTab === "webhooks") {
+            Promise.all([
+                apiFetch(`${CRM_BASE}/webhooks`).then(r => r.ok ? r.json() : []).catch(() => []),
+                apiFetch(`${CRM_BASE}/webhooks/delivery-logs`).then(r => r.ok ? r.json() : []).catch(() => []),
+                apiFetch(`${CRM_BASE}/integrations/events`).then(r => r.ok ? r.json() : []).catch(() => []),
+            ]).then(([wh, logs, evts]) => {
+                setWebhooks(wh as WebhookConfig[]);
+                setWebhookLogs(logs as WebhookDeliveryLog[]);
+                setAvailableEvents(evts as any[]);
+            });
+        }
+        if (activeTab === "telephony") {
+            apiFetch(`${CRM_BASE}/sip-trunks`).then(r => r.ok ? r.json() : []).then(d => setSipTrunks(d as SipTrunk[])).catch(() => {});
+        }
+        if (activeTab === "credentials") {
+            apiFetch(`${CRM_BASE}/provider-credentials`).then(r => r.ok ? r.json() : []).then(d => setProviderCreds(d as ProviderCred[])).catch(() => {});
+        }
+        if (activeTab === "persona") {
+            apiFetch(`${CRM_BASE}/company-prompts`).then(r => r.ok ? r.json() : []).then((d: CompanyPromptVersion[]) => {
+                setCompanyPrompts(d);
+                const active = d.find(p => p.is_active);
+                if (active && !newPromptText) setNewPromptText(active.prompt_text);
+            }).catch(() => {});
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeTab, user, hasAdminAccess]);
+
+    // Webhook CRUD helpers
+    const openWebhookModal = (w: WebhookConfig | "new") => {
+        setWebhookError(null);
+        if (w === "new") { setWebhookForm({ name: "", url: "", events: [], timeout_seconds: 10, is_active: true }); }
+        else { setWebhookForm({ name: w.name, url: w.url, events: w.events, timeout_seconds: w.timeout_seconds, is_active: w.is_active }); }
+        setWebhookModal(w);
+    };
+    const saveWebhook = async () => {
+        setWebhookError(null); setWebhookSaving(true);
+        try {
+            const isNew = webhookModal === "new";
+            const url = isNew ? `${CRM_BASE}/webhooks` : `${CRM_BASE}/webhooks/${(webhookModal as WebhookConfig).id}`;
+            const res = await apiFetch(url, { method: isNew ? "POST" : "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(webhookForm) });
+            if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.detail ?? `Server ${res.status}`); }
+            const fresh = await apiFetch(`${CRM_BASE}/webhooks`).then(r => r.json());
+            setWebhooks(fresh);
+            setWebhookModal(null);
+        } catch (e) { setWebhookError(e instanceof Error ? e.message : "Save failed"); }
+        finally { setWebhookSaving(false); }
+    };
+    const deleteWebhook = async (id: number) => {
+        if (!window.confirm("Delete this webhook?")) return;
+        await apiFetch(`${CRM_BASE}/webhooks/${id}`, { method: "DELETE" });
+        setWebhooks(prev => prev.filter(w => w.id !== id));
+    };
+    const testWebhook = async (id: number) => {
+        setTestingWebhook(id);
+        await apiFetch(`${CRM_BASE}/webhooks/${id}/test`, { method: "POST" }).catch(() => {});
+        setTestingWebhook(null);
+    };
+
+    // SIP trunk helpers
+    const openSipModal = (t: SipTrunk | "new") => {
+        setSipError(null);
+        if (t === "new") { setSipForm({ name: "", host: "", port: 5060, transport: "udp", provider: "generic_sip", username: "", password: "", sip_uri: "", codecs: "PCMU,PCMA", dtmf_mode: "rfc2833", is_default: false }); }
+        else { setSipForm({ name: t.name, host: t.host, port: t.port, transport: t.transport, provider: t.provider, username: t.username ?? "", password: "", sip_uri: t.sip_uri ?? "", codecs: t.codecs, dtmf_mode: t.dtmf_mode, is_default: t.is_default }); }
+        setSipModal(t);
+    };
+    const saveSipTrunk = async () => {
+        setSipError(null); setSipSaving(true);
+        try {
+            const isNew = sipModal === "new";
+            const url = isNew ? `${CRM_BASE}/sip-trunks` : `${CRM_BASE}/sip-trunks/${(sipModal as SipTrunk).id}`;
+            const res = await apiFetch(url, { method: isNew ? "POST" : "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify(sipForm) });
+            if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.detail ?? `Server ${res.status}`); }
+            const fresh = await apiFetch(`${CRM_BASE}/sip-trunks`).then(r => r.json());
+            setSipTrunks(fresh);
+            setSipModal(null);
+        } catch (e) { setSipError(e instanceof Error ? e.message : "Save failed"); }
+        finally { setSipSaving(false); }
+    };
+    const deleteSipTrunk = async (id: number) => {
+        if (!window.confirm("Delete this SIP trunk?")) return;
+        await apiFetch(`${CRM_BASE}/sip-trunks/${id}`, { method: "DELETE" });
+        setSipTrunks(prev => prev.filter(t => t.id !== id));
+    };
+
+    // Provider credential helpers
+    const saveProviderCred = async () => {
+        setCredError(null); setCredSaving(true); setCredSuccess(false);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/provider-credentials`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(credForm) });
+            if (!res.ok) { const b = await res.json().catch(() => ({})); throw new Error(b.detail ?? `Server ${res.status}`); }
+            const fresh = await apiFetch(`${CRM_BASE}/provider-credentials`).then(r => r.json());
+            setProviderCreds(fresh);
+            setCredForm(prev => ({ ...prev, value: "" }));
+            setCredSuccess(true);
+            setTimeout(() => setCredSuccess(false), 2500);
+        } catch (e) { setCredError(e instanceof Error ? e.message : "Save failed"); }
+        finally { setCredSaving(false); }
+    };
+    const deleteProviderCred = async (id: number) => {
+        if (!window.confirm("Delete this credential?")) return;
+        await apiFetch(`${CRM_BASE}/provider-credentials/${id}`, { method: "DELETE" });
+        setProviderCreds(prev => prev.filter(c => c.id !== id));
+    };
+
+    // Company prompt helpers
+    const saveCompanyPrompt = async () => {
+        setPromptSaving(true); setPromptSaved(false);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/company-prompts`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ prompt_text: newPromptText, change_reason: newPromptReason || null }) });
+            if (!res.ok) throw new Error(`Server ${res.status}`);
+            const fresh = await apiFetch(`${CRM_BASE}/company-prompts`).then(r => r.json());
+            setCompanyPrompts(fresh);
+            setNewPromptReason("");
+            setPromptSaved(true);
+            setTimeout(() => setPromptSaved(false), 2500);
+        } catch { /* silent */ }
+        finally { setPromptSaving(false); }
+    };
+    const activatePrompt = async (id: number) => {
+        await apiFetch(`${CRM_BASE}/company-prompts/${id}/activate`, { method: "POST" });
+        const fresh = await apiFetch(`${CRM_BASE}/company-prompts`).then(r => r.json());
+        setCompanyPrompts(fresh);
+    };
 
     const handleSave = async () => {
         console.log("💾 [Settings] Starting save operation...");
         setSaving(true);
         setSaveSuccess(false);
+        setSaveError(null);
 
         try {
             const settingsPayload = {
@@ -314,6 +595,8 @@ export default function SettingsPage() {
                     { key: "SYSTEM_INSTRUCTION", value: systemInstruction, is_secret: false },
                     { key: "STT_PROVIDER", value: sttProvider, is_secret: false },
                     { key: "LLM_PROVIDER", value: llmProvider, is_secret: false },
+                    { key: "EVAL_JUDGE_PROVIDER", value: evalJudgeProvider, is_secret: false },
+                    { key: "EVAL_JUDGE_MODEL", value: evalJudgeModel, is_secret: false },
                     { key: "TTS_PROVIDER", value: ttsProvider, is_secret: false },
                     { key: "TELEPHONY_ENGINE", value: telephonyEngine, is_secret: false },
                     { key: "AI_VERBOSITY", value: aiVerbosity, is_secret: false },
@@ -323,6 +606,16 @@ export default function SettingsPage() {
                     { key: "DISABLE_BUSINESS_HOURS_GUARD", value: bizHoursDisabled, is_secret: false },
                     { key: "SILENCE_THRESHOLD_S", value: silenceThreshold, is_secret: false },
                     { key: "SILENCE_CHECK_INTERVAL_S", value: silenceCheckInterval, is_secret: false },
+                    { key: "VOICEMAIL_DETECTION_ENABLED", value: voicemailDetection, is_secret: false },
+                    { key: "AGENT_NAME", value: agentName, is_secret: false },
+                    { key: "CALL_CONNECT_MESSAGE", value: callConnectMessage, is_secret: false },
+                    { key: "AGENT_GREETING", value: agentGreeting, is_secret: false },
+                    { key: "AGENT_PERSONALIZED_GREETING", value: agentPersonalizedGreeting, is_secret: false },
+                    { key: "ASR_STORE_RAW_JSON", value: asrStoreRawJson ? "1" : "0", is_secret: false },
+                    { key: "ASR_OVERLAP_THRESHOLD", value: asrOverlapThreshold, is_secret: false },
+                    { key: "usage_limit_calls_made", value: usageLimitCalls, is_secret: false },
+                    { key: "usage_limit_emails_sent", value: usageLimitEmails, is_secret: false },
+                    { key: "usage_limit_whatsapp_sent", value: usageLimitWhatsapp, is_secret: false },
                 ] };
 
               const normalizedIntegrationValues = Object.entries(apiKeys).reduce<Record<string, string>>((acc, [rawKey, rawValue]) => {
@@ -332,12 +625,6 @@ export default function SettingsPage() {
               }, {});
 
               const integrationValues = { ...normalizedIntegrationValues };
-              if (integrationValues.SARVAM_STT_MODEL && !integrationValues.SMALLEST_STT_MODEL) {
-                  integrationValues.SMALLEST_STT_MODEL = integrationValues.SARVAM_STT_MODEL;
-              }
-              if (integrationValues.SARVAM_VOICE_ID && !integrationValues.SMALLEST_VOICE_ID) {
-                  integrationValues.SMALLEST_VOICE_ID = integrationValues.SARVAM_VOICE_ID;
-              }
 
               const integrationPayload = {
                   items: Object.entries(integrationValues)
@@ -367,13 +654,18 @@ export default function SettingsPage() {
             }
 
             if (!res.ok || !keysRes.ok) {
-                throw new Error(`Save failed (${res.status}/${keysRes.status})`);
+                const settingsError = res.ok ? "" : await res.text();
+                const integrationsError = keysRes.ok ? "" : await keysRes.text();
+                throw new Error(
+                    `Save failed (${res.status}/${keysRes.status}) ${settingsError || integrationsError}`.trim()
+                );
             }
 
             setSaveSuccess(true);
             setTimeout(() => setSaveSuccess(false), 3000);
         } catch (error) {
             console.error("❌ [Settings] Error saving settings:", error);
+            setSaveError(error instanceof Error ? error.message : "Failed to save settings.");
         } finally {
             setSaving(false);
         }
@@ -418,7 +710,14 @@ export default function SettingsPage() {
     };
 
     const handleKeyChange = (key: string, value: string) => {
-        setApiKeys(prev => ({ ...prev, [key]: value }));
+        setApiKeys(prev => {
+            const next = { ...prev, [key]: value };
+            const mirrorKey = INTEGRATION_KEY_MIRRORS[key];
+            if (mirrorKey) {
+                next[mirrorKey] = value;
+            }
+            return next;
+        });
     };
 
     const toggleKeyVisibility = (key: string) => {
@@ -439,6 +738,27 @@ export default function SettingsPage() {
             console.error("Failed to save AI settings", e);
         } finally {
             setSavingMyAi(false);
+        }
+    };
+
+    const handleMyWarmTransferChange = (key: string, value: string) => {
+        setMyWarmTransfer(prev => ({ ...prev, [key]: value }));
+    };
+
+    const saveMyWarmTransferSettings = async () => {
+        if (!user) return;
+        setSavingMyWarmTransfer(true);
+        try {
+            await apiFetch(`${CRM_BASE}/me/settings`, {
+                method: "PUT",
+                headers: {"Content-Type": "application/json" },
+                body: JSON.stringify(myWarmTransfer) });
+            setMyWarmTransferSaved(true);
+            setTimeout(() => setMyWarmTransferSaved(false), 3000);
+        } catch (e) {
+            console.error("Failed to save warm transfer settings", e);
+        } finally {
+            setSavingMyWarmTransfer(false);
         }
     };
 
@@ -536,8 +856,36 @@ export default function SettingsPage() {
         }
     };
 
+    const handleCalendarConnect = async () => {
+        setCalendarLoading(true);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/calendar/auth-url`, {});
+            if (res.ok) {
+                const data = await res.json() as { auth_url: string };
+                window.location.href = data.auth_url;
+            }
+        } catch (e) {
+            console.error("Failed to get calendar auth URL", e);
+        } finally {
+            setCalendarLoading(false);
+        }
+    };
+
+    const handleCalendarDisconnect = async () => {
+        setCalendarLoading(true);
+        try {
+            await apiFetch(`${CRM_BASE}/calendar/disconnect`, { method: "DELETE" });
+            setCalendarStatus({ connected: false, email: null });
+        } catch (e) {
+            console.error("Failed to disconnect calendar", e);
+        } finally {
+            setCalendarLoading(false);
+        }
+    };
+
     return (
-        <div className="space-y-6 pb-8 text-slate-800 dark:text-slate-100">
+        <>
+            <div className="space-y-6 pb-8 text-slate-800 dark:text-slate-100">
             {/* Header */}
             <div className="flex items-center justify-between">
                 <div>
@@ -624,13 +972,24 @@ export default function SettingsPage() {
             )}
 
             {/* Tabs */}
-            <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-800 pb-2">
+            <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-800 pb-2 overflow-x-auto scrollbar-none">
                 {[
                     { id: "general", label: "General & Appearance", icon: Settings },
                     { id: "myemail", label: "My Email", icon: Mail },
                     ...(hasAdminAccess ? [
+                        { id: "sub_accounts", label: "Sub Accounts", icon: Layers },
+                        { id: "compliance", label: "Compliance & DLT", icon: ShieldCheck },
+                        { id: "dispositions", label: "Outcome Dispositions", icon: CheckCircle2 },
+                        { id: "agent_templates", label: "Agent Templates", icon: Sparkles },
+                        { id: "integrations", label: "No-Code Integrations", icon: Zap },
+                        { id: "cost", label: "Cost & Billing", icon: Gauge },
+                        { id: "feature_flags", label: "Feature Flags & Worker", icon: KeyRound },
+                        { id: "webhooks", label: "Webhooks", icon: Webhook },
                         { id: "persona", label: "Voice & AI Engine", icon: Brain },
                         { id: "keys", label: "Integration Keys", icon: KeyRound },
+                        { id: "credentials", label: "Provider Credentials", icon: Database },
+                        { id: "telephony", label: "SIP Trunks", icon: Server },
+                        { id: "usage", label: "Usage Limits", icon: Gauge },
                         { id: "competitors", label: "Competitors", icon: Zap },
                     ] : []),
                 ].map((tab) => {
@@ -653,6 +1012,41 @@ export default function SettingsPage() {
             </div>
 
             <div className="space-y-6">
+                {/* Sub Accounts Tab */}
+                {activeTab === "sub_accounts" && hasAdminAccess && (
+                    <SubAccountsTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Compliance Tab */}
+                {activeTab === "compliance" && hasAdminAccess && (
+                    <ComplianceTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Dispositions Tab */}
+                {activeTab === "dispositions" && hasAdminAccess && (
+                    <DispositionsTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Agent Templates Tab */}
+                {activeTab === "agent_templates" && hasAdminAccess && (
+                    <AgentTemplatesTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Integrations Tab */}
+                {activeTab === "integrations" && hasAdminAccess && (
+                    <IntegrationsTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Cost Tab */}
+                {activeTab === "cost" && hasAdminAccess && (
+                    <CostTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Feature Flags Tab */}
+                {activeTab === "feature_flags" && hasAdminAccess && (
+                    <FeatureFlagsTab sessionTimeout={sessionTimeout} />
+                )}
+
                 {/* General Tab */}
                 {activeTab === "general" && (
                     <div className="space-y-6">
@@ -833,6 +1227,40 @@ export default function SettingsPage() {
                                     <p className="text-xs text-slate-500">India Optimized PCM</p>
                                 </div>
                             </button>
+                            <button
+                                onClick={() => setTelephonyEngine("plivo")}
+                                className={`
+                                    flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
+                                    ${telephonyEngine === "plivo"
+                                        ? 'border-green-600 bg-green-600/5 dark:bg-green-600/10'
+                                        : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
+                                `}
+                            >
+                                <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${telephonyEngine === "plivo" ? 'bg-green-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                    <PhoneForwarded className="h-5 w-5" />
+                                </div>
+                                <div className="text-left">
+                                    <p className="font-bold text-sm">Plivo</p>
+                                    <p className="text-xs text-slate-500">Global VoIP</p>
+                                </div>
+                            </button>
+                            <button
+                                onClick={() => setTelephonyEngine("vobiz")}
+                                className={`
+                                    flex items-center space-x-3 p-4 rounded-xl border-2 transition-all
+                                    ${telephonyEngine === "vobiz"
+                                        ? 'border-cyan-600 bg-cyan-600/5 dark:bg-cyan-600/10'
+                                        : 'border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40'}
+                                `}
+                            >
+                                <div className={`h-10 w-10 rounded-lg flex items-center justify-center ${telephonyEngine === "vobiz" ? 'bg-cyan-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-500'}`}>
+                                    <PhoneForwarded className="h-5 w-5" />
+                                </div>
+                                <div className="text-left">
+                                    <p className="font-bold text-sm">Vobiz</p>
+                                    <p className="text-xs text-slate-500">India Optimized</p>
+                                </div>
+                            </button>
                         </div>
                     </div>
                 )}
@@ -935,6 +1363,177 @@ export default function SettingsPage() {
                                 <p className="text-[10px] text-slate-400 mt-1">Default 3s. How often the watcher polls.</p>
                             </div>
                         </div>
+                        <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={voicemailDetection === "1"}
+                                    onChange={(e) => setVoicemailDetection(e.target.checked ? "1" : "0")}
+                                    className="h-4 w-4 rounded border-slate-300"
+                                />
+                                <div>
+                                    <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">Voicemail detection</span>
+                                    <p className="text-[10px] text-slate-400 mt-0.5">Auto-hang up when answering machine detected. Saves call minutes.</p>
+                                </div>
+                            </label>
+                        </div>
+                    </div>
+                )}
+
+                {/* Agent Persona & Greetings */}
+                {hasAdminAccess && (
+                    <div className="mt-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 p-6">
+                        <div className="mb-4">
+                            <h3 className="text-base font-bold text-slate-900 dark:text-white">Agent Persona &amp; Greetings</h3>
+                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+                                Customize what the voice agent says at the start of every call.
+                                Use <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">&#123;agent_name&#125;</code>,{" "}
+                                <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">&#123;company_name&#125;</code>,{" "}
+                                <code className="bg-slate-100 dark:bg-slate-800 px-1 rounded">&#123;lead_name&#125;</code> as placeholders.
+                                Leave blank to use defaults.
+                            </p>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Agent name</label>
+                                <input
+                                    type="text"
+                                    value={agentName}
+                                    onChange={(e) => setAgentName(e.target.value)}
+                                    placeholder="Rio"
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Name the agent introduces itself as.</p>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Call connect message</label>
+                                <input
+                                    type="text"
+                                    value={callConnectMessage}
+                                    onChange={(e) => setCallConnectMessage(e.target.value)}
+                                    placeholder="Connected to {company_name}. Please start speaking."
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Played by telephony before AI stream connects.</p>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Opening greeting (no lead name)</label>
+                                <input
+                                    type="text"
+                                    value={agentGreeting}
+                                    onChange={(e) => setAgentGreeting(e.target.value)}
+                                    placeholder="Hello, I'm {agent_name} from {company_name}. Can you hear me okay?"
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Used when lead name is unknown.</p>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Personalized greeting (with lead name)</label>
+                                <input
+                                    type="text"
+                                    value={agentPersonalizedGreeting}
+                                    onChange={(e) => setAgentPersonalizedGreeting(e.target.value)}
+                                    placeholder="Hello {lead_name}, this is {agent_name} from {company_name}. Can you hear me okay?"
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Used when the lead name is known.</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {hasAdminAccess && (
+                    <div className="mt-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 p-6">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-teal-500">
+                                    <Gauge className="h-5 w-5 text-white" />
+                                </div>
+                                <div>
+                                    <h3 className="text-base font-bold text-slate-900 dark:text-white">ASR / Transcription</h3>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">Control company-level ASR storage and mapping heuristics.</p>
+                                </div>
+                            </div>
+                            <div className="text-sm text-slate-500">
+                                <span className="text-xs font-semibold">Per-company</span>
+                            </div>
+                        </div>
+
+                        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <label className="flex items-center gap-3 cursor-pointer">
+                                <input
+                                    type="checkbox"
+                                    checked={!!asrStoreRawJson}
+                                    onChange={(e) => setAsrStoreRawJson(Boolean(e.target.checked))}
+                                    className="h-4 w-4 rounded border-slate-300"
+                                />
+                                <div>
+                                    <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">Store raw provider JSON (ASR_STORE_RAW_JSON)</span>
+                                    <p className="text-[10px] text-slate-400 mt-0.5">When enabled, backend will persist full provider JSON for debugging. Recommended: off for privacy.</p>
+                                </div>
+                            </label>
+
+                            <div>
+                                <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">ASR overlap threshold (0.0 - 1.0)</label>
+                                <input
+                                    type="number"
+                                    min={0}
+                                    max={1}
+                                    step={0.01}
+                                    value={Number(asrOverlapThreshold)}
+                                    onChange={(e) => setAsrOverlapThreshold(String(e.target.value))}
+                                    className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
+                                />
+                                <p className="text-[10px] text-slate-400 mt-1">Adjust mapping sensitivity for segment→line matching. Default 0.6.</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+                    
+
+                {/* Google Calendar Integration */}
+                {hasAdminAccess && (
+                    <div className="mt-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 p-6">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-cyan-500">
+                                    <Calendar className="h-5 w-5 text-white" />
+                                </div>
+                                <div>
+                                    <h3 className="text-base font-bold text-slate-900 dark:text-white">Google Calendar</h3>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">
+                                        Let the AI agent book meetings directly into your calendar during calls.
+                                    </p>
+                                </div>
+                            </div>
+                            <div className="flex items-center space-x-3">
+                                {calendarStatus?.connected ? (
+                                    <>
+                                        <div className="flex items-center space-x-2 text-emerald-600 dark:text-emerald-400 text-sm font-semibold">
+                                            <div className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
+                                            <span>{calendarStatus.email ?? "Connected"}</span>
+                                        </div>
+                                        <button
+                                            onClick={handleCalendarDisconnect}
+                                            disabled={calendarLoading}
+                                            className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-red-300 dark:border-red-700 text-red-600 dark:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 text-xs font-bold transition-all disabled:opacity-50"
+                                        >
+                                            {calendarLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Link2Off className="h-3.5 w-3.5" />}
+                                            <span>Disconnect</span>
+                                        </button>
+                                    </>
+                                ) : (
+                                    <button
+                                        onClick={handleCalendarConnect}
+                                        disabled={calendarLoading}
+                                        className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-blue-500 to-cyan-500 text-white text-sm font-bold shadow-md shadow-blue-500/30 hover:opacity-90 transition-all disabled:opacity-50"
+                                    >
+                                        {calendarLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Link2 className="h-4 w-4" />}
+                                        <span>Connect Google Calendar</span>
+                                    </button>
+                                )}
+                            </div>
+                        </div>
                     </div>
                 )}
                     </div>
@@ -970,6 +1569,11 @@ export default function SettingsPage() {
                                         <option value="elevenlabs">ElevenLabs</option>
                                         <option value="smallest">Smallest</option>
                                         <option value="groq">Groq</option>
+                                        <option value="gladia">Gladia</option>
+                                        <option value="assemblyai">AssemblyAI</option>
+                                        <option value="ringg_ai">Ringg.ai</option>
+                                        <option value="inworld">Inworld</option>
+                                        <option value="azure">Azure</option>
                                     </select>
                                 </div>
 
@@ -990,6 +1594,9 @@ export default function SettingsPage() {
                                         <option value="sarvam">Sarvam (Multilingual)</option>
                                         <option value="groq">Groq</option>
                                         <option value="mimo">Mimo</option>
+                                        <option value="azure">Azure</option>
+                                        <option value="smallest">Smallest</option>
+                                        <option value="airllm">AirLLM</option>
                                     </select>
                                 </div>
 
@@ -1009,6 +1616,11 @@ export default function SettingsPage() {
                                         <option value="mistral">Mistral</option>
                                         <option value="smallest">Smallest</option>
                                         <option value="groq">Groq</option>
+                                        <option value="inworld">Inworld</option>
+                                        <option value="rime">Rime</option>
+                                        <option value="polly">Polly</option>
+                                        <option value="azure">Azure</option>
+                                        <option value="kitten">Kitten (Local)</option>
                                     </select>
                                 </div>
                             </div>
@@ -1047,6 +1659,43 @@ export default function SettingsPage() {
                                 </div>
                             </div>
 
+                            {/* Evaluation Judge */}
+                            <div className="space-y-4 rounded-2xl border border-violet-500/20 bg-violet-500/5 p-5">
+                                <div>
+                                    <p className="text-sm font-bold text-slate-700 dark:text-slate-300">Evaluation Judge</p>
+                                    <p className="text-xs text-slate-500 mt-0.5">LLM that scores each call on 6 quality axes after the call ends. Independent from the voice agent LLM.</p>
+                                </div>
+                                <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-slate-500 ml-1 uppercase">Evaluation Judge Provider</label>
+                                        <select
+                                            value={evalJudgeProvider}
+                                            onChange={(e) => setEvalJudgeProvider(e.target.value)}
+                                            className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all cursor-pointer"
+                                        >
+                                            <option value="">Auto-detect from API keys</option>
+                                            <option value="mistral">Mistral</option>
+                                            <option value="openai">OpenAI</option>
+                                            <option value="gemini">Gemini</option>
+                                            <option value="claude">Claude</option>
+                                            <option value="groq">Groq</option>
+                                        </select>
+                                        <p className="text-[11px] text-slate-500 ml-1">Leave blank → auto-pick based on which API key is set</p>
+                                    </div>
+                                    <div className="space-y-2">
+                                        <label className="text-xs font-bold text-slate-500 ml-1 uppercase">Evaluation Judge Model</label>
+                                        <input
+                                            type="text"
+                                            value={evalJudgeModel}
+                                            onChange={(e) => setEvalJudgeModel(e.target.value)}
+                                            placeholder="Leave blank for provider default"
+                                            className="w-full p-4 rounded-xl border-2 border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 font-bold focus:border-violet-500 focus:outline-none transition-all"
+                                        />
+                                        <p className="text-[11px] text-slate-500 ml-1">Defaults: mistral-large-latest · gpt-4o-mini · gemini-1.5-flash · claude-haiku-4-5 · llama-3.1-8b-instant</p>
+                                    </div>
+                                </div>
+                            </div>
+
                             {/* System Instructions */}
                             <div className="space-y-2">
                                 <label className="text-sm font-bold text-slate-700 dark:text-slate-300 ml-1">System Instructions / Script</label>
@@ -1067,6 +1716,289 @@ export default function SettingsPage() {
                     </div>
                 )}
 
+
+                {/* Company Prompts — versioned prompt history */}
+                {activeTab === "persona" && hasAdminAccess && (
+                    <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5 mt-6">
+                        <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600">
+                                <Layers className="h-5 w-5 text-white" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Company Prompt Versions</h3>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">Versioned system prompts — save a new version and activate it company-wide</p>
+                            </div>
+                        </div>
+                        {/* New version form */}
+                        <div className="space-y-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                            <label className="text-xs font-semibold text-slate-500 uppercase">New Prompt Version</label>
+                            <textarea
+                                rows={8}
+                                value={newPromptText}
+                                onChange={e => setNewPromptText(e.target.value)}
+                                placeholder="Paste the new system prompt here…"
+                                className="w-full p-3 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 font-mono focus:outline-none focus:ring-2 focus:ring-violet-500 resize-y"
+                            />
+                            <input
+                                type="text"
+                                value={newPromptReason}
+                                onChange={e => setNewPromptReason(e.target.value)}
+                                placeholder="Change reason (optional)"
+                                className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                            />
+                            <div className="flex items-center gap-3">
+                                <button onClick={saveCompanyPrompt} disabled={promptSaving || !newPromptText.trim()} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                                    {promptSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                                    Save New Version
+                                </button>
+                                {promptSaved && <span className="text-sm text-emerald-600 font-semibold flex items-center gap-1"><CheckCircle2 className="h-4 w-4" /> Saved</span>}
+                            </div>
+                        </div>
+                        {}
+                        {companyPrompts.length > 0 && (
+                            <div className="space-y-2">
+                                <label className="text-xs font-semibold text-slate-500 uppercase">Version History</label>
+                                {companyPrompts.map(p => (
+                                    <div key={p.id} className={`rounded-lg border p-3 flex items-start gap-3 ${p.is_active ? "border-violet-400 bg-violet-50 dark:bg-violet-950/20" : "border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/30"}`}>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 mb-1">
+                                                <span className="text-xs font-bold text-slate-500">v{p.version}</span>
+                                                {p.is_active && <span className="px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-900/40 text-violet-700 dark:text-violet-300 text-xs font-bold">active</span>}
+                                                {p.change_reason && <span className="text-xs text-slate-400 truncate">{p.change_reason}</span>}
+                                            </div>
+                                            <pre className="text-xs text-slate-600 dark:text-slate-400 font-mono whitespace-pre-wrap line-clamp-3">{p.prompt_text}</pre>
+                                        </div>
+                                        {!p.is_active && (
+                                            <button onClick={() => activatePrompt(p.id)} className="shrink-0 flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-violet-600 text-white text-xs font-semibold hover:bg-violet-700 transition-colors">
+                                                <Play className="h-3 w-3" /> Activate
+                                            </button>
+                                        )}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Provider Credentials Tab */}
+                {activeTab === "credentials" && hasAdminAccess && (
+                    <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">
+                        <div className="flex items-center gap-3">
+                            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-emerald-600">
+                                <Database className="h-5 w-5 text-white" />
+                            </div>
+                            <div>
+                                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Provider Credentials</h3>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">Encrypted per-provider API keys managed separately from integration settings</p>
+                            </div>
+                        </div>
+                        {/* Add credential form */}
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
+                            <div>
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Provider</label>
+                                <select value={credForm.provider} onChange={e => setCredForm(p => ({ ...p, provider: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500">
+                                    {["deepgram","cartesia","openai","mistral","anthropic","elevenlabs","twilio","plivo","exotel","vobiz","groq","azure","aws"].map(p => <option key={p} value={p}>{p}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Key Name</label>
+                                <input type="text" value={credForm.key_name} onChange={e => setCredForm(p => ({ ...p, key_name: e.target.value }))} placeholder="API_KEY" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Value</label>
+                                <div className="flex gap-2">
+                                    <input type="password" value={credForm.value} onChange={e => setCredForm(p => ({ ...p, value: e.target.value }))} placeholder="sk-…" className="flex-1 p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                    <button onClick={saveProviderCred} disabled={credSaving || !credForm.value.trim()} className="px-3 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                                        {credSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+                                    </button>
+                                </div>
+                            </div>
+                            {credError && <div className="col-span-3 text-sm text-red-600">{credError}</div>}
+                            {credSuccess && <div className="col-span-3 text-sm text-emerald-600 font-semibold flex items-center gap-1"><CheckCircle2 className="h-4 w-4" /> Saved</div>}
+                        </div>
+                        {/* Credentials list */}
+                        {providerCreds.length === 0 ? (
+                            <p className="text-sm text-slate-400 text-center py-8">No credentials stored yet.</p>
+                        ) : (
+                            <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-slate-50 dark:bg-slate-900/60 text-xs uppercase text-slate-500">
+                                        <tr>
+                                            <th className="px-4 py-2 text-left">Provider</th>
+                                            <th className="px-4 py-2 text-left">Key Name</th>
+                                            <th className="px-4 py-2 text-left">Value</th>
+                                            <th className="px-4 py-2"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                                        {providerCreds.map(c => (
+                                            <tr key={c.id}>
+                                                <td className="px-4 py-2.5 font-medium text-slate-700 dark:text-slate-300">{c.provider}</td>
+                                                <td className="px-4 py-2.5 font-mono text-slate-500">{c.key_name}</td>
+                                                <td className="px-4 py-2.5 font-mono text-slate-400">●●●●●●●●</td>
+                                                <td className="px-4 py-2.5 text-right">
+                                                    <button onClick={() => deleteProviderCred(c.id)} className="p-1.5 text-slate-400 hover:text-red-500 transition-colors"><Trash2 className="h-4 w-4" /></button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Webhooks Tab */}
+                {activeTab === "webhooks" && hasAdminAccess && (
+                    <div className="space-y-6">
+                        <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-indigo-600">
+                                        <Webhook className="h-5 w-5 text-white" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Webhooks</h3>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400">Register outbound endpoints — Rio POSTs events to each active webhook</p>
+                                    </div>
+                                </div>
+                                <button onClick={() => openWebhookModal("new")} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors">
+                                    <Plus className="h-4 w-4" /> Add Webhook
+                                </button>
+                            </div>
+                            {webhooks.length === 0 ? (
+                                <p className="text-center text-slate-400 text-sm py-8">No webhooks yet. Click &ldquo;Add Webhook&rdquo; to register an endpoint.</p>
+                            ) : (
+                                <div className="space-y-3">
+                                    {webhooks.map(w => (
+                                        <div key={w.id} className="flex items-start gap-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/30">
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <span className="font-semibold text-slate-800 dark:text-slate-200">{w.name}</span>
+                                                    <span className={`px-1.5 py-0.5 rounded text-xs font-bold ${w.is_active ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300" : "bg-slate-100 dark:bg-slate-800 text-slate-500"}`}>
+                                                        {w.is_active ? "active" : "paused"}
+                                                    </span>
+                                                </div>
+                                                <div className="flex items-center gap-1.5 text-xs text-slate-400 mb-2">
+                                                    <ExternalLink className="h-3 w-3 shrink-0" />
+                                                    <span className="font-mono truncate">{w.url}</span>
+                                                </div>
+                                                <div className="flex flex-wrap gap-1">
+                                                    {w.events.map(e => <span key={e} className="px-1.5 py-0.5 rounded bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300 text-xs">{e}</span>)}
+                                                </div>
+                                            </div>
+                                            <div className="flex items-center gap-1 shrink-0">
+                                                <button onClick={() => testWebhook(w.id)} disabled={testingWebhook === w.id} title="Send test event" className="p-1.5 text-slate-400 hover:text-blue-500 transition-colors disabled:opacity-50">
+                                                    {testingWebhook === w.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <Play className="h-4 w-4" />}
+                                                </button>
+                                                <button onClick={() => openWebhookModal(w)} className="p-1.5 text-slate-400 hover:text-violet-500 transition-colors">
+                                                    <Settings className="h-4 w-4" />
+                                                </button>
+                                                <button onClick={() => deleteWebhook(w.id)} className="p-1.5 text-slate-400 hover:text-red-500 transition-colors">
+                                                    <Trash2 className="h-4 w-4" />
+                                                </button>
+                                            </div>
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
+                        </div>
+
+                        {/* Available events reference */}
+                        {availableEvents.length > 0 && (
+                            <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-3">
+                                <h4 className="font-bold text-slate-700 dark:text-slate-300">Available Event Types</h4>
+                                <div className="flex flex-wrap gap-2">
+                                    {availableEvents.map((e: any) => {
+                                        const eventKey = typeof e === "string" ? e : e.key;
+                                        return (
+                                            <button key={eventKey} onClick={() => navigator.clipboard.writeText(eventKey)} className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-600 dark:text-slate-300 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors" title="Click to copy">
+                                                <Copy className="h-3 w-3" />{eventKey}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        {/* Delivery logs */}
+                        {webhookLogs.length > 0 && (
+                            <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-3">
+                                <h4 className="font-bold text-slate-700 dark:text-slate-300">Recent Delivery Logs</h4>
+                                <div className="space-y-1.5 max-h-64 overflow-y-auto">
+                                    {webhookLogs.slice(0, 50).map(log => {
+                                        const isSuccess = log.http_status ? (log.http_status >= 200 && log.http_status < 300) : false;
+                                        return (
+                                            <div key={log.id} className="flex items-center gap-3 px-3 py-2 rounded-lg border border-slate-100 dark:border-slate-800 text-xs">
+                                                {isSuccess ? <CheckCircle className="h-3.5 w-3.5 text-emerald-500 shrink-0" /> : <XCircle className="h-3.5 w-3.5 text-red-500 shrink-0" />}
+                                                <span className={`font-mono ${isSuccess ? "text-slate-600 dark:text-slate-300" : "text-red-600 dark:text-red-400"}`}>{log.event_type}</span>
+                                                {log.http_status && <span className="text-slate-400">HTTP {log.http_status}</span>}
+                                                {log.error && <span className="text-red-500 truncate">{log.error}</span>}
+                                                <span className="ml-auto text-slate-400">{new Date(log.created_at).toLocaleString()}</span>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* SIP Trunks Tab */}
+                {activeTab === "telephony" && hasAdminAccess && (
+                    <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
+                        <div className="flex items-center justify-between">
+                            <div className="flex items-center gap-3">
+                                <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-orange-500 to-red-600">
+                                    <Server className="h-5 w-5 text-white" />
+                                </div>
+                                <div>
+                                    <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">SIP Trunks</h3>
+                                    <p className="text-sm text-slate-500 dark:text-slate-400">Register external SIP trunks for telephony routing</p>
+                                </div>
+                            </div>
+                            <button onClick={() => openSipModal("new")} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors">
+                                <Plus className="h-4 w-4" /> Add Trunk
+                            </button>
+                        </div>
+                        {sipTrunks.length === 0 ? (
+                            <p className="text-center text-slate-400 text-sm py-8">No SIP trunks configured.</p>
+                        ) : (
+                            <div className="border border-slate-200 dark:border-slate-800 rounded-xl overflow-hidden">
+                                <table className="w-full text-sm">
+                                    <thead className="bg-slate-50 dark:bg-slate-900/60 text-xs uppercase text-slate-500">
+                                        <tr>
+                                            <th className="px-4 py-2 text-left">Name</th>
+                                            <th className="px-4 py-2 text-left">Host</th>
+                                            <th className="px-4 py-2 text-left">Provider</th>
+                                            <th className="px-4 py-2 text-left">Status</th>
+                                            <th className="px-4 py-2"></th>
+                                        </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                                        {sipTrunks.map(t => (
+                                            <tr key={t.id}>
+                                                <td className="px-4 py-2.5">
+                                                    <div className="font-medium text-slate-800 dark:text-slate-200">{t.name}</div>
+                                                    {t.is_default && <span className="text-xs text-violet-600 dark:text-violet-400 font-semibold">default</span>}
+                                                </td>
+                                                <td className="px-4 py-2.5 font-mono text-slate-500 text-xs">{t.host}:{t.port}</td>
+                                                <td className="px-4 py-2.5 text-slate-500">{t.provider}</td>
+                                                <td className="px-4 py-2.5">
+                                                    <span className={`px-2 py-0.5 rounded text-xs font-semibold ${t.status === "active" ? "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300" : "bg-slate-100 dark:bg-slate-800 text-slate-500"}`}>{t.status}</span>
+                                                </td>
+                                                <td className="px-4 py-2.5 text-right">
+                                                    <button onClick={() => openSipModal(t)} className="p-1.5 text-slate-400 hover:text-violet-500 transition-colors mr-1"><Settings className="h-4 w-4" /></button>
+                                                    <button onClick={() => deleteSipTrunk(t.id)} className="p-1.5 text-slate-400 hover:text-red-500 transition-colors"><Trash2 className="h-4 w-4" /></button>
+                                                </td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+                    </div>
+                )}
 
                 {/* Integrations Keys Tab */}
                 {/* My Email Tab — visible to all roles */}
@@ -1221,6 +2153,61 @@ export default function SettingsPage() {
                                 Leave blank to use company-wide email settings. Your password is stored encrypted.
                             </p>
                         </div>
+
+                        <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
+                            <div className="flex items-center justify-between mb-6">
+                                <div className="flex items-center space-x-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-emerald-500 to-teal-500">
+                                        <PhoneForwarded className="h-5 w-5 text-white" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-xl font-bold text-slate-900 dark:text-slate-100">My Warm Transfer</h3>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400">
+                                            Personal handoff destination. Leave blank to use the company warm transfer number.
+                                        </p>
+                                    </div>
+                                </div>
+                                <div className="flex items-center space-x-2">
+                                    {myWarmTransferSaved && (
+                                        <span className="flex items-center space-x-1 text-emerald-600 text-sm font-bold">
+                                            <CheckCircle2 className="h-4 w-4" />
+                                            <span>Saved</span>
+                                        </span>
+                                    )}
+                                    <button
+                                        onClick={saveMyWarmTransferSettings}
+                                        disabled={savingMyWarmTransfer}
+                                        className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 disabled:opacity-50 transition-all"
+                                    >
+                                        {savingMyWarmTransfer ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                                        <span>Save</span>
+                                    </button>
+                                </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                                <div className="space-y-1">
+                                    <label className="text-xs font-semibold text-slate-500 uppercase">Transfer Number</label>
+                                    <input
+                                        type="text"
+                                        placeholder="+919876543210"
+                                        value={myWarmTransfer.WARM_TRANSFER_NUMBER || ""}
+                                        onChange={(e) => handleMyWarmTransferChange("WARM_TRANSFER_NUMBER", e.target.value)}
+                                        className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 font-mono text-sm"
+                                    />
+                                </div>
+                                <div className="space-y-1">
+                                    <label className="text-xs font-semibold text-slate-500 uppercase">Transfer Name</label>
+                                    <input
+                                        type="text"
+                                        placeholder="Sales manager"
+                                        value={myWarmTransfer.WARM_TRANSFER_NAME || ""}
+                                        onChange={(e) => handleMyWarmTransferChange("WARM_TRANSFER_NAME", e.target.value)}
+                                        className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 text-sm"
+                                    />
+                                </div>
+                            </div>
+                        </div>
                     </div>
                 )}
 
@@ -1238,12 +2225,15 @@ export default function SettingsPage() {
 
                         <div className="grid gap-6 md:grid-cols-2">
                             {Object.entries({
-                                "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "PHONE_NUMBER_FROM", "WHATSAPP_NUMBER_FROM"],
+                                "Twilio & Messaging": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_PHONE_NUMBER", "WHATSAPP_NUMBER"],
                                 "Exotel (Telephony)": ["EXOTEL_ACCOUNT_SID", "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOPHONE", "EXOTEL_APP_ID"],
                                 "EnableX (Telephony)": ["ENABLEX_APP_ID", "ENABLEX_APP_KEY", "ENABLEX_FROM_NUMBER"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID", "GROQ_STT_MODEL", "GROQ_VOICE"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_API_KEY", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL"],
-                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL"],
+                                "Plivo (Telephony)": ["PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_PHONE_NUMBER"],
+                                "Vobiz (Telephony)": ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_PHONE_NUMBER"],
+                                "Warm Transfer": ["WARM_TRANSFER_NUMBER", "WARM_TRANSFER_NAME"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID", "GROQ_STT_MODEL", "GROQ_VOICE", "GLADIA_API_KEY", "ASSEMBLYAI_API_KEY", "RINGG_AI_API_KEY", "GLADIA_STT_MODEL", "ASSEMBLYAI_STT_MODEL", "RINGG_AI_STT_MODEL", "INWORLD_API_KEY", "INWORLD_STT_MODEL", "AZURE_SPEECH_API_KEY", "AZURE_SPEECH_API_VERSION", "AZURE_SPEECH_REGION", "AZURE_STT_MODEL", "AZURE_SPEECH_ENDPOINT"],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL", "INWORLD_TTS_MODEL", "INWORLD_VOICE_ID", "RIME_API_KEY", "RIME_TTS_MODEL", "RIME_VOICE_ID", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "POLLY_TTS_MODEL", "POLLY_VOICE_ID", "AZURE_TTS_MODEL", "AZURE_VOICE_ID", "KITTEN_TTS_MODEL", "KITTEN_TTS_VOICE",],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "SMALLEST_API_KEY", "SMALLEST_LLM_MODEL", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL", "AZURE_LLM_API_KEY", "AZURE_LLM_MODEL", "AZURE_LLM_ENDPOINT", "AZURE_LLM_API_VERSION", "AZURE_LLM_REGION", "AIRLLM_MODEL", "AIRLLM_COMPRESSION", "AIRLLM_MAX_NEW_TOKENS"],
                                 "Email (SMTP — Outbound)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Email (IMAP — Inbound)": ["IMAP_SERVER", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD"],
                                 "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"]
@@ -1257,7 +2247,7 @@ export default function SettingsPage() {
                                             <div className="relative group/key">
                                                 <input
                                                     type={visibleKeys[keyName] || String(apiKeys[keyName]).startsWith("***") ? "text" : "password"}
-                                                    placeholder="sk-..."
+                                                    placeholder={keyName.includes("PHONE") || keyName.includes("NUMBER") ? "+19014992283" : "sk-..."}
                                                     value={apiKeys[keyName] || ""}
                                                     onChange={(e) => handleKeyChange(keyName, e.target.value)}
                                                     onFocus={() => {
@@ -1281,6 +2271,61 @@ export default function SettingsPage() {
                                 </div>
                             ))}
                         </div>
+                    </div>
+                )}
+
+                {/* Usage Limits Tab */}
+                {activeTab === "usage" && hasAdminAccess && (
+                    <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">
+                        <div className="flex items-center gap-3">
+                            <Gauge className="h-6 w-6 text-violet-500" />
+                            <div>
+                                <h2 className="text-lg font-semibold text-slate-900 dark:text-white">Usage Limits</h2>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">
+                                    Override monthly limits per metric. Leave blank to use your plan&apos;s defaults.
+                                    Set to <code className="text-xs bg-slate-100 dark:bg-slate-800 px-1 rounded">0</code> to block a feature entirely,
+                                    or <code className="text-xs bg-slate-100 dark:bg-slate-800 px-1 rounded">unlimited</code> to remove the cap.
+                                </p>
+                            </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Calls (per month)</label>
+                                <input
+                                    type="text"
+                                    value={usageLimitCalls}
+                                    onChange={(e) => setUsageLimitCalls(e.target.value)}
+                                    placeholder="Plan default"
+                                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">Emails (per month)</label>
+                                <input
+                                    type="text"
+                                    value={usageLimitEmails}
+                                    onChange={(e) => setUsageLimitEmails(e.target.value)}
+                                    placeholder="Plan default"
+                                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-slate-700 dark:text-slate-300 mb-1">WhatsApp Messages (per month)</label>
+                                <input
+                                    type="text"
+                                    value={usageLimitWhatsapp}
+                                    onChange={(e) => setUsageLimitWhatsapp(e.target.value)}
+                                    placeholder="Plan default"
+                                    className="w-full rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 px-3 py-2 text-sm placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                />
+                            </div>
+                        </div>
+
+                        <p className="text-xs text-slate-400 dark:text-slate-500">
+                            These overrides are saved along with your other settings when you click <strong>Save Changes</strong>.
+                            Changes take effect immediately — no restart needed.
+                        </p>
                     </div>
                 )}
 
@@ -1433,7 +2478,12 @@ export default function SettingsPage() {
 
                 {/* Save Button */}
                 {hasAdminAccess && (
-                    <div className="flex justify-end pt-12">
+                    <div className="flex flex-col items-end gap-3 pt-12">
+                        {saveError && (
+                            <p className="max-w-xl rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300">
+                                {saveError}
+                            </p>
+                        )}
                         <button
                             onClick={handleSave}
                             disabled={saving}
@@ -1449,5 +2499,97 @@ export default function SettingsPage() {
                 )}
             </div>
         </div>
+
+        {/* Webhook modal */}
+        {webhookModal !== null && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setWebhookModal(null)}>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/10 max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/10">
+                        <h2 className="font-bold text-slate-900 dark:text-slate-100">{webhookModal === "new" ? "Add Webhook" : "Edit Webhook"}</h2>
+                        <button onClick={() => setWebhookModal(null)} className="text-slate-400 hover:text-slate-600"><XCircle className="h-5 w-5" /></button>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        {webhookError && <div className="text-sm text-red-600 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">{webhookError}</div>}
+                        <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Name</label>
+                            <input value={webhookForm.name} onChange={e => setWebhookForm(p => ({ ...p, name: e.target.value }))} placeholder="Zapier CRM Sync" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                        <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">URL</label>
+                            <input value={webhookForm.url} onChange={e => setWebhookForm(p => ({ ...p, url: e.target.value }))} placeholder="https://hooks.zapier.com/…" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                        <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Events (select all that apply)</label>
+                            <div className="flex flex-wrap gap-2 max-h-36 overflow-y-auto p-2 rounded-lg border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800/60">
+                                {availableEvents.map((e: any) => {
+                                    const eventKey = typeof e === "string" ? e : e.key;
+                                    const eventLabel = typeof e === "string" ? e : e.label;
+                                    const isSelected = webhookForm.events.includes(eventKey);
+                                    return (
+                                        <button
+                                            key={eventKey}
+                                            type="button"
+                                            onClick={() => setWebhookForm(p => ({
+                                                ...p,
+                                                events: isSelected
+                                                    ? p.events.filter(x => x !== eventKey)
+                                                    : [...p.events, eventKey]
+                                            }))}
+                                            className={`px-2 py-0.5 rounded text-xs font-medium transition-colors ${
+                                                isSelected
+                                                    ? "bg-violet-600 text-white"
+                                                    : "bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 hover:bg-violet-50"
+                                            }`}
+                                        >
+                                            {eventLabel}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-3">
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Timeout (seconds)</label>
+                                <input type="number" value={webhookForm.timeout_seconds} onChange={e => setWebhookForm(p => ({ ...p, timeout_seconds: Number(e.target.value) }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div className="flex items-end pb-1"><label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={webhookForm.is_active} onChange={e => setWebhookForm(p => ({ ...p, is_active: e.target.checked }))} className="w-4 h-4 accent-violet-600" /><span className="text-sm text-slate-700 dark:text-slate-300">Active</span></label></div>
+                        </div>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button onClick={() => setWebhookModal(null)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors">Cancel</button>
+                            <button onClick={saveWebhook} disabled={webhookSaving || !webhookForm.name.trim() || !webhookForm.url.trim()} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                                {webhookSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* SIP Trunk modal */}
+        {sipModal !== null && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setSipModal(null)}>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/10 max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/10">
+                        <h2 className="font-bold text-slate-900 dark:text-slate-100">{sipModal === "new" ? "Add SIP Trunk" : "Edit SIP Trunk"}</h2>
+                        <button onClick={() => setSipModal(null)} className="text-slate-400 hover:text-slate-600"><XCircle className="h-5 w-5" /></button>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        {sipError && <div className="text-sm text-red-600 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">{sipError}</div>}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Name</label><input value={sipForm.name} onChange={e => setSipForm(p => ({ ...p, name: e.target.value }))} placeholder="My SIP Trunk" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Host</label><input value={sipForm.host} onChange={e => setSipForm(p => ({ ...p, host: e.target.value }))} placeholder="sip.provider.com" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Port</label><input type="number" value={sipForm.port} onChange={e => setSipForm(p => ({ ...p, port: Number(e.target.value) }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Transport</label><select value={sipForm.transport} onChange={e => setSipForm(p => ({ ...p, transport: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="udp">UDP</option><option value="tcp">TCP</option><option value="tls">TLS</option></select></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Provider</label><input value={sipForm.provider} onChange={e => setSipForm(p => ({ ...p, provider: e.target.value }))} placeholder="generic_sip" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Username</label><input value={sipForm.username} onChange={e => setSipForm(p => ({ ...p, username: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Password</label><input type="password" value={sipForm.password} onChange={e => setSipForm(p => ({ ...p, password: e.target.value }))} placeholder="Leave blank to keep existing" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Codecs</label><input value={sipForm.codecs} onChange={e => setSipForm(p => ({ ...p, codecs: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">DTMF Mode</label><select value={sipForm.dtmf_mode} onChange={e => setSipForm(p => ({ ...p, dtmf_mode: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="rfc2833">RFC 2833</option><option value="inband">In-band</option><option value="info">SIP INFO</option></select></div>
+                            <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="sip-default" checked={sipForm.is_default} onChange={e => setSipForm(p => ({ ...p, is_default: e.target.checked }))} className="w-4 h-4 accent-violet-600" /><label htmlFor="sip-default" className="text-sm text-slate-700 dark:text-slate-300 cursor-pointer">Set as default trunk</label></div>
+                        </div>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button onClick={() => setSipModal(null)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors">Cancel</button>
+                            <button onClick={saveSipTrunk} disabled={sipSaving || !sipForm.name.trim() || !sipForm.host.trim()} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                                {sipSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+        </>
     );
 }

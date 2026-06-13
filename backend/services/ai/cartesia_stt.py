@@ -112,7 +112,10 @@ class CartesiaSTT:
                     },
                 )
                 if response.status_code != 200:
-                    logger.error(f"❌ Cartesia STT {response.status_code}: {response.text}")
+                    logger.error(
+                        "❌ Cartesia STT HTTP %s — model=%s body=%s",
+                        response.status_code, self.model, response.text[:500],
+                    )
                     return ""
                 result = response.json()
                 logger.info(f"🔍 [Cartesia STT Raw Response] {result}")
@@ -120,8 +123,17 @@ class CartesiaSTT:
                 if transcript:
                     logger.info(f"🛰️ [Cartesia STT] '{transcript}'")
                 return transcript
+        except httpx.TimeoutException as e:
+            logger.error("❌ Cartesia STT timeout after 30s — model=%s", self.model)
+            return ""
+        except httpx.HTTPStatusError as e:
+            logger.error(
+                "❌ Cartesia STT HTTPStatusError — model=%s status=%s body=%s",
+                self.model, e.response.status_code, e.response.text[:500],
+            )
+            return ""
         except Exception as e:
-            logger.error(f"❌ Cartesia STT error: {e}")
+            logger.error("❌ Cartesia STT error — model=%s exc=%s", self.model, e, exc_info=True)
             return ""
 
     async def close(self):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 import logging
 from langchain_core.tools import tool
-from utils.tracing import traceable, traceable_async
+from utils.tracing import traceable_async
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +31,7 @@ def save_call_summary(
             lead_id=lead_id, transcript=transcript, icp_score=icp_score,
             sentiment=sentiment, pain_points=pain_points or [],
             questions_asked=questions_asked or [], bant_answers=bant_answers or {},
+            company_id=company_id,
         )
         CallSummarizer.save_summary_to_crm(
             lead_id=lead_id, summary=summary,
@@ -99,39 +100,6 @@ def send_followup_email(
 POST_CALL_TOOLS = [save_call_summary, update_lead_status, send_followup_email]
 
 
-@traceable(name="post_call_node", run_type="chain", tags=['post_call'])
-def post_call_node(state: dict) -> dict:
-    """LangGraph node: summarize call, update CRM, and set next_agent routing."""
-    lead_id = state.get("lead_id")
-    company_id = state.get("company_id", 0)
-    actor_user_id = state.get("actor_user_id", 0)
-    transcript = state.get("call_transcript") or ""
-    icp_score = state.get("icp_score", 0.5)
-    sentiment = state.get("sentiment") or "neutral"
-    call_outcome = state.get("call_outcome") or "neutral"
-
-    if lead_id and transcript:
-        save_call_summary.invoke({
-            "lead_id": lead_id, "company_id": company_id, "actor_user_id": actor_user_id,
-            "transcript": transcript, "icp_score": icp_score, "sentiment": sentiment,
-            "pain_points": state.get("pain_points", []),
-            "questions_asked": state.get("questions_asked", []),
-            "bant_answers": state.get("bant_answers", {}),
-        })
-
-    if icp_score > 0.75 and call_outcome == "positive":
-        state["next_agent"] = "book_demo"
-    elif call_outcome == "not_qualified":
-        state["next_agent"] = "FINISH"
-    else:
-        state["next_agent"] = "nurture"
-
-    state.setdefault("agent_results", {})["post_call"] = {
-        "call_outcome": call_outcome, "next_agent": state["next_agent"],
-    }
-    return state
-
-
 _POST_CALL_SYSTEM_PROMPT = (
     "You are the Post-Call Agent for Rio CRM.\n"
     "After a sales call you MUST:\n"
@@ -196,7 +164,8 @@ async def run(
     query = (
         f"Process post-call for lead {lead_id} ({lead_name}, {lead_email}). "
         f"Outcome={call_outcome}, sentiment={sentiment}, icp_score={icp_score:.2f}. "
-        f"Pain points: {pain_points}. BANT: {bant_answers}. "
+        f"Pain points: {'|'.join(pain_points) if isinstance(pain_points, list) else pain_points}. "
+        f"BANT: {'|'.join(f'{k}={v}' for k, v in bant_answers.items()) if isinstance(bant_answers, dict) else bant_answers}. "
         f"Save summary, update CRM status, send follow-up if appropriate. "
         f"transcript_length={len(transcript)}."
     )
@@ -209,7 +178,49 @@ async def run(
             {"messages": [HumanMessage(content=query)]},
             config=config,
         )
-        return {"output": result["messages"][-1].content, "errors": []}
+        output = result["messages"][-1].content
     except Exception as exc:
         logger.warning("[PostCallAgent] run failed: %s", exc)
         return {"output": "", "errors": [str(exc)]}
+
+    # Fire-and-forget: eval the call using real transcript data
+    _schedule_call_eval(company_id, lead_id)
+
+    return {"output": output, "errors": []}
+
+
+def _schedule_call_eval(company_id: int, lead_id: int) -> None:
+    """Background eval: find the latest interaction for this lead and judge it."""
+    import asyncio
+
+    async def _run() -> None:
+        try:
+            from database import engine
+            from sqlmodel import Session, select
+            from models.models import Interaction
+            from services.evals.call_eval_service import run_call_eval
+            with Session(engine) as s:
+                interaction = s.exec(
+                    select(Interaction)
+                    .where(
+                        Interaction.lead_id == lead_id,
+                        Interaction.company_id == company_id,
+                        Interaction.type == "call",
+                        Interaction.transcript.is_not(None),
+                    )
+                    .order_by(Interaction.created_at.desc())
+                    .limit(1)
+                ).first()
+                if interaction:
+                    await run_call_eval(s, interaction.id, company_id)
+        except Exception as exc:
+            logger.warning("[PostCallAgent] background eval failed: %s", exc)
+
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.ensure_future(_run())
+        else:
+            loop.run_until_complete(_run())
+    except Exception as exc:
+        logger.warning("[PostCallAgent] could not schedule eval: %s", exc)

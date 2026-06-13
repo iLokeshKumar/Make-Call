@@ -7,18 +7,19 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from .state import RioState
 from utils.tracing import traceable
 logger = logging.getLogger(__name__)
-AGENT_LIST = ["knowledge","researcher","enrichment","post_call","coach","ism","campaign","quote","analytics","FINISH"]
+AGENT_LIST = ["knowledge","researcher","enrichment","post_call","coach","ism","campaign","quote","proposal","analytics","FINISH"]
 _TASK_SEQUENCES: dict[str, list[str]] = {
     "pre_call":  ["knowledge", "researcher"],
     "post_call": ["post_call", "coach", "ism"],
     "enrich":    ["enrichment"],
     "search":    ["knowledge"],
     "quote":     ["quote"],
+    "proposal":  ["proposal"],
     "analytics": ["analytics"],
     "campaign":  ["campaign"],
 }
 _SUPERVISOR_SYSTEM_PROMPT = """You are the Rio CRM orchestrator. Decide which agent runs next.
-Available: knowledge, researcher, enrichment, post_call, coach, ism, campaign, quote, analytics, FINISH.
+Available: knowledge, researcher, enrichment, post_call, coach, ism, campaign, quote, proposal, analytics, FINISH.
 Respond with exactly one word."""
 def _next_in_sequence(sequence, completed):
     for agent in sequence:

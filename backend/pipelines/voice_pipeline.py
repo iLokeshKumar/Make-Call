@@ -15,7 +15,10 @@ import audioop
 from sqlmodel import Session, select
 
 from models.models import CompanySetting, Interaction, LatencyLog, Lead, User, utc_now
+from services.voice.mark_tracking_service import enqueue_mark as _enqueue_mark
+from services.platform.cost_service import calculate_call_cost as _calc_cost, save_cost_record as _save_cost
 from services.ai.llm import get_llm_service
+from agents._format_utils import to_compact
 from services.ai.stt import get_stt_service
 from services.ai.tts import get_tts_service
 from tool_adapter import execute_mcp_tool, get_mistral_tools
@@ -30,6 +33,17 @@ from pipelines.voice.tts_handler import TTSHandler
 from pipelines.voice.llm_handler import LLMHandler
 from pipelines.voice.interrupt_manager import InterruptManager
 from pipelines.voice.transcript_manager import TranscriptManager
+from pipelines.voice.graph_pipeline_adapter import (
+    create_graph_engine_from_runtime,
+    should_use_graph_engine,
+    process_graph_turn,
+)
+from services.voice.voicemail_handler import VoicemailHandler
+from services.voice.language.language_detector import LanguageDetector
+from services.voice.filler_service import FillerService
+from services.voice.ambient_noise_service import AmbientNoiseService
+from communicators.plivo import PlivoCommunicator
+from communicators.vobiz import VobizCommunicator
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +102,7 @@ class VoicePipeline:
                  company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
                  company_website: str = None, lead_id: int = None,
                  audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000,
-                 lead_language: str = "en-IN"):
+                 lead_language: str = "en-IN", runtime_json: dict = None):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
@@ -130,6 +144,7 @@ class VoicePipeline:
         self.pending_user_turn_text = ""
         self.pending_llm_latency = 0.0
         self.llm_dispatch_task: asyncio.Task | None = None
+        self._pending_tts_fallback_task: asyncio.Task | None = None
         self.post_stt_grace = 1.5
         self.interrupt_pending = False
         self.pause_playback = False
@@ -139,19 +154,30 @@ class VoicePipeline:
         self.last_rio_sentences: deque[str] = deque(maxlen=3)
         self._last_clear_ts = 0.0
 
-        # Barge-in tuning (env-overridable) to avoid aggressive false interrupts.
-        self.barge_rms_threshold = int(os.getenv("BARGE_RMS_THRESHOLD", "1200"))
-        self.barge_frames_needed = int(os.getenv("BARGE_FRAMES_NEEDED", "8"))
-        self.barge_silence_reset_frames = int(os.getenv("BARGE_SILENCE_RESET_FRAMES", "20"))
-        self.barge_tts_guard_ms = int(os.getenv("BARGE_TTS_GUARD_MS", "1500"))
-        self.barge_post_speech_cooldown_ms = int(os.getenv("BARGE_POST_SPEECH_COOLDOWN_MS", "1200"))
-        self.barge_clear_cooldown_ms = int(os.getenv("BARGE_CLEAR_COOLDOWN_MS", "600"))
-        self.barge_retrigger_cooldown_ms = int(os.getenv("BARGE_RETRIGGER_COOLDOWN_MS", "2500"))
-        self.disable_barge_in = os.getenv("DISABLE_BARGE_IN", "0").lower() in {"1", "true", "yes", "on"}
+        # Barge-in tuning — runtime_json (per-agent) > env > hardcoded default.
+        _bi = (runtime_json or {}).get("barge_in", {})
+        self.barge_rms_threshold = int(_bi.get("rms_threshold") or os.getenv("BARGE_RMS_THRESHOLD", "1200"))
+        self.barge_frames_needed = int(_bi.get("frames_needed") or os.getenv("BARGE_FRAMES_NEEDED", "8"))
+        self.barge_silence_reset_frames = int(_bi.get("silence_reset_frames") or os.getenv("BARGE_SILENCE_RESET_FRAMES", "20"))
+        self.barge_tts_guard_ms = int(_bi.get("tts_guard_ms") or os.getenv("BARGE_TTS_GUARD_MS", "1500"))
+        self.barge_post_speech_cooldown_ms = int(_bi.get("post_speech_cooldown_ms") or os.getenv("BARGE_POST_SPEECH_COOLDOWN_MS", "1200"))
+        self.barge_clear_cooldown_ms = int(_bi.get("clear_cooldown_ms") or os.getenv("BARGE_CLEAR_COOLDOWN_MS", "600"))
+        self.barge_retrigger_cooldown_ms = int(_bi.get("retrigger_cooldown_ms") or os.getenv("BARGE_RETRIGGER_COOLDOWN_MS", "2500"))
+        _bi_disabled = _bi.get("disabled")
+        self.disable_barge_in = (
+            (_bi_disabled is True or str(_bi_disabled).lower() in {"1", "true", "yes", "on"})
+            if _bi_disabled is not None
+            else os.getenv("DISABLE_BARGE_IN", "0").lower() in {"1", "true", "yes", "on"}
+        )
         self._last_barge_trigger_ts = 0.0
 
-        # Silero-VAD confirmation gate — opt-in, confirms suspected barge-ins actually contain speech (filters coughs, background noise, mic plosives). Falls back to RMS-only if disabled or model load fails.
-        self.use_silero_vad = os.getenv("USE_SILERO_VAD", "0").lower() in {"1", "true", "yes", "on"}
+        # Silero-VAD confirmation gate — opt-in via runtime_json or env.
+        _bi_silero = _bi.get("use_silero_vad")
+        self.use_silero_vad = (
+            (_bi_silero is True or str(_bi_silero).lower() in {"1", "true", "yes", "on"})
+            if _bi_silero is not None
+            else os.getenv("USE_SILERO_VAD", "0").lower() in {"1", "true", "yes", "on"}
+        )
 
         # Rolling buffer of sentences actually emitted to TTS this turn — used to seed the next LLM prompt with "you were saying X" context on confirmed barge-in, so the agent does not restart cold.
         self.last_rio_spoken: deque[str] = deque(maxlen=5)
@@ -163,6 +189,11 @@ class VoicePipeline:
         # question if the LLM is about to say goodbye without having asked.
         self.feedback_asked_this_call = False
         self.user_gave_rating_this_call = False
+        # Agent persona settings — customizable per company
+        self.agent_name = (all_settings.get("AGENT_NAME") or "Rio").strip()
+        self._agent_greeting_tpl = (all_settings.get("AGENT_GREETING") or "").strip()
+        self._agent_greeting_personalized_tpl = (all_settings.get("AGENT_PERSONALIZED_GREETING") or "").strip()
+
         verbosity_level = str(all_settings.get("AI_VERBOSITY") or "2").strip()
         default_turn_caps = {"1": 2, "2": 4, "3": 6}
         self.max_sentences_per_turn = int(
@@ -173,30 +204,55 @@ class VoicePipeline:
         self.last_user_transcript = ""
         self.silence_reengage_count = 0
 
-        llm_api_key = _resolve_setting(
-            all_settings,
-            [f"{self.llm_provider.upper()}_API_KEY", "LLM_API_KEY"],
-            f"{self.llm_provider.upper()} LLM API key",
-        )
-        tts_api_key = _resolve_setting(
-            all_settings,
-            [f"{self.tts_provider.upper()}_API_KEY", "TTS_API_KEY"],
-            f"{self.tts_provider.upper()} TTS API key",
-        )
-        stt_api_key = _resolve_setting(
-            all_settings,
-            [f"{self.stt_provider.upper()}_API_KEY", "STT_API_KEY"],
-            f"{self.stt_provider.upper()} STT API key",
-        )
+        # Azure uses distinct key names per service — resolve with provider-aware chains
+        if self.llm_provider == "azure":
+            llm_api_key = _resolve_setting(
+                all_settings,
+                ["AZURE_LLM_API_KEY", "AZURE_API_KEY", "LLM_API_KEY"],
+                "Azure OpenAI LLM key",
+            )
+        else:
+            llm_api_key = _resolve_setting(
+                all_settings,
+                [f"{self.llm_provider.upper()}_LLM_API_KEY", f"{self.llm_provider.upper()}_API_KEY", "LLM_API_KEY"],
+                f"{self.llm_provider.upper()} LLM API key",
+            )
+
+        if self.tts_provider == "azure":
+            tts_api_key = _resolve_setting(
+                all_settings,
+                ["AZURE_SPEECH_API_KEY", "AZURE_API_KEY", "TTS_API_KEY"],
+                "Azure Speech TTS key",
+            )
+        else:
+            tts_api_key = _resolve_setting(
+                all_settings,
+                [f"{self.tts_provider.upper()}_API_KEY", "TTS_API_KEY"],
+                f"{self.tts_provider.upper()} TTS API key",
+            )
+
+        if self.stt_provider == "azure":
+            stt_api_key = _resolve_setting(
+                all_settings,
+                ["AZURE_SPEECH_API_KEY", "AZURE_API_KEY", "STT_API_KEY"],
+                "Azure Speech STT key",
+            )
+        else:
+            stt_api_key = _resolve_setting(
+                all_settings,
+                [f"{self.stt_provider.upper()}_API_KEY", "STT_API_KEY"],
+                f"{self.stt_provider.upper()} STT API key",
+            )
 
         llm_model = _resolve_setting(
             all_settings,
-            [f"{self.llm_provider.upper()}_MODEL", "LLM_MODEL"],
+            [f"{self.llm_provider.upper()}_LLM_MODEL", f"{self.llm_provider.upper()}_MODEL", "LLM_MODEL"],
             f"{self.llm_provider.upper()} LLM model",
         )
         tts_voice = _resolve_setting(
             all_settings,
             [
+                f"{self.tts_provider.upper()}_TTS_VOICE",
                 f"{self.tts_provider.upper()}_VOICE_ID",
                 f"{self.tts_provider.upper()}_VOICE",
                 "TTS_VOICE_ID",
@@ -244,11 +300,65 @@ class VoicePipeline:
         self.tts_service = get_tts_service(self.tts_provider, api_key=tts_api_key, voice_id=tts_voice, model=tts_model)
         self.stt_service = get_stt_service(self.stt_provider, api_key=stt_api_key, model=stt_model)
 
+        # Azure needs region + endpoint injected post-construction (not in factory signature)
+        if self.tts_provider == "azure":
+            _az_speech_region = (
+                all_settings.get("AZURE_SPEECH_REGION")
+                or os.getenv("AZURE_SPEECH_REGION", "eastus")
+            )
+            self.tts_service.region = _az_speech_region
+            self.tts_service.base_url = (
+                f"https://{_az_speech_region}.tts.speech.microsoft.com/cognitiveservices/v1"
+            )
+            if tts_api_key:
+                self.tts_service.api_key = tts_api_key
+            logger.info("[Pipeline] Azure TTS region=%s voice=%s", _az_speech_region, tts_voice)
+
+        if self.stt_provider == "azure":
+            _az_speech_region = (
+                all_settings.get("AZURE_SPEECH_REGION")
+                or os.getenv("AZURE_SPEECH_REGION", "eastus")
+            )
+            self.stt_service.region = _az_speech_region
+            if stt_api_key:
+                self.stt_service.api_key = stt_api_key
+            logger.info("[Pipeline] Azure STT region=%s lang=%s", _az_speech_region, stt_model)
+
+        if self.llm_provider == "azure":
+            _az_llm_endpoint = (
+                all_settings.get("AZURE_LLM_ENDPOINT")
+                or os.getenv("AZURE_OPENAI_ENDPOINT", "")
+            )
+            _az_llm_version = (
+                all_settings.get("AZURE_LLM_API_VERSION")
+                or os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01")
+            )
+            self.llm_service.endpoint = _az_llm_endpoint
+            self.llm_service.api_version = _az_llm_version
+            if _az_llm_endpoint and llm_api_key:
+                try:
+                    from openai import AsyncAzureOpenAI as _AzureOAI
+                    self.llm_service.client = _AzureOAI(
+                        api_key=llm_api_key,
+                        azure_endpoint=_az_llm_endpoint,
+                        api_version=_az_llm_version,
+                    )
+                    logger.info("[Pipeline] Azure LLM client initialized endpoint=%s", _az_llm_endpoint)
+                except Exception as _e:
+                    logger.error("[Pipeline] Azure LLM client init failed: %s", _e)
+
+        # Circuit breakers — wrap STT/LLM/TTS with resilience + fallback chains
+        from services.voice.circuit_breaker import CircuitBreaker
+        self._stt_cb = CircuitBreaker("stt", threshold=3, recovery_s=30)
+        self._llm_cb = CircuitBreaker("llm", threshold=3, recovery_s=15)
+        self._tts_cb = CircuitBreaker("tts", threshold=5, recovery_s=30)
+
         # Inject language into Sarvam services when a non-default language is active
         if self.lead_language and self.lead_language != "en-IN":
             if hasattr(self.stt_service, "language"):
-                self.stt_service.language = self.lead_language
-                logger.info("[Pipeline] Sarvam STT language set to %s", self.lead_language)
+                _stt_lang = self.lead_language[0] if isinstance(self.lead_language, list) else str(self.lead_language)
+                self.stt_service.language = _stt_lang
+                logger.info("[Pipeline] STT language set to %s", _stt_lang)
             if hasattr(self.tts_service, "target_language_code"):
                 self.tts_service.target_language_code = self.lead_language
                 logger.info("[Pipeline] Sarvam TTS language set to %s", self.lead_language)
@@ -313,6 +423,112 @@ class VoicePipeline:
             session=self.session
         )
 
+        # ── Graph Agent Engine (Phase 1: graph-based conversation flows) ──
+        self.runtime_json = runtime_json or {}
+        # Per-agent feedback phrase (overrides class-level constant)
+        self._feedback_phrase = self.runtime_json.get("feedback_phrase") or self._FORCED_FEEDBACK_PHRASE
+        self.graph_engine = create_graph_engine_from_runtime(
+            runtime_json=self.runtime_json,
+            llm_service=self.llm_service,
+            rag_service=None,
+            tool_executor=execute_mcp_tool,
+            routing_llm_callable=None,
+        )
+        if self.graph_engine and self.graph_engine.is_graph_agent:
+            logger.info(
+                "[Pipeline] Graph agent engine enabled: %d nodes, starting at '%s'",
+                len(self.graph_engine.config.nodes),
+                self.graph_engine.current_node_id,
+            )
+
+        # ── Voicemail Detection (Phase 1) ──
+        vm_config = self.runtime_json.get("voicemail", {})
+        # Enable if set in runtime_json OR in company settings key VOICEMAIL_DETECTION_ENABLED
+        _vm_setting = (all_settings.get("VOICEMAIL_DETECTION_ENABLED") or "").lower()
+        _vm_enabled = vm_config.get("enabled", False) or _vm_setting in ("1", "true", "yes", "on")
+        self.voicemail_handler = VoicemailHandler(
+            llm_service=self.llm_service,
+            enabled=_vm_enabled,
+            detection_duration=int(vm_config.get("detection_duration") or all_settings.get("VOICEMAIL_DETECTION_DURATION") or 30),
+            check_interval=int(vm_config.get("check_interval") or 7),
+            min_transcript_length=int(vm_config.get("min_transcript_length") or 7),
+        )
+        if _vm_enabled:
+            logger.info("[Pipeline] Voicemail detection enabled")
+
+        # ── Phase 2: Language Detection & Auto-Switching ──
+        lang_config = self.runtime_json.get("language_detection", {})
+        self.language_detector = LanguageDetector(
+            llm_service=self.llm_service,
+            lid_provider=lang_config.get("provider", "llm"),
+            lid_api_key=lang_config.get("api_key"),
+            detection_turns=lang_config.get("detection_turns", 3),
+            enabled=lang_config.get("enabled", False),
+            supported_languages=lang_config.get("supported_languages"),
+        )
+        if lang_config.get("enabled"):
+            logger.info("[Pipeline] Language detection enabled")
+
+        # ── Phase 2: Filler & Backchanneling ──
+        filler_config = self.runtime_json.get("filler", {})
+        self.filler_service = FillerService(
+            use_fillers=filler_config.get("use_fillers", False),
+            backchanneling_enabled=filler_config.get("backchanneling", False),
+            backchanneling_message_gap=filler_config.get("backchanneling_message_gap", 5.0),
+            backchanneling_start_delay=filler_config.get("backchanneling_start_delay", 5.0),
+        )
+        if filler_config.get("use_fillers") or filler_config.get("backchanneling"):
+            logger.info("[Pipeline] Filler/backchanneling enabled")
+
+        # ── Phase 2: Ambient Noise ──
+        noise_config = self.runtime_json.get("ambient_noise", {})
+        _provider_ok = isinstance(self.communicator, (PlivoCommunicator, VobizCommunicator))
+        if noise_config.get("enabled") and not _provider_ok:
+            logger.info(
+                "[Pipeline] Ambient noise disabled: provider %s not supported (Plivo/Vobiz only)",
+                type(self.communicator).__name__,
+            )
+        self.ambient_noise_service = AmbientNoiseService(
+            preset=noise_config.get("preset", "call-center"),
+            volume=noise_config.get("volume", 0.15),
+            enabled=noise_config.get("enabled", False) and _provider_ok,
+        )
+        if self.ambient_noise_service.enabled:
+            logger.info(
+                "[Pipeline] Ambient noise enabled: %s @ %.0f%%",
+                noise_config.get("preset", "call-center"),
+                noise_config.get("volume", 0.15) * 100,
+            )
+            # Wrap communicator.send_media to mix ambient noise into every TTS chunk.
+            # All TTS providers emit base64-encoded mulaw; we decode → mix → re-encode.
+            _noise_svc = self.ambient_noise_service
+            _orig_send_media = self.communicator.send_media
+
+            async def _noisy_send_media(audio_data):
+                if _noise_svc.enabled and audio_data:
+                    try:
+                        raw = base64.b64decode(audio_data)
+                        pcm = audioop.ulaw2lin(raw, 2)
+                        pcm = _noise_svc.mix_bytes(pcm, sample_width=2)
+                        mulaw = audioop.lin2ulaw(pcm, 2)
+                        audio_data = base64.b64encode(mulaw).decode()
+                    except Exception as _exc:
+                        logger.debug("[AmbientNoise] Mix skipped: %s", _exc)
+                await _orig_send_media(audio_data)
+
+            self.communicator.send_media = _noisy_send_media
+
+        # ── Phase 3: Final Call Message (per-language, played before hangup) ──
+        cf_config = self.runtime_json.get("call_features", {})
+        self.final_call_message: dict[str, str] = cf_config.get("final_call_message", {}) or {}
+        self.final_call_message_lang_map: dict[str, str] = {}
+        for lang_code, msg in self.final_call_message.items():
+            if msg and msg.strip():
+                self.final_call_message_lang_map[lang_code] = msg.strip()
+
+        # ── Phase 3: Per-agent retry config ──
+        self.retry_config: dict = self.runtime_json.get("retry", {}) or {}
+
     def _silero_confirms(self, audio_chunk: bytes) -> bool:
         """Wrap Silero VAD with the same encoding the barge-in loop receives.
 
@@ -353,6 +569,22 @@ class VoicePipeline:
             self.llm_dispatch_task.cancel()
         self.llm_dispatch_task = None
 
+    def _compute_grace(self, transcript: str) -> float:
+        """Adaptive grace period based on utterance characteristics.
+
+        Short questions need almost no grace — the user is clearly done speaking.
+        Long complex utterances get a bit more room for trailing words.
+        """
+        if hasattr(self, "post_stt_grace") and self.post_stt_grace <= 0.1:
+            return self.post_stt_grace
+
+        t = transcript.rstrip()
+        words = len(t.split())
+        if t.endswith("?"):      return 0.10
+        if words <= 4:           return 0.15
+        if words <= 10:          return 0.25
+        return float(os.getenv("POST_STT_GRACE_S", "0.35"))
+
     def _schedule_llm_dispatch(self, latency: float):
         self.pending_llm_latency = latency
         self._cancel_pending_llm_dispatch()
@@ -362,13 +594,27 @@ class VoicePipeline:
 
     async def _defer_llm_dispatch(self):
         try:
-            await asyncio.sleep(self.post_stt_grace)
+            transcript_for_grace = self.pending_user_turn_text.strip()
+            grace = self._compute_grace(transcript_for_grace)
+            await asyncio.sleep(grace)
             if self.interrupt_pending:
                 return
             transcript = self.pending_user_turn_text.strip()
             self.pending_user_turn_text = ""
             if not transcript:
                 return
+
+            # Play an immediate acknowledgment filler so the user hears something
+            # within ~300ms while the LLM generates its real response.
+            try:
+                lang = (getattr(self, "lead_language", "") or "en")[:2]
+                ack = self.filler_service.get_tool_filler("thinking", language=lang)
+                if ack and self.sentence_queue.empty() and not self.is_rio_speaking:
+                    await self.sentence_queue.put((ack, True))
+                    await asyncio.sleep(0.05)
+            except Exception:  # noqa: BLE001
+                pass
+
             await self._dispatch_llm(transcript, self.pending_llm_latency)
         except asyncio.CancelledError:
             return
@@ -381,6 +627,8 @@ class VoicePipeline:
         fast_path = self._get_fast_path_response(transcript)
         if fast_path:
             self._sentences_emitted_this_turn = 0
+            self.transcript_manager.add_rio_turn(fast_path)
+            # Mirror into the pipeline's accumulator for backward compatibility
             self.transcript_accumulator.append(f"Rio: {fast_path}")
             self.save_transcript()
             await self.sentence_queue.put((fast_path, True))
@@ -703,7 +951,7 @@ class VoicePipeline:
                 data = await asyncio.wait_for(audio_queue.get(), timeout=15.0)
                 if data.get("event") == "start":
                     start_msg = data.get("start", {})
-                    self.communicator.stream_sid = start_msg.get("streamSid")
+                    self.communicator.stream_sid = start_msg.get("streamSid") or start_msg.get("streamId")
                     
                     # Proactively check for lead_id/interaction_id in start parameters (Twilio specific)
                     params = start_msg.get("customParameters", {})
@@ -738,22 +986,45 @@ class VoicePipeline:
             return
 
         # Personalized greeting if lead context is available
-        greeting = f"Hello, I'm Rio from {self.company_name}. Can you hear me okay?"
+        _default_greeting = f"Hello, I'm {self.agent_name} from {self.company_name}. Can you hear me okay?"
+        greeting = (
+            self._agent_greeting_tpl
+            .replace("{agent_name}", self.agent_name)
+            .replace("{company_name}", self.company_name)
+        ) if self._agent_greeting_tpl else _default_greeting
+
         if self.lead_context:
             try:
-                
                 name_line = [l for l in self.lead_context.split("\n") if "Name:" in l]
                 if name_line:
                     lead_name = name_line[0].split(",")[0].replace("Name: ", "").replace("[PROSPECT DATA]", "").strip()
                     if lead_name and lead_name.lower() not in ["unknown", "n/a", "none"]:
-                        greeting = f"Hello {lead_name}, this is Rio from {self.company_name}. Can you hear me okay?"
+                        if self._agent_greeting_personalized_tpl:
+                            greeting = (
+                                self._agent_greeting_personalized_tpl
+                                .replace("{lead_name}", lead_name)
+                                .replace("{agent_name}", self.agent_name)
+                                .replace("{company_name}", self.company_name)
+                            )
+                        else:
+                            greeting = f"Hello {lead_name}, this is {self.agent_name} from {self.company_name}. Can you hear me okay?"
                         logger.info(f"📞 [Personalized Greeting] Sent to {lead_name}")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse lead name for greeting: {e}")
         
         await self.sentence_queue.put((greeting, True))
+        self.transcript_manager.add_rio_turn(greeting)
+        # Mirror into the pipeline's accumulator for backward compatibility
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
+
+        # Register pipeline for event injection
+        try:
+            interaction_id_int = int(self.interaction_id)
+            from services.voice.event_injection_service import register_pipeline
+            register_pipeline(interaction_id_int, self)
+        except (ValueError, TypeError):
+            pass
 
         async def _audio_gen_from_queue():
             while True:
@@ -943,6 +1214,9 @@ class VoicePipeline:
                     latency = min(time.time() - stt_start_time, 30.0)
                     stt_start_time = time.time()
 
+                    # Persist user turn; include any ASR segment data if provider returned it
+                    self.transcript_manager.add_user_turn(current_turn_transcript, segments=result.get('segments'))
+                    # Mirror into the pipeline's accumulator for backward compatibility
                     self.transcript_accumulator.append(f"User: {current_turn_transcript}")
 
                     # Publish live sentiment update to any subscribed dashboard clients
@@ -981,6 +1255,64 @@ class VoicePipeline:
                     except Exception as _ce:
                         logger.debug("Competitor detection skipped: %s", _ce)
 
+                    # Phase 2: Language detection — runs every turn via fasttext (<5ms)
+                    self.language_detector.on_turn()
+                    detected_lang = await self.language_detector.check(current_turn_transcript)
+                    if detected_lang:
+                        lang_code = detected_lang[:2]
+                        logger.info("[Pipeline] Language auto-switched to: %s", detected_lang)
+                        # Update lead_language so TTS/filler use correct language
+                        self.lead_language = f"{lang_code}-IN" if lang_code in {"hi", "ta", "te", "kn", "ml", "mr", "bn", "gu", "pa"} else "en-IN"
+                        # Azure TTS: switch neural voice to match detected language
+                        if self.tts_provider == "azure" and hasattr(self.tts_service, "voice_name"):
+                            _AZURE_VOICE_MAP = {
+                                "en": "en-US-JennyNeural",
+                                "hi": "hi-IN-SwaraNeural",
+                                "ta": "ta-IN-PallaviNeural",
+                                "te": "te-IN-ShrutiNeural",
+                                "mr": "mr-IN-AarohiNeural",
+                                "gu": "gu-IN-DhwaniNeural",
+                                "bn": "bn-IN-TanishaaNeural",
+                                "kn": "kn-IN-SapnaNeural",
+                                "ml": "ml-IN-SobhanaNeural",
+                                "pa": "pa-Guru-IN-VaaniNeural",
+                                "fr": "fr-FR-DeniseNeural",
+                                "es": "es-ES-ElviraNeural",
+                                "de": "de-DE-KatjaNeural",
+                                "pt": "pt-BR-FranciscaNeural",
+                                "id": "id-ID-GadisNeural",
+                                "ms": "ms-MY-YasminNeural",
+                            }
+                            new_voice = _AZURE_VOICE_MAP.get(lang_code)
+                            if new_voice:
+                                self.tts_service.voice_name = new_voice
+                                logger.info("[Pipeline] Azure TTS voice → %s", new_voice)
+                        lang_suffix = self.language_detector.switcher.get_language_prompt_suffix()
+                        if lang_suffix:
+                            try:
+                                self.llm_service.add_system_message(lang_suffix)
+                            except Exception as exc:
+                                logger.warning("[Pipeline] Language prompt suffix failed: %s", exc)
+
+                    # Voicemail detection — check every turn while in detection window
+                    if self.voicemail_handler.enabled:
+                        self.voicemail_handler.on_user_speech(current_turn_transcript)
+                        full_transcript_so_far = " ".join(
+                            line.replace("User: ", "").replace("Rio: ", "")
+                            for line in self.transcript_accumulator
+                        )
+                        try:
+                            vm_result = await self.voicemail_handler.check(full_transcript_so_far)
+                        except Exception as _vme:
+                            logger.debug("[Pipeline] Voicemail check error: %s", _vme)
+                            vm_result = None
+                        if self.voicemail_handler.is_detected:
+                            logger.info("[Pipeline] Voicemail detected — hanging up")
+                            self._clear_sentence_queue()
+                            if self.current_tts_task and not self.current_tts_task.done():
+                                self.current_tts_task.cancel()
+                            break  # exits STT loop → pipeline shuts down → Twilio hangs up
+
                     normalized_transcript = current_turn_transcript.strip()
                     if normalized_transcript:
                         if self.pending_user_turn_text:
@@ -1013,12 +1345,26 @@ class VoicePipeline:
                 self.resume_event.set()
             except Exception:  # noqa: BLE001
                 pass
+
+            # Phase 3: Play final call message before hangup (if configured)
+            final_msg = self._get_final_call_message()
+            if final_msg:
+                logger.info("[Pipeline] Queuing final call message: %r", final_msg)
+                await self.sentence_queue.put((final_msg, True))
+                await asyncio.sleep(0.5)
+
             await self.sentence_queue.put(None)
             await speaker_task
             fan_out_task.cancel()
             barge_task.cancel()
             ingest_task.cancel()
             silence_task.cancel()
+            # Unregister pipeline for event injection
+            try:
+                from services.voice.event_injection_service import unregister_pipeline
+                unregister_pipeline(int(self.interaction_id))
+            except (ValueError, TypeError):
+                pass
             self.flush_transcript()
             logger.info(f"✅ [VoicePipeline] Call ended. Interaction ID: {self.interaction_id}")
             logger.info(f"📜 [VoicePipeline] Full Transcript: {self.transcript_accumulator}")
@@ -1049,11 +1395,13 @@ class VoicePipeline:
                 pass
             return float(os.getenv(key, env_default))
 
-        SILENCE_THRESHOLD = _setting_or_env("SILENCE_THRESHOLD_S", "6.0")
-        CHECK_INTERVAL = _setting_or_env("SILENCE_CHECK_INTERVAL_S", "3.0")
+        _silence_cfg = self.runtime_json.get("silence", {})
+        SILENCE_THRESHOLD = float(_silence_cfg.get("threshold_s") or _setting_or_env("SILENCE_THRESHOLD_S", "6.0"))
+        CHECK_INTERVAL = float(_silence_cfg.get("check_interval_s") or _setting_or_env("SILENCE_CHECK_INTERVAL_S", "3.0"))
+        MAX_REENGAGES = int(_silence_cfg.get("max_reengages", 1))
         logger.info(
-            "[Pipeline] Silence-watcher: threshold=%.1fs check=%.1fs",
-            SILENCE_THRESHOLD, CHECK_INTERVAL,
+            "[Pipeline] Silence-watcher: threshold=%.1fs check=%.1fs max_reengages=%d",
+            SILENCE_THRESHOLD, CHECK_INTERVAL, MAX_REENGAGES,
         )
 
         while True:
@@ -1071,7 +1419,7 @@ class VoicePipeline:
 
             if (silence_since_rio_finished > SILENCE_THRESHOLD 
                     and self.last_customer_speech_time < self.last_rio_speech_end_time):
-                if self.silence_reengage_count >= 1:
+                if self.silence_reengage_count >= MAX_REENGAGES:
                     continue
 
                 if self.last_context_type == "pricing":
@@ -1089,6 +1437,44 @@ class VoicePipeline:
                 self.last_rio_speech_end_time = time.time()
                 self.last_context_type = "general"
 
+
+    async def _await_tts_with_retry(self, tts_task: asyncio.Task, speak_kwargs: dict) -> None:
+        """Await a TTS task. On failure, retry once; only queue fallback phrase if retry
+        doesn't succeed within 500ms. The fallback task is cancelled if a new LLM stream
+        starts before it fires (see _process_llm_response)."""
+        try:
+            await tts_task
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning("[TTS] First attempt failed: %s — retrying", exc)
+
+        retry_success = asyncio.Event()
+
+        async def _retry() -> None:
+            try:
+                await self.tts_service.speak(**speak_kwargs)
+                retry_success.set()
+            except Exception as retry_exc:
+                logger.error("[TTS] Retry also failed: %s", retry_exc)
+
+        retry_task = asyncio.create_task(_retry())
+
+        async def _debounced_fallback() -> None:
+            try:
+                await asyncio.sleep(0.5)
+                if not retry_success.is_set():
+                    logger.warning("[TTS] Retry not successful within 500ms — queueing fallback phrase")
+                    await self.sentence_queue.put(("Just a moment.", True))
+            except asyncio.CancelledError:
+                pass
+
+        self._pending_tts_fallback_task = asyncio.create_task(_debounced_fallback())
+        await retry_task
+        if self._pending_tts_fallback_task and not self._pending_tts_fallback_task.done():
+            self._pending_tts_fallback_task.cancel()
+            self._pending_tts_fallback_task = None
 
     async def _speaker_loop(self):
         """Continuously pulls sentences from the queue and speaks them."""
@@ -1167,6 +1553,26 @@ class VoicePipeline:
                             logger.error(f"❌ Sarvam TTS WebSocket connect failed: {exc}")
 
             # Main Speaker Loop.  Race resume_event against the queue so a shutdown sentinel (None) puts during pause-mode hang-up wakes this loop immediately.  Without the race, hang-up during an active barge-in pause would leave the speaker blocked on resume_event.wait() forever, stalling teardown until the outer timeout fires (and post-call flush with it).
+                # WebSocket health monitor — ping every 25s to detect silent TCP drops
+                # before the next sentence fails. Sets ws ref to None so reconnect fires.
+                _ws_refs = {"c": c_ws, "sv": sv_ws, "el": el_ws, "dg": dg_ws}
+
+                async def _ws_health_loop():
+                    await asyncio.sleep(25)
+                    while True:
+                        for _name, _ws_key in [("cartesia", "c"), ("sarvam", "sv"),
+                                                ("elevenlabs", "el"), ("deepgram", "dg")]:
+                            _ws = _ws_refs.get(_ws_key)
+                            if _ws and not _ws.closed:
+                                try:
+                                    await asyncio.wait_for(_ws.ping(), timeout=5.0)
+                                except Exception:
+                                    logger.warning("[WSHealth] %s ping failed — marking for reconnect", _name)
+                                    _ws_refs[_ws_key] = None
+                        await asyncio.sleep(25)
+
+                _ws_health_task = asyncio.create_task(_ws_health_loop())
+
                 while True:
                     resume_task = asyncio.create_task(self.resume_event.wait())
                     sentence_task = asyncio.create_task(self.sentence_queue.get())
@@ -1199,6 +1605,11 @@ class VoicePipeline:
                     # Track what we actually emit to TTS this turn.
                     if isinstance(text_to_speak, str) and text_to_speak.strip():
                         self.last_rio_spoken.append(text_to_speak.strip())
+                        # Enqueue mark tracking record
+                        try:
+                            _enqueue_mark(self.session, self.company_id, int(self.interaction_id), text_to_speak)
+                        except Exception:
+                            pass
                     elif isinstance(text_to_speak, tuple):
                         logger.error("🚨 [VoicePipeline] Unexpected tuple in speaker loop: %r", text_to_speak)
                         text_to_speak = str(text_to_speak[0]) if text_to_speak else ""
@@ -1294,18 +1705,19 @@ class VoicePipeline:
                     # For Cartesia: fire TTS request AND immediately check for next sentence
                     # Cartesia queues them server-side via context_id
                     if self.tts_provider == "cartesia" and c_ws:
+                        _speak_kw = dict(
+                            text=tts_text,
+                            communicator=self.communicator,
+                            ws_to_use=c_ws,
+                            context_id=turn_context_id,
+                            is_final=is_final,
+                            aiohttp_session=session,
+                        )
                         self.current_tts_task = asyncio.create_task(
-                            self.tts_service.speak(
-                                text=tts_text,
-                                communicator=self.communicator,
-                                ws_to_use=c_ws,
-                                context_id=turn_context_id,
-                                is_final=is_final,
-                                aiohttp_session=session
-                            )
+                            self.tts_service.speak(**_speak_kw)
                         )
                         try:
-                            await self.current_tts_task
+                            await self._await_tts_with_retry(self.current_tts_task, _speak_kw)
                         except asyncio.CancelledError:
                             logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
                         finally:
@@ -1323,18 +1735,19 @@ class VoicePipeline:
                             active_ws = sv_ws
                         # mimo is REST-based — no persistent WebSocket, active_ws stays None
 
+                        _speak_kw = dict(
+                            text=tts_text,
+                            communicator=self.communicator,
+                            ws_to_use=active_ws,
+                            context_id=turn_context_id,
+                            is_final=is_final,
+                            aiohttp_session=session,
+                        )
                         self.current_tts_task = asyncio.create_task(
-                            self.tts_service.speak(
-                                text=tts_text,
-                                communicator=self.communicator,
-                                ws_to_use=active_ws,
-                                context_id=turn_context_id,
-                                is_final=is_final,
-                                aiohttp_session=session,
-                            )
+                            self.tts_service.speak(**_speak_kw)
                         )
                         try:
-                            await self.current_tts_task
+                            await self._await_tts_with_retry(self.current_tts_task, _speak_kw)
                         except asyncio.CancelledError:
                             logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
                         finally:
@@ -1343,6 +1756,8 @@ class VoicePipeline:
                             self.sentence_queue.task_done()
             
             finally:
+                # Cleanup WS health monitor
+                _ws_health_task.cancel()
                 # Cleanup persistent WebSockets
                 if dg_ws: await dg_ws.close()
                 if el_ws: await el_ws.close()
@@ -1514,6 +1929,14 @@ class VoicePipeline:
                     fresh_session.add(db_i)
                     fresh_session.commit()
 
+            # After the main DB write, persist any ASR segment metadata captured by the TranscriptManager.
+            try:
+                # This delegates a second, idempotent update to the transcript manager which
+                # stores normalized ASR segments into interaction.metadata_json.
+                self.transcript_manager.save_transcript(engine_name)
+            except Exception as _e:
+                logger.debug("TranscriptManager.save_transcript failed during flush: %s", _e)
+
             self._transcript_dirty = False
             logger.info(f"📜 [Transcript Flushed] ID: {interaction_id_int or 'new'} | {len(full_transcript)} chars | {len(self.transcript_accumulator)} lines")
         except Exception as e:
@@ -1538,9 +1961,11 @@ class VoicePipeline:
             lead_id: int | None = None
             lead_score_normalized: float = 0.0
 
+            interaction_record: Interaction | None = None
             if interaction_id_int:
                 db_i = self.session.get(Interaction, interaction_id_int)
                 if db_i:
+                    interaction_record = db_i
                     lead_id = db_i.lead_id
 
             if lead_id:
@@ -1561,7 +1986,7 @@ class VoicePipeline:
                 bant_answers={},
             )
             if lead_id:
-                CallSummarizer.save_summary_to_crm(lead_id, summary, company_id=self.company_id or 0, actor_user_id=self.user_id)
+                CallSummarizer.save_summary_to_crm(lead_id, summary, company_id=self.company_id or 0, actor_user_id=self.user_id, parent_interaction_id=interaction_id_int)
 
             # log the completed call as a CRM interaction note.
             if lead_id:
@@ -1575,12 +2000,72 @@ class VoicePipeline:
                     actor_user_id=self.user_id,
                 )
 
-            logger.info(
-                "[PostCall] Nurture actions complete. lead_id=%s interaction=%s",
-                lead_id, self.interaction_id,
-            )
+                logger.info(
+                    "[PostCall] Nurture actions complete. lead_id=%s interaction=%s",
+                    lead_id, self.interaction_id,
+                )
+                # Save cost record for this call
+                try:
+                    db_int = self.session.get(Interaction, interaction_id_int) if interaction_id_int else None
+                    duration = 0
+                    if db_int and db_int.recording_duration:
+                        duration = db_int.recording_duration
+                    elif db_int and db_int.ended_at and db_int.started_at:
+                        duration = int((db_int.ended_at - db_int.started_at).total_seconds())
+                    if duration > 0:
+                        cost_result = _calc_cost(
+                            duration_seconds=duration,
+                            stt_provider=self.stt_provider,
+                            llm_provider=self.llm_provider,
+                            tts_provider=self.tts_provider,
+                        )
+                        _save_cost(
+                            self.session, self.company_id or 0,
+                            interaction_id=interaction_id_int,
+                            lead_id=self.lead_id,
+                            duration_seconds=duration,
+                            **cost_result,
+                            stt_provider=self.stt_provider,
+                            llm_provider=self.llm_provider,
+                            tts_provider=self.tts_provider,
+                        )
+                except Exception as _ce:
+                    logger.debug("[PostCall] Cost save skipped: %s", _ce)
+
+                # Fire webhook for call-ended event (non-blocking)
+                try:
+                    from services.webhooks.publisher import publish as wh_publish
+                    import asyncio as _asyncio
+                    _asyncio.create_task(wh_publish(
+                        self.company_id, "call.ended", {
+                            "interaction_id": self.interaction_id,
+                            "lead_id": self.lead_id,
+                            "agent_id": getattr(self, 'active_prompt', None) and getattr(self.active_prompt, 'agent_id', None),
+                        }
+                    ))
+                except Exception:
+                    pass   # fan-out must never break the call path
+
+                # Vobiz sends recording URL via status-callback (no polling API available).
         except Exception as exc:
             logger.warning("[PostCall] Post-call actions failed (non-fatal): %s", exc)
+
+    def _get_final_call_message(self) -> str | None:
+        """Get the final call message in the current detected language.
+
+        Falls back through: detected language → en → first available → None.
+        """
+        if not self.final_call_message_lang_map:
+            return None
+
+        detected = getattr(self, "language_detector", None)
+        current_lang = detected.current_language if detected and detected.enabled else "en"
+
+        msg = self.final_call_message_lang_map.get(current_lang) or self.final_call_message_lang_map.get("en")
+        if not msg and self.final_call_message_lang_map:
+            msg = next(iter(self.final_call_message_lang_map.values()))
+
+        return msg
 
     def _strip_markdown(self, text: str) -> str:
         """Removes markdown formatting like **bold**, *italics*, and bullet points for TTS."""
@@ -1605,6 +2090,10 @@ class VoicePipeline:
             # Fresh turn — clear the spoken-so-far buffer.  Tool-call recursion leaves it in place so an interruption mid-tool-output still sees what the agent was saying.
             self.last_rio_spoken.clear()
             self._sentences_emitted_this_turn = 0
+            # Cancel any pending TTS fallback from the previous turn — it's now stale.
+            if self._pending_tts_fallback_task and not self._pending_tts_fallback_task.done():
+                self._pending_tts_fallback_task.cancel()
+                self._pending_tts_fallback_task = None
         
         mistral_tools = get_mistral_tools()
         
@@ -1635,6 +2124,12 @@ class VoicePipeline:
 
                 if not clean_sentence or len(clean_sentence.strip()) < 2:
                     continue
+
+                if self.filler_service.use_fillers:
+                    clean_sentence = self.filler_service.strip_fillers(clean_sentence)
+                    if not clean_sentence or len(clean_sentence.strip()) < 2:
+                        continue
+
                 if self._is_low_value_fragment(clean_sentence):
                     logger.info("[VoicePipeline] Dropping low-value fragment: %r", clean_sentence)
                     continue
@@ -1650,9 +2145,9 @@ class VoicePipeline:
                         "feedback — forcing the 1-5 rating question."
                     )
                     self.feedback_asked_this_call = True
-                    self.last_rio_sentences.append(self._FORCED_FEEDBACK_PHRASE)
-                    self.last_rio_spoken.append(self._FORCED_FEEDBACK_PHRASE)
-                    await self.sentence_queue.put((self._FORCED_FEEDBACK_PHRASE, True))
+                    self.last_rio_sentences.append(self._feedback_phrase)
+                    self.last_rio_spoken.append(self._feedback_phrase)
+                    await self.sentence_queue.put((self._feedback_phrase, True))
 
                 
                 if self._sentence_asks_feedback(clean_sentence):
@@ -1695,8 +2190,22 @@ class VoicePipeline:
                 if full_reply:
                     # Strip JSON fragments before recording transcript (keep LLM history untouched)
                     transcript_reply = self._strip_json_fragments(full_reply)
+                    self.transcript_manager.add_rio_turn(transcript_reply)
+                    # Mirror into the pipeline's accumulator for backward compatibility
                     self.transcript_accumulator.append(f"Rio: {transcript_reply}")
                     self.save_transcript()
+                    # Fire webhook for tool-executed event (when we have a full reply)
+                    try:
+                        from services.webhooks.publisher import publish as wh_publish
+                        await wh_publish(self.company_id, "tool.executed", {
+                            "interaction_id": self.interaction_id,
+                            "lead_id": self.lead_id,
+                            "agent_id": getattr(self, 'active_prompt', None) and getattr(self.active_prompt, 'agent_id', None),
+                            "tool_calls": [tc.function.name for tc in tool_calls] if tool_calls else [],
+                            "response": transcript_reply,
+                        })
+                    except Exception:
+                        pass   # fan-out must never break the call path
 
                 # Always save latency, even for tool-only turns
                 self.save_latency(
@@ -1732,6 +2241,8 @@ class VoicePipeline:
                                 "raw: %r  parsed as: %r",
                                 tool_name, raw_args[:120], tool_args,
                             )
+                        self.transcript_manager.add_system_turn(f"Executing {tool_name}...")
+                        # Mirror into the pipeline's accumulator for backward compatibility
                         self.transcript_accumulator.append(f"[System]: Executing {tool_name}...")
 
                         # Thinking message — keep customer engaged during tool wait
@@ -1739,16 +2250,18 @@ class VoicePipeline:
                             "get_product_info":        "Let me pull up the details on that for you.",
                             "book_meeting":            "Let me get that booked for you right now.",
                             "book_demo":               "I'm scheduling that demo for you now.",
+                            "calendar_book":           "Let me book that in the calendar for you right now.",
                             "send_communication":      "Sending that over to you now.",
                             "get_or_create_lead":      "One moment while I update your record.",
                             "check_icp_qualification": "Let me check if this fits your profile.",
                             "check_guardrails":        "Let me check what I can do on pricing.",
+                            "warm_transfer":           "Let me get a human agent on the line for you right now.",
                         }
                         
                         # Update context for silence re-engagement
                         if tool_name in ["get_product_info", "check_guardrails"]:
                             self.last_context_type = "pricing"
-                        elif tool_name in ["book_meeting", "book_demo"]:
+                        elif tool_name in ["book_meeting", "book_demo", "calendar_book"]:
                             self.last_context_type = "demo"
                         
                         thinking_msg = thinking_phrases.get(tool_name, "One moment, let me look into that for you.")
@@ -1796,6 +2309,8 @@ class VoicePipeline:
                         followup_phrase = self._tool_followup_phrase(tool_name, result)
                         if followup_phrase:
                             await self.sentence_queue.put((followup_phrase, True))
+                            self.transcript_manager.add_rio_turn(followup_phrase)
+                            # Mirror into the pipeline's accumulator for backward compatibility
                             self.transcript_accumulator.append(f"Rio: {followup_phrase}")
                             self.save_transcript()
                             self._sentences_emitted_this_turn += 1
@@ -1804,7 +2319,7 @@ class VoicePipeline:
                             except Exception as exc:  # noqa: BLE001
                                 logger.warning("[VoicePipeline] add_system_message for tool follow-up failed: %s", exc)
                         
-                        self.llm_service.add_tool_message(tc.id, tool_name, json.dumps(result))
+                        self.llm_service.add_tool_message(tc.id, tool_name, to_compact(result))
                     
                     logger.info("🔄 Tool results ready. Recursing for final LLM response.")
                     # Recurse with user_input=None to follow the correct tool result -> model response sequence

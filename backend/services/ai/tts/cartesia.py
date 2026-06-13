@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 class CartesiaTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Cartesia"
-        self.model = model or "sonic-3"
+        self.model = model or "sonic-3.5"
         self.api_key = api_key
         self.voice_id = voice_id or "694f9369-aef9-5dba-99c5-6c1d27e44b9a"
         self.last_latency = 0
@@ -70,7 +70,7 @@ class CartesiaTTS:
             if ws_to_use:
                 await _stream_on_ws(ws_to_use)
             else:
-                url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2025-04-16"
+                url = f"wss://api.cartesia.ai/tts/websocket?api_key={self.api_key}&cartesia_version=2026-05-04"
                 async with aiohttp.ClientSession() as session:
                     async with session.ws_connect(url) as ws:
                         await _stream_on_ws(ws)

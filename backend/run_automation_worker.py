@@ -4,9 +4,11 @@ import argparse
 import logging
 import time
 
-from database import engine
+from database import engine, init_db
 from services.automation_worker_service import run_worker_cycle, run_worker_forever
 from sqlmodel import Session
+from sqlalchemy import inspect as _sa_inspect
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 logger = logging.getLogger(__name__)
 logging.basicConfig(
@@ -48,6 +50,20 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    # Ensure schema exists. If the worker runs before the API server has
+    # initialised the database, every query would fail with UndefinedTable
+    # and the supervisor would spin forever logging the same traceback.
+    # We do NOT catch exceptions here: a DB that is unreachable or has the
+    # wrong credentials must fail loudly at startup, not silently inside a
+    # restart loop.
+    existing = set(_sa_inspect(engine).get_table_names())
+    if "users" not in existing:
+        logger.warning(
+            "[supervisor] schema missing (no 'users' table) - running init_db()"
+        )
+        init_db()
+        logger.info("[supervisor] init_db() complete")
+
     if args.once:
         # Single-shot mode – run one cycle and print the result.
         logger.info("[supervisor] running in --once mode")
@@ -84,9 +100,25 @@ def main() -> None:
             logger.warning("[supervisor] run_worker_forever returned unexpectedly – restarting")
             backoff = _BACKOFF_INITIAL_SECONDS  # reset: clean exit
 
-        except Exception:  # noqa: BLE001
+        except (ProgrammingError, OperationalError):
+            # Schema missing, bad credentials, DB unreachable -> not something
+            # a restart loop can fix. Fail fast with a non-zero exit so the
+            # process manager (systemd, supervisord, Conductor) escalates
+            # instead of burning CPU on a hopeless retry.
             logger.exception(
-                "[supervisor] worker crashed (attempt #%d) – restarting in %ds",
+                "[supervisor] fatal database error - aborting. "
+                "Check DATABASE_URL, that Postgres is reachable, and that "
+                "migrations have run."
+            )
+            raise SystemExit(2)
+        except KeyboardInterrupt:
+            logger.info("[supervisor] interrupted - exiting cleanly")
+            return
+        except Exception:
+            # Transient failures (network, lock contention, etc.) - log full
+            # traceback and back off. We never swallow silently.
+            logger.exception(
+                "[supervisor] worker crashed (attempt #%d) - restarting in %ds",
                 attempt,
                 backoff,
             )

@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from langchain_core.tools import tool
 from utils.tracing import traceable, traceable_async
+from agents._format_utils import to_compact
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,7 @@ def get_campaign_performance(campaign_id: int, company_id: int) -> str:
         from services.analytics.analytics_service import get_campaign_email_report
         with Session(engine) as session:
             result = get_campaign_email_report(session=session, company_id=company_id, campaign_id=campaign_id)
-        return str(result)
+        return to_compact(result)
     except Exception as exc:
         logger.warning("[CampaignAgent] get_campaign_performance failed: %s", exc)
         return f"Could not fetch campaign performance: {exc}"
@@ -64,7 +65,7 @@ def list_active_campaigns(company_id: int) -> str:
         from services.campaign.campaign_service import list_campaigns
         with Session(engine) as session:
             result = list_campaigns(session=session, company_id=company_id)
-        return str(result)
+        return to_compact(result)
     except Exception as exc:
         logger.warning("[CampaignAgent] list_active_campaigns failed: %s", exc)
         return f"Could not list campaigns: {exc}"

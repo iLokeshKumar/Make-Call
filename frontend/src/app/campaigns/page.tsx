@@ -2,18 +2,19 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  BarChart2, ChevronDown, ChevronUp, GripVertical, List, Loader2,
-  Mail, MessageCircle, Pause, Pencil, Phone, Play, Plus, Trash2, Users, X } from "lucide-react";
+  BarChart2, Calendar, ChevronDown, ChevronUp, GripVertical, List, Loader2,
+  Mail, MessageCircle, Pause, Pencil, Phone, Play, Plus, Trash2, Users, X, Zap } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 // Types
 
 type Campaign = {
   id: number;
   name: string;
+  agent_id?: number | null;
   description?: string | null;
   status: string;
   created_at?: string;
@@ -29,6 +30,7 @@ type CampaignStep = {
 };
 
 type Lead = { id: number; name: string; normalized_phone: string };
+type VoiceAgentOption = { agent: { id: number; name: string; is_default: boolean } };
 type RecipientRow = {
   id: number; lead_id: number; status: string;
   current_step: number; next_run_at?: string | null; last_contact_at?: string | null;
@@ -446,6 +448,8 @@ export default function CampaignsPage() {
   const [creating, setCreating] = useState(false);
   const [newName, setNewName] = useState("");
   const [newDesc, setNewDesc] = useState("");
+  const [newAgentId, setNewAgentId] = useState("");
+  const [voiceAgents, setVoiceAgents] = useState<VoiceAgentOption[]>([]);
   const [createSaving, setCreateSaving] = useState(false);
 
   // enroll leads modal
@@ -456,6 +460,24 @@ export default function CampaignsPage() {
 
   // action state
   const [actionLoading, setActionLoading] = useState<Record<number, boolean>>({});
+
+  // schedule state
+  type ScheduleForm = {
+    start_date: string; end_date: string; daily_start_hour: number; daily_end_hour: number;
+    days_of_week: number[]; timezone: string; max_concurrent_calls: number; calls_per_minute: number;
+  };
+  const defaultSchedule: ScheduleForm = {
+    start_date: new Date().toISOString().slice(0, 16),
+    end_date: "",
+    daily_start_hour: 9, daily_end_hour: 18,
+    days_of_week: [0, 1, 2, 3, 4],
+    timezone: "Asia/Kolkata",
+    max_concurrent_calls: 5, calls_per_minute: 10,
+  };
+  const [scheduleFor, setScheduleFor] = useState<number | null>(null);
+  const [scheduleForm, setScheduleForm] = useState<ScheduleForm>(defaultSchedule);
+  const [scheduleSaving, setScheduleSaving] = useState(false);
+  const [runNowLoading, setRunNowLoading] = useState<Record<number, boolean>>({});
 
   // email reports
   const [emailReports, setEmailReports] = useState<Record<number, {
@@ -491,6 +513,19 @@ export default function CampaignsPage() {
   }, [user, sessionTimeout]);
 
   useEffect(() => { fetchCampaigns(); }, [fetchCampaigns]);
+
+  useEffect(() => {
+    if (!user) return;
+    apiFetch(`${API_BASE}/crm/voice-agents`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: VoiceAgentOption[]) => {
+        const items = Array.isArray(data) ? data : [];
+        setVoiceAgents(items);
+        const defaultAgent = items.find((item) => item.agent.is_default);
+        if (defaultAgent) setNewAgentId(String(defaultAgent.agent.id));
+      })
+      .catch(() => setVoiceAgents([]));
+  }, [user]);
 
   async function fetchSteps(campaignId: number) {
     setStepsLoading((s) => ({ ...s, [campaignId]: true }));
@@ -554,7 +589,13 @@ export default function CampaignsPage() {
       const res = await apiFetch(`${API_BASE}/campaigns`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ name: newName.trim(), description: newDesc.trim() || null }) });
+        body: JSON.stringify({
+          name: newName.trim(),
+          channel: "call",
+          objective: "outreach",
+          agent_id: newAgentId ? Number(newAgentId) : null,
+          description: newDesc.trim() || null,
+        }) });
       if (res.status === 401) { sessionTimeout(); return; }
       if (!res.ok) throw new Error((await res.json()).detail || "Failed to create");
       setNewName(""); setNewDesc(""); setCreating(false);
@@ -564,6 +605,43 @@ export default function CampaignsPage() {
       setMsg(e instanceof Error ? e.message : "Failed to create campaign");
     } finally {
       setCreateSaving(false);
+    }
+  }
+
+  async function handleSaveSchedule() {
+    if (!scheduleFor) return;
+    setScheduleSaving(true);
+    try {
+      const body = {
+        ...scheduleForm,
+        start_date: new Date(scheduleForm.start_date).toISOString(),
+        end_date: scheduleForm.end_date ? new Date(scheduleForm.end_date).toISOString() : null,
+      };
+      const res = await apiFetch(`${API_BASE}/campaigns/${scheduleFor}/schedule`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error((await res.json()).detail || "Save failed");
+      setMsg("Schedule saved");
+      setScheduleFor(null);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Failed to save schedule");
+    } finally {
+      setScheduleSaving(false);
+    }
+  }
+
+  async function handleRunNow(campaignId: number, force = false) {
+    setRunNowLoading((r) => ({ ...r, [campaignId]: true }));
+    try {
+      const res = await apiFetch(`${API_BASE}/campaigns/${campaignId}/run-now?force=${force}&limit=20`, { method: "POST" });
+      if (!res.ok) throw new Error((await res.json()).detail || "Run failed");
+      const data = await res.json();
+      const ok = (data.results as Array<{ success: boolean }>).filter((r) => r.success).length;
+      setMsg(`Fired ${ok} call(s)`);
+    } catch (e) {
+      setMsg(e instanceof Error ? e.message : "Run now failed");
+    } finally {
+      setRunNowLoading((r) => ({ ...r, [campaignId]: false }));
     }
   }
 
@@ -679,6 +757,20 @@ export default function CampaignsPage() {
             rows={2}
             className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
           />
+          {voiceAgents.length > 0 && (
+            <select
+              value={newAgentId}
+              onChange={(e) => setNewAgentId(e.target.value)}
+              className="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm outline-none focus:border-violet-400 dark:border-white/10 dark:bg-slate-900/40"
+            >
+              <option value="">Default voice agent</option>
+              {voiceAgents.map((item) => (
+                <option key={item.agent.id} value={item.agent.id}>
+                  {item.agent.name}{item.agent.is_default ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+          )}
           <div className="flex gap-3">
             <button
               onClick={handleCreateCampaign}
@@ -762,6 +854,19 @@ export default function CampaignsPage() {
                     className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 dark:border-white/10 dark:text-slate-200"
                   >
                     Sequence {expanded === campaign.id ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />}
+                  </button>
+                  <button
+                    onClick={() => { setScheduleFor(campaign.id); setScheduleForm(defaultSchedule); }}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:border-violet-300 hover:text-violet-700 dark:border-white/10 dark:text-slate-200"
+                  >
+                    <Calendar className="h-3 w-3" /> Schedule
+                  </button>
+                  <button
+                    onClick={() => handleRunNow(campaign.id, false)}
+                    disabled={runNowLoading[campaign.id]}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 hover:border-emerald-300 hover:text-emerald-700 dark:border-white/10 dark:text-slate-200 disabled:opacity-50"
+                  >
+                    {runNowLoading[campaign.id] ? <Loader2 className="h-3 w-3 animate-spin" /> : <Zap className="h-3 w-3" />} Run Now
                   </button>
                 </div>
               </div>
@@ -850,6 +955,72 @@ export default function CampaignsPage() {
               )}
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Schedule modal */}
+      {scheduleFor !== null && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2"><Calendar className="h-5 w-5" /> Schedule Campaign</h3>
+              <button onClick={() => setScheduleFor(null)}><X className="h-5 w-5 text-slate-400" /></button>
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <label className="block col-span-2">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Start Date & Time</span>
+                <input type="datetime-local" className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.start_date} onChange={(e) => setScheduleForm({ ...scheduleForm, start_date: e.target.value })} />
+              </label>
+              <label className="block col-span-2">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">End Date (optional)</span>
+                <input type="datetime-local" className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.end_date} onChange={(e) => setScheduleForm({ ...scheduleForm, end_date: e.target.value })} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Daily Start Hour (0–23)</span>
+                <input type="number" min={0} max={23} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.daily_start_hour} onChange={(e) => setScheduleForm({ ...scheduleForm, daily_start_hour: Number(e.target.value) })} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Daily End Hour (0–23)</span>
+                <input type="number" min={0} max={23} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.daily_end_hour} onChange={(e) => setScheduleForm({ ...scheduleForm, daily_end_hour: Number(e.target.value) })} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Timezone</span>
+                <select className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.timezone} onChange={(e) => setScheduleForm({ ...scheduleForm, timezone: e.target.value })}>
+                  {["Asia/Kolkata","Asia/Dubai","Asia/Singapore","America/New_York","America/Chicago","America/Los_Angeles","Europe/London","Europe/Paris","Australia/Sydney"].map((tz) => <option key={tz} value={tz}>{tz}</option>)}
+                </select>
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Max Concurrent Calls</span>
+                <input type="number" min={1} max={100} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.max_concurrent_calls} onChange={(e) => setScheduleForm({ ...scheduleForm, max_concurrent_calls: Number(e.target.value) })} />
+              </label>
+              <label className="block">
+                <span className="mb-1 block text-xs font-medium text-slate-600 dark:text-slate-400">Calls Per Minute</span>
+                <input type="number" min={1} max={60} className="w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm dark:border-slate-700 dark:bg-slate-800" value={scheduleForm.calls_per_minute} onChange={(e) => setScheduleForm({ ...scheduleForm, calls_per_minute: Number(e.target.value) })} />
+              </label>
+              <div className="col-span-2">
+                <span className="mb-2 block text-xs font-medium text-slate-600 dark:text-slate-400">Days of Week</span>
+                <div className="flex flex-wrap gap-2">
+                  {["Mon","Tue","Wed","Thu","Fri","Sat","Sun"].map((day, idx) => (
+                    <button key={idx} type="button"
+                      onClick={() => {
+                        const days = scheduleForm.days_of_week.includes(idx) ? scheduleForm.days_of_week.filter((d) => d !== idx) : [...scheduleForm.days_of_week, idx];
+                        setScheduleForm({ ...scheduleForm, days_of_week: days });
+                      }}
+                      className={`rounded-md px-3 py-1.5 text-xs font-medium ${scheduleForm.days_of_week.includes(idx) ? "bg-slate-900 text-white dark:bg-white dark:text-slate-900" : "border border-slate-200 text-slate-600 dark:border-slate-700 dark:text-slate-400"}`}
+                    >{day}</button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-2 pt-2">
+              <button onClick={handleSaveSchedule} disabled={scheduleSaving} className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white disabled:opacity-60 dark:bg-white dark:text-slate-900">
+                {scheduleSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Calendar className="h-4 w-4" />} Save Schedule
+              </button>
+              <button onClick={() => scheduleFor && handleRunNow(scheduleFor, true)} className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:border-slate-700 dark:text-slate-200">
+                <Zap className="h-4 w-4" /> Force Run Now
+              </button>
+            </div>
+          </div>
         </div>
       )}
 

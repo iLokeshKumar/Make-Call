@@ -11,12 +11,18 @@ Endpoints:
   DELETE /crm/knowledge/documents/{id}             soft-delete + remove from chroma
   GET    /crm/knowledge/search?q=...&collection=.. semantic search
   POST   /crm/knowledge/reindex                    re-index all documents for company
+  POST   /crm/knowledge/upload                     upload file → convert → index
+  POST   /crm/knowledge/upload-url                 convert URL/YouTube → index
 """
 from __future__ import annotations
 
-from typing import Optional
+import asyncio
+import logging
+import os
+import tempfile
+from typing import List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
 from sqlmodel import Session, SQLModel
 
 from auth import PermissionChecker, get_current_user
@@ -33,7 +39,65 @@ from services.knowledge_service import (
 from services.rag.collections import COLLECTIONS
 from services.rag.query_engine import format_for_prompt, search
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/crm", tags=["Knowledge"])
+
+# ---------------------------------------------------------------------------
+# Supported file extensions for the upload endpoint
+# ---------------------------------------------------------------------------
+_SUPPORTED_EXTENSIONS = {
+    ".pdf", ".docx", ".doc", ".pptx", ".ppt",
+    ".xlsx", ".xls", ".csv",
+    ".html", ".htm", ".xml", ".json",
+    ".txt", ".md", ".rst",
+    ".epub",
+    ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tiff",
+    ".mp3", ".wav", ".ogg", ".m4a",
+    ".zip",
+    ".msg",        # Outlook messages
+    ".ipynb",      # Jupyter notebooks
+}
+
+
+def _build_markitdown():
+    """Build a MarkItDown instance, optionally with Azure Document Intelligence."""
+    try:
+        from markitdown import MarkItDown
+    except ImportError:
+        raise HTTPException(
+            status_code=501,
+            detail="markitdown not installed. Run: pip install 'markitdown[all]'",
+        )
+
+    docintel_client = None
+    docintel_endpoint = os.getenv("AZURE_DOCINTEL_ENDPOINT") or os.getenv("AZURE_SPEECH_ENDPOINT")
+    docintel_key = os.getenv("AZURE_DOCINTEL_API_KEY") or os.getenv("AZURE_SPEECH_API_KEY")
+
+    if docintel_endpoint and docintel_key:
+        try:
+            from azure.ai.documentintelligence import DocumentIntelligenceClient
+            from azure.core.credentials import AzureKeyCredential
+            docintel_client = DocumentIntelligenceClient(
+                endpoint=docintel_endpoint,
+                credential=AzureKeyCredential(docintel_key),
+            )
+            logger.info("[MarkItDown] Azure Document Intelligence enabled")
+        except Exception as exc:
+            logger.warning("[MarkItDown] Azure Doc Intelligence unavailable: %s", exc)
+
+    return MarkItDown(docintel_client=docintel_client)
+
+
+async def _convert_file(md, path: str) -> str:
+    """Run MarkItDown conversion in a thread (it's sync + potentially slow)."""
+    result = await asyncio.to_thread(md.convert, path)
+    return (result.text_content or "").strip()
+
+
+async def _convert_url(md, url: str) -> str:
+    result = await asyncio.to_thread(md.convert, url)
+    return (result.text_content or "").strip()
 
 
 # Pydantic request/response schemas
@@ -81,6 +145,214 @@ class DocumentOut(SQLModel):
             last_indexed_at=doc.last_indexed_at.isoformat() if doc.last_indexed_at else None,
         )
 
+
+
+@router.post("/knowledge/upload", status_code=201)
+async def upload_knowledge_file(
+    file: UploadFile = File(...),
+    collection: str = Form("products"),
+    title: Optional[str] = Form(None),
+    tags: Optional[str] = Form(None),          # comma-separated
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("settings.manage_company")),
+):
+    """Upload a file (PDF/Word/Excel/PPTX/image/audio/etc.) → convert to Markdown → index in KB.
+
+    Supports: PDF, DOCX, PPTX, XLSX, CSV, HTML, XML, JSON, TXT, MD,
+              EPUB, JPG/PNG/GIF, MP3/WAV, ZIP, MSG, IPYNB and more.
+    """
+    if collection not in COLLECTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid collection '{collection}'. Valid: {COLLECTIONS}",
+        )
+
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext and ext not in _SUPPORTED_EXTENSIONS:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Unsupported file type '{ext}'. Supported: {sorted(_SUPPORTED_EXTENSIONS)}",
+        )
+
+    raw = await file.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty.")
+
+    md = _build_markitdown()
+
+    suffix = ext or ".bin"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+        tmp.write(raw)
+        tmp_path = tmp.name
+
+    try:
+        content = await _convert_file(md, tmp_path)
+    except Exception as exc:
+        logger.error("[MarkItDown] Conversion failed for %s: %s", file.filename, exc)
+        raise HTTPException(status_code=422, detail=f"Conversion failed: {exc}")
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
+    if not content:
+        raise HTTPException(status_code=422, detail="Conversion produced empty content. Check the file.")
+
+    doc_title = title or file.filename or "Untitled"
+    tag_list = [t.strip() for t in tags.split(",")] if tags else []
+
+    doc = create_document(
+        session=session,
+        company_id=current_user.company_id,
+        collection=collection,
+        title=doc_title,
+        content=content,
+        actor_user_id=current_user.id,
+        tags=tag_list or None,
+        metadata_json={
+            "source": "file_upload",
+            "original_filename": file.filename,
+            "file_extension": ext,
+            "content_type": file.content_type or "unknown",
+            "size_bytes": len(raw),
+        },
+    )
+    return {
+        "id": doc.id,
+        "title": doc_title,
+        "collection": collection,
+        "chars": len(content),
+        "original_filename": file.filename,
+    }
+
+
+@router.post("/knowledge/upload-url", status_code=201)
+async def upload_knowledge_url(
+    url: str = Form(...),
+    collection: str = Form("products"),
+    title: Optional[str] = Form(None),
+    tags: Optional[str] = Form(None),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("settings.manage_company")),
+):
+    """Convert a URL (web page, YouTube video, RSS feed) to Markdown and index in KB.
+
+    YouTube URLs are transcribed. Web pages are scraped and converted.
+    """
+    if collection not in COLLECTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid collection '{collection}'. Valid: {COLLECTIONS}",
+        )
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(status_code=400, detail="URL must start with http:// or https://")
+
+    md = _build_markitdown()
+
+    try:
+        content = await _convert_url(md, url)
+    except Exception as exc:
+        logger.error("[MarkItDown] URL conversion failed for %s: %s", url, exc)
+        raise HTTPException(status_code=422, detail=f"URL conversion failed: {exc}")
+
+    if not content:
+        raise HTTPException(status_code=422, detail="URL produced empty content.")
+
+    doc_title = title or url[:120]
+    tag_list = [t.strip() for t in tags.split(",")] if tags else []
+
+    doc = create_document(
+        session=session,
+        company_id=current_user.company_id,
+        collection=collection,
+        title=doc_title,
+        content=content,
+        actor_user_id=current_user.id,
+        tags=tag_list or None,
+        metadata_json={
+            "source": "url",
+            "url": url,
+        },
+    )
+    return {
+        "id": doc.id,
+        "title": doc_title,
+        "collection": collection,
+        "chars": len(content),
+        "url": url,
+    }
+
+
+@router.post("/knowledge/upload-batch", status_code=201)
+async def upload_knowledge_batch(
+    files: List[UploadFile] = File(...),
+    collection: str = Form("products"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("settings.manage_company")),
+):
+    """Upload multiple files at once. Each is converted and indexed independently."""
+    if collection not in COLLECTIONS:
+        raise HTTPException(status_code=422, detail=f"Invalid collection '{collection}'.")
+    if len(files) > 20:
+        raise HTTPException(status_code=400, detail="Max 20 files per batch.")
+
+    md = _build_markitdown()
+    results = []
+
+    for file in files:
+        ext = os.path.splitext(file.filename or "")[1].lower()
+        raw = await file.read()
+        if not raw:
+            results.append({"filename": file.filename, "status": "skipped", "reason": "empty"})
+            continue
+
+        suffix = ext or ".bin"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as tmp:
+            tmp.write(raw)
+            tmp_path = tmp.name
+
+        try:
+            content = await _convert_file(md, tmp_path)
+        except Exception as exc:
+            results.append({"filename": file.filename, "status": "error", "reason": str(exc)})
+            continue
+        finally:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+        if not content:
+            results.append({"filename": file.filename, "status": "skipped", "reason": "empty output"})
+            continue
+
+        try:
+            doc = create_document(
+                session=session,
+                company_id=current_user.company_id,
+                collection=collection,
+                title=file.filename or "Untitled",
+                content=content,
+                actor_user_id=current_user.id,
+                metadata_json={
+                    "source": "file_upload",
+                    "original_filename": file.filename,
+                    "file_extension": ext,
+                    "size_bytes": len(raw),
+                },
+            )
+            results.append({
+                "filename": file.filename,
+                "status": "ok",
+                "doc_id": doc.id,
+                "chars": len(content),
+            })
+        except Exception as exc:
+            results.append({"filename": file.filename, "status": "error", "reason": str(exc)})
+
+    ok = sum(1 for r in results if r["status"] == "ok")
+    return {"total": len(files), "indexed": ok, "results": results}
 
 
 @router.get("/knowledge/documents")

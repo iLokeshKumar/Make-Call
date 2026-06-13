@@ -128,13 +128,13 @@ def test_login_dashboard_slo_uses_fmp_event_only(session):
 # Dead-letter SLO
 
 def test_dead_letter_rate_excludes_old_jobs(session):
-    from models.models import BackgroundJob
+    from models.models import AgentTask
     cutoff_old = datetime.now(timezone.utc) - timedelta(days=10)
-    # 12 old dead_letter rows (should be ignored due to 7d window)
+    # 12 old failed rows (should be ignored due to 7d window)
     for _ in range(12):
-        session.add(BackgroundJob(
-            company_id=1, job_type="post_call_workflow", status="dead_letter",
-            payload={}, created_at=cutoff_old,
+        session.add(AgentTask(
+            company_id=1, task_type="post_call_workflow", assigned_agent="campaign", status="failed",
+            input_json={}, created_at=cutoff_old,
         ))
     session.commit()
     from services.observability.slo import _slo_dead_letter_rate
@@ -144,15 +144,15 @@ def test_dead_letter_rate_excludes_old_jobs(session):
 
 
 def test_dead_letter_rate_breach(session):
-    from models.models import BackgroundJob
-    # 100 jobs, 5 dead_letter → 5% breach (>0.5% target)
+    from models.models import AgentTask
+    # 100 jobs, 5 failed → 5% breach (>0.5% target)
     for i in range(95):
-        session.add(BackgroundJob(
-            company_id=1, job_type="post_call_workflow", status="done", payload={},
+        session.add(AgentTask(
+            company_id=1, task_type="post_call_workflow", assigned_agent="campaign", status="done", input_json={},
         ))
     for i in range(5):
-        session.add(BackgroundJob(
-            company_id=1, job_type="post_call_workflow", status="dead_letter", payload={},
+        session.add(AgentTask(
+            company_id=1, task_type="post_call_workflow", assigned_agent="campaign", status="failed", input_json={},
         ))
     session.commit()
     from services.observability.slo import _slo_dead_letter_rate

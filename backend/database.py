@@ -119,6 +119,18 @@ def seed_permissions(session: Session) -> None:
         ("quote.send", "quote", "Send quotes"),
         ("agent.manage", "agent", "View and manage agent tasks"),
         ("agent.review", "agent", "Approve or reject agent actions"),
+        ("order.read", "order", "Read orders"),
+        ("order.manage", "order", "Create and manage orders"),
+        ("invoice.read", "invoice", "Read invoices"),
+        ("invoice.manage", "invoice", "Create and manage invoices"),
+        ("payment.read", "payment", "Read payments"),
+        ("payment.manage", "payment", "Create and manage payments"),
+        ("ticket.read", "ticket", "Read service tickets"),
+        ("ticket.manage", "ticket", "Create and manage service tickets"),
+        ("installation.read", "installation", "Read installations"),
+        ("installation.manage", "installation", "Create and manage installations"),
+        ("contact.read", "contact", "Read contacts"),
+        ("contact.manage", "contact", "Create and manage contacts"),
     ]
 
     existing = {item.key for item in session.exec(select(Permission)).all()}
@@ -142,6 +154,13 @@ _SALES_REP_PERMISSIONS = {
     "user.read",
     "agent.manage",
     "agent.review",
+    # Phase 7 read-only — sales reps can view but not manage
+    "order.read",
+    "invoice.read",
+    "payment.read",
+    "ticket.read",
+    "installation.read",
+    "contact.read",
 }
 
 
@@ -182,10 +201,37 @@ def patch_sales_rep_permissions(session: Session) -> None:
     session.commit()
 
 
+def patch_system_admin_permissions(session: Session) -> None:
+    """
+    Keep existing company_owner and company_admin system roles aligned with the
+    current permission catalog. New permissions are seeded before this runs, so
+    older companies get access to newly introduced admin endpoints.
+    """
+    admin_roles = session.exec(
+        select(Role).where(
+            Role.name.in_(["company_owner", "company_admin"]),
+            Role.is_system == True,  # noqa: E712
+        )
+    ).all()
+
+    all_permissions = {p.key for p in session.exec(select(Permission)).all()}
+
+    for role in admin_roles:
+        existing_perms = set(session.exec(
+            select(RolePermission.permission_key).where(RolePermission.role_id == role.id)
+        ).all())
+
+        for key in all_permissions - existing_perms:
+            session.add(RolePermission(role_id=role.id, permission_key=key))
+
+    session.commit()
+
+
 def init_db() -> None:
     SQLModel.metadata.create_all(engine, checkfirst=True)
     with Session(engine) as session:
         seed_permissions(session)
+        patch_system_admin_permissions(session)
         patch_sales_rep_permissions(session)
     from migrations.apply_rls import ensure_rls
     ensure_rls()

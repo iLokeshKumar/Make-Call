@@ -48,6 +48,8 @@ def send_email_to_lead(
     body: str,
     cta_url: str = "",
     cta_label: str = "",
+    attachment_paths: list[str] | None = None,
+    parent_interaction_id: int | None = None,
 ) -> dict:
     lead = session.exec(
         select(Lead).where(
@@ -81,6 +83,7 @@ def send_email_to_lead(
         ended_at=utc_now(),
         created_by=actor_user_id,
         updated_by=actor_user_id,
+        parent_interaction_id=parent_interaction_id,
     )
     session.add(interaction)
     session.commit()
@@ -125,6 +128,7 @@ def send_email_to_lead(
         body=plain_body,
         html_body=html_body,
         company_name=company_name,
+        attachment_paths=attachment_paths,
     )
 
     interaction.delivery_status = "queued"
@@ -150,6 +154,7 @@ def send_email_to_lead(
         "subject": subject,
         "interaction_id": interaction.id,
         "tracking_token": tracking_token,
+        "attachment_count": len(attachment_paths or []),
     }
 
 
@@ -205,6 +210,7 @@ def send_whatsapp_to_lead(
     actor_user_id: int,
     lead_id: int,
     body: str,
+    parent_interaction_id: int | None = None,
 ) -> dict:
     lead = session.exec(
         select(Lead).where(
@@ -246,6 +252,7 @@ def send_whatsapp_to_lead(
         ended_at=utc_now(),
         created_by=actor_user_id,
         updated_by=actor_user_id,
+        parent_interaction_id=parent_interaction_id,
     )
     session.add(interaction)
     session.commit()
@@ -282,6 +289,7 @@ def send_quote_to_lead(
     channels: list[str],
     subject: str | None = None,
     message: str | None = None,
+    attachment_paths: list[str] | None = None,
 ) -> dict:
     quote = session.exec(
         select(Quote).where(
@@ -320,6 +328,7 @@ def send_quote_to_lead(
                 body=email_message,
                 cta_url=quote_view_url or "",
                 cta_label="View Quote" if quote_view_url else "",
+                attachment_paths=attachment_paths,
             )
         )
     if "whatsapp" in channels:

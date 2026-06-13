@@ -30,7 +30,7 @@ except ImportError:
 
 # Cross-encoder model — loaded once on first use
 _reranker = None
-_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+_RERANKER_MODEL = "cross-encoder/ms-marco-MiniLM-L6-v2"
 
 
 def _get_reranker():

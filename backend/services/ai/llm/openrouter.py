@@ -1,11 +1,42 @@
 import json
 import logging
+import os
+import time
 import aiohttp
 import asyncio
 from types import SimpleNamespace
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 logger = logging.getLogger(__name__)
+
+# Free / experimental OpenRouter models often break streaming tool calls (502 mid-stream).
+_UNRELIABLE_TOOL_MODEL_MARKERS = (":free", "gpt-oss")
+_TOOL_FALLBACK_MODEL = os.getenv("OPENROUTER_TOOL_FALLBACK_MODEL", "openai/gpt-4o-mini")
+_DEBUG_LOG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "debug-c56e15.log")
+
+
+def _agent_debug_log(location: str, message: str, data: dict | None = None, hypothesis_id: str = "", run_id: str = "pre-fix"):
+    # #region agent log
+    try:
+        entry = {
+            "sessionId": "c56e15",
+            "timestamp": int(time.time() * 1000),
+            "location": location,
+            "message": message,
+            "data": data or {},
+            "hypothesisId": hypothesis_id,
+            "runId": run_id,
+        }
+        with open(_DEBUG_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+    # #endregion
+
+
+def _is_unreliable_for_tools(model: str) -> bool:
+    lower = (model or "").lower()
+    return any(marker in lower for marker in _UNRELIABLE_TOOL_MODEL_MARKERS)
 
 class OpenRouterLLM(BaseLLM):
     def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
@@ -41,9 +72,25 @@ class OpenRouterLLM(BaseLLM):
         final_history = self.get_safe_history(limit=10)
         sanitized_messages = sanitize_obj(final_history)
 
+        effective_model = self.model
+        if tools and _is_unreliable_for_tools(self.model):
+            effective_model = _TOOL_FALLBACK_MODEL
+            logger.warning(
+                "⚠️ [OpenRouterLLM] Model %r is unreliable for tool calling; "
+                "using fallback %r",
+                self.model,
+                effective_model,
+            )
+            _agent_debug_log(
+                "openrouter.py:stream",
+                "tool_model_fallback",
+                {"configured": self.model, "effective": effective_model},
+                hypothesis_id="H1",
+            )
+
         # Prepare payload
         payload = {
-            "model": self.model,
+            "model": effective_model,
             "messages": sanitized_messages,
             "stream": True,
             "temperature": 0.7,
@@ -59,7 +106,18 @@ class OpenRouterLLM(BaseLLM):
             payload["tools"] = sanitize_obj(tools)
             payload["tool_choice"] = "auto"
 
-        logger.info(f"🧠 [OpenRouterLLM] Sending Payload. Messages: {len(sanitized_messages)} | Tools: {bool(tools)} | Model: {self.model}")
+        logger.info(
+            "🧠 [OpenRouterLLM] Sending Payload. Messages: %s | Tools: %s | Model: %s",
+            len(sanitized_messages),
+            bool(tools),
+            effective_model,
+        )
+        _agent_debug_log(
+            "openrouter.py:stream",
+            "request_start",
+            {"model": effective_model, "tools": bool(tools), "message_count": len(sanitized_messages)},
+            hypothesis_id="H1",
+        )
         logger.debug(f"📡 [OpenRouterLLM] Payload: {json.dumps(payload, indent=2)[:500]}...")
 
         timeout = aiohttp.ClientTimeout(total=60, connect=10, sock_read=30)
@@ -90,6 +148,12 @@ class OpenRouterLLM(BaseLLM):
                                 if "error" in chunk:
                                     err = chunk['error']
                                     logger.error(f"❌ [OpenRouterLLM] Mid-stream Error: {err}")
+                                    _agent_debug_log(
+                                        "openrouter.py:stream",
+                                        "mid_stream_error",
+                                        {"error": str(err)[:500], "model": effective_model},
+                                        hypothesis_id="H1",
+                                    )
                                     yield {"type": "error", "content": "OpenRouter server error mid-stream"}
                                     return
 
@@ -123,9 +187,22 @@ class OpenRouterLLM(BaseLLM):
                                 if 'content' in delta and delta['content']:
                                     content = delta['content']
                                     
-                                    # Suppress JSON leakage from speech token just in case
-                                    if any(p in content for p in ['"arguments":', '{"name":', '"name":', '"id":', '": "']):
-                                        logger.warning(f"🚫 [OpenRouterLLM] Filtered JSON leakage from speech token: {content[:20]}...")
+                                    # Suppress JSON / tool-call syntax leaking into spoken tokens
+                                    _speech_leak_markers = (
+                                        '"arguments":', '{"name":', '"name":', '"id":', '": "',
+                                        "to=functions.", "to=tool_calls.", "[Assistant calls",
+                                    )
+                                    if any(p in content for p in _speech_leak_markers):
+                                        logger.warning(
+                                            "🚫 [OpenRouterLLM] Filtered tool/JSON leakage from speech: %r",
+                                            content[:40],
+                                        )
+                                        _agent_debug_log(
+                                            "openrouter.py:stream",
+                                            "speech_leak_filtered",
+                                            {"snippet": content[:80]},
+                                            hypothesis_id="H2",
+                                        )
                                         continue
 
                                     accumulated_text += content
@@ -186,6 +263,16 @@ class OpenRouterLLM(BaseLLM):
                 finish_obj["reasoning_details"] = reasoning_details
                 logger.debug(f"🧠 [OpenRouterLLM] Captured {len(reasoning_details)} characters of reasoning details.")
 
+            _agent_debug_log(
+                "openrouter.py:stream",
+                "stream_finished",
+                {
+                    "model": effective_model,
+                    "tool_call_count": len(formatted_tool_calls),
+                    "reply_len": len(full_reply),
+                },
+                hypothesis_id="H1",
+            )
             yield finish_obj
 
         except Exception as e:

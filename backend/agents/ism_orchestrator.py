@@ -47,7 +47,7 @@ from services.leads.opt_out_service import is_lead_opted_out
 
 logger = logging.getLogger(__name__)
 
-# Stage ordering / progression map
+# ── Stage ordering / progression map ──────────────────────────────────────────
 
 ISM_STAGE_ORDER: list[str] = [
     "new",
@@ -74,6 +74,13 @@ _CHANNEL_MAX_ATTEMPTS: dict[str, int] = {
     "call": 3,
     "whatsapp": 5,
     "email": 7,
+}
+
+# Mappings from outreach channel → usage metric for plan-limit checks.
+_CHANNEL_TO_USAGE_METRIC: dict[str, str] = {
+    "call":     "calls_made",
+    "whatsapp": "whatsapp_sent",
+    "email":    "emails_sent",
 }
 
 # Per-stage preferred channel order (first available wins).
@@ -149,6 +156,22 @@ def _lead_has_channel(lead: Lead, channel: str) -> bool:
     if channel == "email":
         return bool(lead.email)
     return False
+
+
+def _channel_allowed_by_plan(session: Session, company_id: int, channel: str) -> bool:
+    """Check whether the company's subscription plan allows this channel.
+
+    Looks up the usage metric for the channel and checks if the plan has
+    capacity remaining. A limit of 0 means the channel is fully blocked
+    (e.g. WhatsApp on the starter plan). None means unlimited.
+
+    This is a pure predicate — never raises, never writes.
+    """
+    from services.core.usage_service import is_metric_available
+    metric = _CHANNEL_TO_USAGE_METRIC.get(channel)
+    if metric is None:
+        return True
+    return is_metric_available(session, company_id, metric)
 
 
 # Requirement-driven channel selection (2.1)
@@ -295,10 +318,22 @@ def _pick_channel(
     or None if every option is blocked.
 
     Requirement-driven overrides (budget, timeline) take priority over the
-    stage default. Guards (opt-out, cooldown, exhaustion, missing contact)
-    still apply — a requirement can't force us to break an opt-out.
+    stage default. When no override is present and enough training data exists,
+    TabPFN-3 channel propensity prediction ranks channels by predicted engagement
+    probability. Falls back to per-stage preference. Guards (opt-out, cooldown,
+    exhaustion, missing contact) still apply.
     """
     preference = _requirement_preferred_channels(session, company_id, lead.id)
+    if preference is None:
+        # Try TabPFN-3 channel propensity prediction when data is available.
+        try:
+            from services.tabular.channel_scorer import predict_best_channel, invalidate_channel_scorer_cache
+            channel_result = predict_best_channel(session, company_id, lead)
+            if channel_result.get("channel_ranking"):
+                preference = channel_result["channel_ranking"]
+        except Exception as exc:
+            logger.debug("[ISM] channel propensity unavailable, using stage default: %s", exc)
+
     if preference is None:
         preference = _STAGE_CHANNEL_PREFERENCE.get(stage, ["call", "whatsapp", "email"])
 
@@ -310,6 +345,8 @@ def _pick_channel(
         if _is_channel_exhausted(session, company_id, lead.id, channel):
             continue
         if _is_channel_in_cooldown(session, company_id, lead.id, channel):
+            continue
+        if not _channel_allowed_by_plan(session, company_id, channel):
             continue
         return channel
     return None
@@ -528,6 +565,7 @@ def _decide_exhaustion_outcome(
       - Future Appointment booked (demo).
       - Lead.qualification_status (set by post-call extractor).
       - Days since last outreach (silent ghost detector).
+      - TabPFN-3 churn risk prediction (when ML data is available).
 
     Returns (decision, reason) where decision ∈ {"closed_won", "closed_lost", "handoff"}.
     """
@@ -536,7 +574,6 @@ def _decide_exhaustion_outcome(
     neg_score = 0
     reasons: list[str] = []
 
-    # Verbal CSAT — strongest individual signal because it's customer voice.
     fb = session.exec(
         select(Feedback)
         .where(
@@ -557,7 +594,6 @@ def _decide_exhaustion_outcome(
             neg_score += 2
             reasons.append(f"verbal_csat={fb.rating}")
 
-    # Future appointment / demo booked = strong commit-to-buy signal.
     appt = session.exec(
         select(Appointment)
         .where(
@@ -572,7 +608,6 @@ def _decide_exhaustion_outcome(
         pos_score += 1
         reasons.append("future_demo_booked")
 
-    # Latest quote status.
     quote = session.exec(
         select(Quote)
         .where(Quote.company_id == company_id, Quote.lead_id == lead.id)
@@ -588,7 +623,6 @@ def _decide_exhaustion_outcome(
             neg_score += 1
             reasons.append(f"quote_{qstatus}")
 
-    # Qualification verdict from post-call LLM extractor.
     qual = (lead.qualification_status or "").lower()
     if qual == "not_interested":
         neg_score += 2
@@ -597,14 +631,29 @@ def _decide_exhaustion_outcome(
         pos_score += 1
         reasons.append(f"qualification={qual}")
 
-    # Silent ghost: no outreach activity for a long time AND no positive signal —
-    # the customer simply went dark.  Default to closed_lost so the queue doesn't
-    # hold stale leads forever.
+    # TabPFN-3 churn risk — when ML data is available, this provides a learned
+    # disengagement probability that adjusts the hardcoded silence threshold.
+    try:
+        from services.tabular.churn_scorer import predict_churn_risk
+        churn = predict_churn_risk(session, company_id, lead)
+        if churn.get("provider") == "tabpfn":
+            risk = churn.get("disengagement_risk", 0.0)
+            if risk >= 0.7:
+                neg_score += 2
+                reasons.append(f"churn_risk={risk:.2f}")
+            elif risk >= 0.4:
+                neg_score += 1
+                reasons.append(f"churn_risk={risk:.2f}")
+            else:
+                pos_score += 1
+                reasons.append(f"low_churn_risk={risk:.2f}")
+    except Exception as exc:
+        logger.debug("[ISM] churn risk prediction unavailable: %s", exc)
+
     silent_days: int | None = None
     if lead.last_outreach_at:
         silent_days = (now - lead.last_outreach_at).days
 
-    # Decision.  Require a clear winner; ties go to handoff so a human breaks them.
     if pos_score >= 2 and pos_score > neg_score:
         return "closed_won", ",".join(reasons) or "positive_signals"
     if neg_score >= 2 and neg_score > pos_score:
@@ -612,8 +661,6 @@ def _decide_exhaustion_outcome(
     if silent_days is not None and silent_days >= 14 and pos_score == 0:
         return "closed_lost", f"silent_{silent_days}d"
     if pos_score == 0 and neg_score == 0:
-        # No signals at all — customer never engaged after first touch.
-        # Treat as closed_lost rather than parking forever.
         return "closed_lost", "no_engagement_signals"
     return "handoff", ",".join(reasons) or "ambiguous_signals"
 
@@ -740,6 +787,58 @@ def _execute_rule_action(
     return (False, None, None)
 
 
+def _maybe_autodraft_proposal(
+    session: Session,
+    company_id: int,
+    lead: Lead,
+    actor_user_id: int,
+) -> dict:
+    """Auto-draft a proposal when a lead is qualified and has a requirement.
+
+    Draft-only — never enqueues a send. Idempotent: skips if the lead already
+    has a non-rejected proposal. Any failure is swallowed so a proposal problem
+    never breaks the outreach cycle. Returns a dict to merge into ISMResult
+    ({} when nothing was drafted).
+    """
+    qual = (lead.qualification_status or "").lower()
+    if qual not in ("qualified", "proposal"):
+        return {}
+    try:
+        from models.models import ProposalRequest
+        from services.requirement_service import get_latest_requirements
+        from services.proposal.proposal_service import create_proposal_draft
+
+        if get_latest_requirements(session, company_id, lead.id) is None:
+            return {}
+        existing = session.exec(
+            select(ProposalRequest)
+            .where(
+                ProposalRequest.company_id == company_id,
+                ProposalRequest.lead_id == lead.id,
+                ProposalRequest.status != "rejected",
+            )
+            .limit(1)
+        ).first()
+        if existing is not None:
+            return {}
+        result = create_proposal_draft(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            lead_id=lead.id,
+            source_channel="ism_auto",
+        )
+        logger.info("ISM: lead=%d auto-drafted proposal=%s", lead.id, result.get("id"))
+        return {
+            "proposal_drafted": True,
+            "proposal_id": result.get("id"),
+            "proposal_status": result.get("status"),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[ISM] auto-draft proposal failed for lead=%s: %s", lead.id, exc)
+        return {}
+
+
 def run_ism_cycle(
     session: Session,
     company_id: int,
@@ -785,11 +884,16 @@ def run_ism_cycle(
     if stage in _TERMINAL_STAGES:
         return {"lead_id": lead_id, "stage": stage, "skipped": True, "skip_reason": "terminal_stage"}
 
+    # Auto-draft a proposal/RFQ for qualified leads (draft-only, idempotent).
+    # Runs before the cooldown gate so a qualified lead gets a proposal even
+    # when outreach is still cooling down.
+    proposal_info = _maybe_autodraft_proposal(session, company_id, lead, actor_user_id)
+
     # Global cooldown: don't outreach if we already did within the tightest window.
     if lead.last_outreach_at:
         min_cooldown = min(_CHANNEL_COOLDOWN_HOURS.values())
         if utc_now() < lead.last_outreach_at + timedelta(hours=min_cooldown):
-            return {"lead_id": lead_id, "stage": stage, "skipped": True, "skip_reason": "global_cooldown"}
+            return {"lead_id": lead_id, "stage": stage, "skipped": True, "skip_reason": "global_cooldown", **proposal_info}
 
     # Rules engine (Week 3.3) — data-driven overrides.
     forced_channel: Optional[str] = None
@@ -965,6 +1069,7 @@ def run_ism_cycle(
         "channel": channel,
         "skipped": False,
         "skip_reason": None,
+        **proposal_info,
         **result,
     }
 

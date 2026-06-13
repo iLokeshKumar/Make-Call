@@ -29,7 +29,7 @@ from typing import Any, Optional
 
 from sqlmodel import Session, select
 
-from models.models import Lead, Quote
+from models.models import Lead, ProposalDocument, ProposalRequest, Quote
 
 
 def _truncate(text: str, limit: int = 240) -> str:
@@ -139,11 +139,73 @@ def _present_send_quote(input_json: dict, session: Optional[Session], company_id
     }
 
 
+def _present_send_proposal(input_json: dict, session: Optional[Session], company_id: int, lead_id: Optional[int]) -> dict:
+    proposal_id = input_json.get("proposal_id")
+    document_id = input_json.get("proposal_document_id")
+    quote_id = input_json.get("quote_id")
+    channels = input_json.get("channels") or ["email"]
+    subject = str(input_json.get("subject") or "")
+    message = str(input_json.get("message") or "")
+    lead_name = _lookup_lead_name(session, company_id, lead_id)
+
+    quote_summary = (
+        _lookup_quote_summary(session, company_id, int(quote_id))
+        if isinstance(quote_id, int) or (isinstance(quote_id, str) and quote_id.isdigit())
+        else "quote pending"
+    )
+
+    warnings: list[str] = []
+    validation = None
+    if session and (isinstance(proposal_id, int) or (isinstance(proposal_id, str) and proposal_id.isdigit())):
+        proposal = session.exec(
+            select(ProposalRequest).where(
+                ProposalRequest.id == int(proposal_id),
+                ProposalRequest.company_id == company_id,
+            )
+        ).first()
+        if proposal:
+            validation = proposal.validation_json or {}
+            warnings.extend(validation.get("warnings") or [])
+            blockers = validation.get("blockers") or []
+            warnings.extend(f"BLOCKER: {b}" for b in blockers)
+    if session and (isinstance(document_id, int) or (isinstance(document_id, str) and document_id.isdigit())):
+        doc = session.exec(
+            select(ProposalDocument).where(
+                ProposalDocument.id == int(document_id),
+                ProposalDocument.company_id == company_id,
+            )
+        ).first()
+        if doc and doc.status == "sent":
+            warnings.append("This proposal document is already marked sent.")
+        pdf_path = doc.pdf_path if doc else None
+    else:
+        pdf_path = None
+
+    return {
+        "title": f"Send proposal #{proposal_id} to {lead_name}",
+        "description": f"{quote_summary} via {', '.join(channels)}",
+        "preview": {
+            "channel": "proposal",
+            "to": lead_name,
+            "proposal_id": proposal_id,
+            "proposal_document_id": document_id,
+            "quote": quote_summary,
+            "channels": channels,
+            "subject": subject,
+            "message": _truncate(message, 400),
+            "pdf_path": pdf_path,
+            "validation": validation,
+        },
+        "warnings": warnings,
+    }
+
+
 # Presenter registry. Adding a new task_type is one entry here.
 _PRESENTERS = {
     "send_email": _present_send_email,
     "send_whatsapp": _present_send_whatsapp,
     "send_quote": _present_send_quote,
+    "send_proposal": _present_send_proposal,
 }
 
 

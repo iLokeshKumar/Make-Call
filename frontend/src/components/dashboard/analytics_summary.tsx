@@ -4,11 +4,16 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 
+import CampaignStatusTimelineChart from "@/components/analytics/CampaignStatusTimelineChart";
+import CampaignConversionChart from "@/components/analytics/CampaignConversionChart";
+import FunnelChart from "@/components/analytics/FunnelChart";
+import HorizontalMetricBars from "@/components/analytics/HorizontalMetricBars";
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 type SummaryResponse = {
   event_counts: Record<string, number>;
+  channel_counts: Record<string, number>;
   campaign_funnel: Array<{ status: string; count: number; percent: number }>;
   event_timeline: Array<{ day: string; event_type: string; count: number }>;
   campaign_conversion_trends: Array<{ name: string; responded: number; sent: number; conversion_rate: number }>;
@@ -46,9 +51,7 @@ export default function AnalyticsSummary() {
 
   if (!user) return null;
 
-  const timeline = summary?.event_timeline.slice(-3) ?? [];
   const pastel = ["from-indigo-500/60 to-blue-500/30", "from-emerald-500/60 to-cyan-500/30"];
-  const funnelTotal = summary?.campaign_funnel.reduce((acc, item) => acc + item.count, 0) ?? 0;
   const timelineBacklog = summary?.campaign_status_over_time.slice(-3) ?? [];
   const quotePreview = summary?.quote_timeline_export.slice(0, 3) ?? [];
 
@@ -106,15 +109,24 @@ export default function AnalyticsSummary() {
             ))}
           </div>
 
+          {!!summary && Object.keys(summary.channel_counts ?? {}).length > 0 && (
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+              <div className="flex items-center justify-between">
+                <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Channel breakdown</p>
+                <span className="text-[10px] text-slate-500">{Object.keys(summary.channel_counts).length} channels</span>
+              </div>
+              <div className="mt-3">
+                <HorizontalMetricBars
+                  rows={Object.entries(summary.channel_counts).map(([label, value]) => ({ label, value }))}
+                  compact
+                />
+              </div>
+            </div>
+          )}
+
           {summary?.campaign_funnel.length ? (
-            <div className="grid grid-cols-2 gap-3">
-              {summary.campaign_funnel.slice(0, 2).map((item) => (
-                <div key={item.status} className="rounded-2xl border border-white/10 bg-white/5 p-3 text-sm">
-                  <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">{item.status}</p>
-                  <p className="text-2xl font-semibold text-white">{item.count}</p>
-                  <p className="text-xs text-slate-400">{Math.round((item.percent || 0) * 10) / 10}% of {funnelTotal}</p>
-                </div>
-              ))}
+            <div className="rounded-2xl border border-white/10 bg-white/5 p-3">
+              <FunnelChart items={summary.campaign_funnel.slice(0, 4)} compact />
             </div>
           ) : null}
 
@@ -123,17 +135,12 @@ export default function AnalyticsSummary() {
               <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Campaign status timeline</p>
               <span className="text-[10px] text-slate-500">{timelineBacklog.length} records</span>
             </div>
-            {timeline.length === 0 ? (
-              <p className="mt-2 text-sm text-slate-300">No recent events</p>
+            {timelineBacklog.length === 0 ? (
+              <p className="mt-2 text-sm text-slate-300">No status history</p>
             ) : (
-              <ul className="mt-3 space-y-2 text-sm text-slate-200">
-                {timeline.map((entry) => (
-                  <li key={`${entry.day}-${entry.event_type}`} className="flex justify-between">
-                    <span>{entry.event_type}</span>
-                    <span className="text-xs text-slate-400">{entry.count} · {entry.day}</span>
-                  </li>
-                ))}
-              </ul>
+              <div className="mt-3">
+                <CampaignStatusTimelineChart rows={summary?.campaign_status_over_time ?? []} compact limitDays={3} />
+              </div>
             )}
           </div>
 
@@ -142,14 +149,8 @@ export default function AnalyticsSummary() {
               <p className="text-[10px] uppercase tracking-[0.3em] text-slate-400">Campaign conversions</p>
               <span className="text-[10px] text-slate-500">Trends</span>
             </div>
-            <div className="mt-2 space-y-2 text-sm text-slate-200">
-              {(summary?.campaign_conversion_trends ?? []).slice(0, 3).map((row) => (
-                <div key={row.name} className="flex items-center justify-between">
-                  <span>{row.name}</span>
-                  <span className="text-xs text-slate-400">{row.conversion_rate}% ({row.responded}/{row.sent})</span>
-                </div>
-              ))}
-              {!summary?.campaign_conversion_trends?.length && <p className="text-xs text-slate-400">No campaign data</p>}
+            <div className="mt-2">
+              <CampaignConversionChart rows={summary?.campaign_conversion_trends ?? []} compact limit={3} />
             </div>
           </div>
 

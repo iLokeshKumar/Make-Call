@@ -90,7 +90,9 @@ def get_mistral_tools() -> list[dict[str, Any]]:
                     "properties": {
                         "company_size": {"type": "string"},
                         "industry": {"type": "string"},
-                        "employee_count": {"type": "integer"},
+                        # anyOf accepts both integer and string from any LLM.
+                        # Execution coerces via _safe_int_arg regardless of type.
+                        "employee_count": {"anyOf": [{"anyOf": [{"type": "integer"}, {"type": "string"}]}, {"type": "string"}]},
                     },
                     "required": ["company_size", "industry", "employee_count"],
                 },
@@ -132,7 +134,7 @@ def get_mistral_tools() -> list[dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "lead_id": {"type": "integer"},
+                        "lead_id": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                         "proposed_time": {"type": "string"},
                         "meeting_type": {"type": "string"},
                         "lead_email": {"type": "string"},
@@ -149,7 +151,7 @@ def get_mistral_tools() -> list[dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "interaction_id": {"type": "integer"},
+                        "interaction_id": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                     },
                     "required": ["interaction_id"],
                 },
@@ -190,7 +192,7 @@ def get_mistral_tools() -> list[dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "lead_id": {"type": "integer"},
+                        "lead_id": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                         "name": {"type": "string"},
                         "phone": {"type": "string"},
                         "demo_date": {"type": "string"},
@@ -214,7 +216,7 @@ def get_mistral_tools() -> list[dict[str, Any]]:
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "lead_id": {"type": "integer"},
+                        "lead_id": {"anyOf": [{"type": "integer"}, {"type": "string"}]},
                         "channels": {
                             "type": "array",
                             "items": {"type": "string", "enum": ["email", "whatsapp"]},
@@ -250,6 +252,44 @@ def get_mistral_tools() -> list[dict[str, Any]]:
                 },
             },
         },
+        {
+            "type": "function",
+            "function": {
+                "name": "calendar_book",
+                "description": "Book a Google Calendar meeting on behalf of the company. Use this when the customer agrees to schedule a meeting or demo.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {"type": "string", "description": "Meeting title"},
+                        "proposed_time": {"type": "string", "description": "ISO 8601 datetime for the meeting start, e.g. 2024-06-10T15:00:00"},
+                        "duration_minutes": {"type": "integer", "description": "Duration in minutes (default 30)"},
+                        "attendee_email": {"type": "string", "description": "Customer email to invite"},
+                        "notes": {"type": "string", "description": "Optional meeting description or agenda"},
+                    },
+                    "required": ["proposed_time"],
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "warm_transfer",
+                "description": "Transfer the current call to a human agent in a real conference bridge. The customer and the human agent can talk to each other live. Use when the customer asks to speak to a person about pricing, discounts, or escalated issues — and one or more agents are available.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "transfer_to_number": {
+                            "type": "string",
+                            "description": "Optional fallback E.164 phone number only if explicitly provided by system context. The configured Settings number is preferred.",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Brief reason for the transfer (shown to the human agent). Examples: 'customer asked for discount approval', 'escalation — customer is unhappy', 'technical question beyond my knowledge'.",
+                        },
+                    },
+                },
+            },
+        },
     ]
 
 
@@ -258,6 +298,7 @@ async def _execute_with_session(
     tool_name: str,
     arguments: dict[str, Any],
     user_id: int | None,
+    interaction_id: str | None = None,
 ) -> dict[str, Any]:
     if tool_name == "lookup_product":
         tool_name = "get_product_info"
@@ -368,6 +409,82 @@ async def _execute_with_session(
             code=arguments.get("code", ""),
         )
 
+    if tool_name == "calendar_book":
+        try:
+            from routes.calendar import get_company_calendar_credentials
+            from google.oauth2.credentials import Credentials  # type: ignore
+            import googleapiclient.discovery as _gapi  # type: ignore
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            import uuid as _uuid
+
+            creds = get_company_calendar_credentials(session, company_id)
+            if not creds:
+                return {"error": "Google Calendar not connected. Ask the user to connect it in Settings."}
+
+            service = _gapi.build("calendar", "v3", credentials=creds)
+
+            # Parse proposed_time — expect ISO 8601 or human string like "2024-06-10T15:00:00"
+            proposed_time_str = arguments.get("proposed_time", "")
+            try:
+                start = _dt.fromisoformat(proposed_time_str.replace("Z", "+00:00"))
+            except Exception:
+                start = _dt.now(_tz.utc) + _td(hours=24)
+
+            end = start + _td(minutes=int(arguments.get("duration_minutes", 30)))
+
+            event = {
+                "summary": arguments.get("title", "Meeting with AI Agent"),
+                "description": arguments.get("notes", ""),
+                "start": {"dateTime": start.isoformat(), "timeZone": "UTC"},
+                "end": {"dateTime": end.isoformat(), "timeZone": "UTC"},
+            }
+            attendee_email = arguments.get("attendee_email")
+            if attendee_email:
+                event["attendees"] = [{"email": attendee_email}]
+
+            created = service.events().insert(calendarId="primary", body=event, sendUpdates="all").execute()
+            return {
+                "calendar_event_id": created.get("id"),
+                "calendar_link": created.get("htmlLink"),
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+                "status": "booked",
+            }
+        except Exception as exc:
+            logger.error("[calendar_book] Failed: %s", exc, exc_info=True)
+            return {"error": f"Calendar booking failed: {exc}"}
+
+    if tool_name == "warm_transfer":
+        from credentials_service import get_company_setting_value, get_user_setting_value
+
+        user_transfer_to = get_user_setting_value(session, user.id, "WARM_TRANSFER_NUMBER") or ""
+        user_transfer_name = get_user_setting_value(session, user.id, "WARM_TRANSFER_NAME") or ""
+        company_transfer_to = get_company_setting_value(session, company_id, "WARM_TRANSFER_NUMBER") or ""
+        company_transfer_name = get_company_setting_value(session, company_id, "WARM_TRANSFER_NAME") or ""
+        configured_transfer_to = user_transfer_to or company_transfer_to
+        configured_transfer_name = user_transfer_name or company_transfer_name
+        transfer_to = configured_transfer_to
+        reason = arguments.get("reason") or ""
+        if not transfer_to:
+            return {
+                "error": "Warm transfer number is not configured. Add WARM_TRANSFER_NUMBER in Settings > Integration Keys or My Email > My Warm Transfer.",
+                "tool": "warm_transfer",
+            }
+        try:
+            from services.call.warm_transfer_service import execute_warm_transfer
+            interaction_id_int = int(interaction_id) if interaction_id else 0
+            return execute_warm_transfer(
+                session=session,
+                company_id=company_id,
+                actor_user_id=user.id,
+                interaction_id=interaction_id_int,
+                transfer_to=transfer_to,
+                isr_name=configured_transfer_name or reason or None,
+            )
+        except Exception:
+            logger.exception("[warm_transfer] Failed", exc_info=True)
+            return {"error": "Warm transfer failed — please try again.", "tool": "warm_transfer"}
+
     return {
         "error": "Unknown tool",
         "tool": tool_name,
@@ -395,11 +512,11 @@ async def execute_mcp_tool(
         async with asyncio.timeout(30):
             if session is not None:
                 effective_user_id = user_id or getattr(user, "id", None)
-                return await _execute_with_session(session, tool_name, arguments, effective_user_id)
+                return await _execute_with_session(session, tool_name, arguments, effective_user_id, interaction_id=interaction_id)
 
             with Session(engine) as owned_session:
                 effective_user_id = user_id or getattr(user, "id", None)
-                return await _execute_with_session(owned_session, tool_name, arguments, effective_user_id)
+                return await _execute_with_session(owned_session, tool_name, arguments, effective_user_id, interaction_id=interaction_id)
     except asyncio.TimeoutError:
         logger.error("[execute_mcp_tool] Tool '%s' timed out after 30s", tool_name)
         return {"error": f"Tool '{tool_name}' timed out — please try again.", "tool": tool_name}

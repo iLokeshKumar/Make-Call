@@ -1,9 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Pause, Play, Volume2 } from "lucide-react";
 
 import { apiFetch } from "@/utils/apiFetch";
+type Word = { text: string; start: number; end: number };
+
 type TranscriptLine = {
   speaker: "AI" | "User" | string;
   text: string;
@@ -24,8 +26,7 @@ type Props = {
   duration?: number | null;
 };
 
-const DEFAULT_API_BASE =
-  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_API_BASE_URL) || "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 function parseTranscriptLines(raw: string | null | undefined): TranscriptLine[] {
   if (!raw) return [];
@@ -49,19 +50,77 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
   const [currentTime, setCurrentTime] = useState(0);
   const [totalDuration, setTotalDuration] = useState(duration ?? 0);
   const [volume, setVolume] = useState(1);
+  const [playbackRate, setPlaybackRate] = useState(1);
   const [loading, setLoading] = useState(true);
   const [waveformData, setWaveformData] = useState<number[]>([]);
   const [activeLineIndex, setActiveLineIndex] = useState<number>(-1);
+  const [activeWordIndex, setActiveWordIndex] = useState<number>(-1);
   const [effectiveUrl, setEffectiveUrl] = useState<string | null>(null);
   const [fetchError, setFetchError] = useState<string | null>(null);
 
-  const lines = parseTranscriptLines(transcript);
+  const lines = useMemo(() => parseTranscriptLines(transcript), [transcript]);
   const lineCount = lines.length;
+  const [asrSegments, setAsrSegments] = useState<any[]>([]);
 
-  // Annotate lines with approximate timestamps (uniformly distributed over call duration)
-  const annotatedLines = lines.map((l, i) => ({
-    ...l,
-    approxStart: lineCount > 1 ? (i / (lineCount - 1)) * totalDuration : 0 }));
+  // Fetch ASR segments from backend (table-backed). Falls back to metadata_json if not present.
+  useEffect(() => {
+    let cancelled = false;
+    async function fetchSegments() {
+      if (!interactionId) return;
+      try {
+        const base = apiBase ?? API_BASE;
+        const res = await apiFetch(`${base}/crm/interactions/${interactionId}/asr_segments`);
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setAsrSegments(data || []);
+      } catch (e) {
+        // ignore
+      }
+    }
+    fetchSegments();
+    return () => { cancelled = true; };
+  }, [interactionId, apiBase]);
+
+  // Build per-line word timestamps and annotated lines using asrSegments when available
+  const [annotatedLinesState, setAnnotatedLinesState] = useState(() => lines.map((l, i) => ({ ...l, approxStart: lineCount > 1 ? (i / (lineCount - 1)) * totalDuration : 0, words: [] as Word[] })));
+
+  useEffect(() => {
+    // Initialize with approximations
+    let initial = lines.map((l, i) => ({ ...l, approxStart: lineCount > 1 ? (i / (lineCount - 1)) * totalDuration : 0, words: [] as Word[] }));
+    if (asrSegments && asrSegments.length > 0) {
+      // If counts match, map 1:1
+      if (asrSegments.length === lines.length) {
+        initial = lines.map((l, i) => ({
+          ...l,
+          approxStart: asrSegments[i]?.start ?? initial[i].approxStart,
+          words: Array.isArray(asrSegments[i]?.word_json?.words) ? asrSegments[i].word_json.words : [],
+        }));
+      } else {
+        // Try best-effort substring mapping and extract words if present
+        initial = lines.map((l) => {
+          // find the segment with best substring match
+          let best = null;
+          for (const seg of asrSegments) {
+            try {
+              if (!seg || !seg.text) continue;
+              if ((l.text || "").toLowerCase().includes((seg.text || "").toLowerCase())) {
+                best = seg;
+                break;
+              }
+            } catch (e) {}
+          }
+          return {
+            ...l,
+            approxStart: best?.start ?? initial[0].approxStart,
+            words: Array.isArray(best?.word_json?.words) ? best.word_json.words : [],
+          };
+        });
+      }
+    }
+    setAnnotatedLinesState(initial);
+  }, [asrSegments, lines, lineCount, totalDuration]);
+
+  const annotatedLines = annotatedLinesState;
 
   // Resolve the playable URL: either a direct prop, or a blob URL produced by fetching the backend proxy with Bearer auth.
   useEffect(() => {
@@ -69,27 +128,33 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
     let revoke: string | null = null;
 
     async function resolveUrl() {
+      // Prefer backend proxy when interactionId is available to avoid exposing provider URLs
+      if (interactionId) {
+        try {
+          setFetchError(null);
+          const base = apiBase ?? API_BASE;
+          const res = await apiFetch(`${base}/crm/interactions/${interactionId}/recording`, {
+          });
+          if (!res.ok) {
+            setFetchError(res.status === 404 ? "Recording not yet available" : `Failed to load (${res.status})`);
+            return;
+          }
+          const blob = await res.blob();
+          if (cancelled) return;
+          const url = URL.createObjectURL(blob);
+          revoke = url;
+          setEffectiveUrl(url);
+          return;
+        } catch (e) {
+          if (!cancelled) setFetchError(e instanceof Error ? e.message : "Failed to fetch recording");
+          // fallback to direct URL below if available
+        }
+      }
+
+      // Fallback: use provided public recording URL (may require CORS/auth)
       if (recordingUrl) {
         setEffectiveUrl(recordingUrl);
         return;
-      }
-      if (!interactionId ) return;
-      try {
-        setFetchError(null);
-        const base = apiBase ?? DEFAULT_API_BASE;
-        const res = await apiFetch(`${base}/crm/interactions/${interactionId}/recording`, {
-        });
-        if (!res.ok) {
-          setFetchError(res.status === 404 ? "Recording not yet available" : `Failed to load (${res.status})`);
-          return;
-        }
-        const blob = await res.blob();
-        if (cancelled) return;
-        const url = URL.createObjectURL(blob);
-        revoke = url;
-        setEffectiveUrl(url);
-      } catch (e) {
-        if (!cancelled) setFetchError(e instanceof Error ? e.message : "Failed to fetch recording");
       }
     }
 
@@ -107,7 +172,7 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
       const ctx = new AudioCtx();
-      const resp = await apiFetch(effectiveUrl);
+      const resp = await fetch(effectiveUrl as string);
       if (!resp.ok) return;
       const arrayBuf = await resp.arrayBuffer();
       const audioBuf = await ctx.decodeAudioData(arrayBuf);
@@ -175,15 +240,32 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
     const t = audioRef.current?.currentTime ?? 0;
     setCurrentTime(t);
 
-    // Highlight active transcript line
+      // Highlight active transcript line and word (if available)
     let idx = -1;
-    for (let i = annotatedLines.length - 1; i >= 0; i--) {
-      if (t >= (annotatedLines[i].approxStart ?? 0)) {
-        idx = i;
-        break;
+      let wordIdx = -1;
+      for (let i = annotatedLines.length - 1; i >= 0; i--) {
+        const start = annotatedLines[i].approxStart ?? 0;
+        if (t >= start) {
+          idx = i;
+
+          // find active word within the line (word_json.words expected shape: [{text, start, end}])
+          const words = annotatedLines[i].words || [];
+          for (let w = 0; w < words.length; w++) {
+            const word = words[w];
+            const ws = (word.start ?? 0) + (start ?? 0);
+            const we = (word.end ?? 0) + (start ?? 0);
+            if (t >= ws && t <= we) {
+              wordIdx = w;
+              break;
+            }
+          }
+
+          break;
+        }
       }
-    }
-    setActiveLineIndex(idx);
+      setActiveLineIndex(idx);
+      setActiveWordIndex(wordIdx);
+
   }
 
   function togglePlay() {
@@ -207,6 +289,80 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
     audio.currentTime = ratio * totalDuration;
   }
 
+  // Reusable seek helper for transcript clicks
+  function seekToTime(t: number, autoplay = true) {
+    const audio = audioRef.current;
+    if (!audio || typeof t !== "number") return;
+    audio.currentTime = Math.max(0, Math.min(t, totalDuration || audio.duration || 0));
+    if (autoplay) {
+      audio.play().catch(() => {});
+      setPlaying(true);
+    }
+  }
+
+  function seekToWord(lineIndex: number, wordIndex: number) {
+    const line = annotatedLines[lineIndex];
+    if (!line || !line.words || !line.words[wordIndex]) return;
+    const word = line.words[wordIndex];
+    const lineStart = line.approxStart ?? 0;
+    const target = (word.start ?? 0) + lineStart;
+    seekToTime(target, true);
+  }
+
+  const transcriptContainerRef = useRef<HTMLDivElement | null>(null);
+  const lineRefs = useRef<Array<HTMLDivElement | null>>([]);
+
+  // Basic virtualization: render only visible slice based on scroll
+  const [visibleStart, setVisibleStart] = useState(0);
+  const [visibleEnd, setVisibleEnd] = useState(50);
+  const LINE_HEIGHT = 34; // px per transcript line estimate
+
+  useEffect(() => {
+    if (!transcriptContainerRef.current) return;
+    const el = transcriptContainerRef.current;
+    function onScroll() {
+      const scrollTop = el.scrollTop;
+      const height = el.clientHeight;
+      const start = Math.max(0, Math.floor(scrollTop / LINE_HEIGHT) - 5);
+      const end = Math.min(annotatedLines.length, Math.ceil((scrollTop + height) / LINE_HEIGHT) + 5);
+      setVisibleStart(start);
+      setVisibleEnd(end);
+    }
+    el.addEventListener("scroll", onScroll);
+    onScroll();
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [annotatedLines.length]);
+
+  useEffect(() => {
+    if (activeLineIndex >= 0) {
+      const el = lineRefs.current[activeLineIndex - visibleStart];
+      if (el && transcriptContainerRef.current) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  }, [activeLineIndex, visibleStart]);
+
+  async function downloadRecording() {
+    try {
+      if (!interactionId) return;
+      const base = apiBase ?? API_BASE;
+      const res = await apiFetch(`${base}/crm/interactions/${interactionId}/recording`);
+      if (!res.ok) return;
+      const blob = await res.blob();
+      const filename = `recording-${interactionId ?? "unknown"}.mp3`;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      console.error("Download failed", e);
+    }
+  }
+
   function formatTime(s: number) {
     const m = Math.floor(s / 60);
     const sec = Math.floor(s % 60);
@@ -221,11 +377,20 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
           <Volume2 className="h-4 w-4 text-violet-600 dark:text-violet-400" />
         </div>
         <h3 className="font-semibold text-slate-900 dark:text-white">Call Recording</h3>
-        {totalDuration > 0 && (
-          <span className="ml-auto text-xs text-slate-500 dark:text-slate-400">
-            {formatTime(totalDuration)}
-          </span>
-        )}
+        <div className="ml-auto flex items-center gap-2">
+          {totalDuration > 0 && (
+            <span className="text-xs text-slate-500 dark:text-slate-400 mr-2">
+              {formatTime(totalDuration)}
+            </span>
+          )}
+          <button
+            onClick={downloadRecording}
+            aria-label="Download recording"
+            className="text-xs px-2 py-1 rounded-md border border-slate-200 bg-white/50 dark:bg-slate-800/50 hover:bg-slate-100 dark:hover:bg-white/10"
+          >
+            Download
+          </button>
+        </div>
       </div>
 
       {/* Side-by-side on lg+: audio controls left, transcript right.
@@ -265,34 +430,58 @@ export default function WaveformPlayer({ recordingUrl, interactionId, apiBase, t
           </div>
 
           {/* Controls */}
-          <div className="flex items-center gap-3">
-            <button
-              onClick={togglePlay}
-              disabled={loading}
-              className="flex h-10 w-10 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition"
-            >
-              {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
-            </button>
+          <div className="space-y-2">
+            {/* Row 1: play + time + volume */}
+            <div className="flex items-center gap-3">
+              <button
+                onClick={togglePlay}
+                disabled={loading}
+                className="flex h-10 w-10 items-center justify-center rounded-full bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50 transition"
+              >
+                {playing ? <Pause className="h-4 w-4" /> : <Play className="h-4 w-4 ml-0.5" />}
+              </button>
 
-            <span className="text-xs font-mono text-slate-500 dark:text-slate-400 w-20">
-              {formatTime(currentTime)} / {formatTime(totalDuration)}
-            </span>
+              <span className="text-xs font-mono text-slate-500 dark:text-slate-400">
+                {formatTime(currentTime)} / {formatTime(totalDuration)}
+              </span>
 
-            <div className="flex items-center gap-1.5 ml-auto">
-              <Volume2 className="h-3.5 w-3.5 text-slate-400" />
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.05}
-                value={volume}
-                onChange={(e) => {
-                  const v = parseFloat(e.target.value);
-                  setVolume(v);
-                  if (audioRef.current) audioRef.current.volume = v;
-                }}
-                className="w-20 accent-violet-500"
-              />
+              <div className="flex items-center gap-1.5 ml-auto">
+                <Volume2 className="h-3.5 w-3.5 text-slate-400" />
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={volume}
+                  onChange={(e) => {
+                    const v = parseFloat(e.target.value);
+                    setVolume(v);
+                    if (audioRef.current) audioRef.current.volume = v;
+                  }}
+                  className="w-20 accent-violet-500"
+                />
+              </div>
+            </div>
+
+            {/* Row 2: playback speed */}
+            <div className="flex items-center gap-1">
+              <span className="text-[10px] text-slate-400 mr-1">Speed</span>
+              {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
+                <button
+                  key={rate}
+                  onClick={() => {
+                    setPlaybackRate(rate);
+                    if (audioRef.current) audioRef.current.playbackRate = rate;
+                  }}
+                  className={`px-1.5 py-0.5 text-[10px] font-semibold rounded transition ${
+                    playbackRate === rate
+                      ? "bg-violet-600 text-white"
+                      : "text-slate-500 dark:text-slate-400 hover:bg-slate-200 dark:hover:bg-slate-700"
+                  }`}
+                >
+                  {rate}×
+                </button>
+              ))}
             </div>
           </div>
         </div>

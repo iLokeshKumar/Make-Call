@@ -1,15 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
-  Bot, CheckCircle, XCircle, Clock, AlertCircle, AlertTriangle, Loader2,
-  ChevronDown, ChevronUp, RefreshCw, Plus, Ban, ExternalLink, Code2 } from "lucide-react";
+  Bot, CheckCircle, XCircle, Clock, AlertTriangle, Loader2,
+  ChevronDown, ChevronUp, RefreshCw, Ban, ExternalLink, Code2 } from "lucide-react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 // Types
 
@@ -39,6 +39,10 @@ type ApprovalPresentation = {
     body?: string;
     cta?: string | null;
     quote?: string;
+    proposal_id?: number | string;
+    proposal_document_id?: number | string;
+    pdf_path?: string;
+    validation?: Record<string, unknown> | null;
     channels?: string[];
     message?: string;
   };
@@ -326,6 +330,12 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
                 )}
                 {p.preview.quote && (
                   <div><span className="text-slate-500 text-xs">Quote: </span><span className="text-slate-200">{p.preview.quote}</span></div>
+                )}
+                {p.preview.proposal_id && (
+                  <div><span className="text-slate-500 text-xs">Proposal: </span><span className="text-slate-200">#{p.preview.proposal_id}</span></div>
+                )}
+                {p.preview.pdf_path && (
+                  <div><span className="text-slate-500 text-xs">PDF: </span><span className="text-slate-200">{p.preview.pdf_path}</span></div>
                 )}
                 {p.preview.channels && p.preview.channels.length > 0 && (
                   <div><span className="text-slate-500 text-xs">Channels: </span><span className="text-slate-200">{p.preview.channels.join(", ")}</span></div>

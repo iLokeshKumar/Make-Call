@@ -65,7 +65,6 @@ def compute_icp_score(
     score = 0.0
     reasons: list[str] = []
 
-    # Profile completeness
     if lead.email:
         score += 20
         reasons.append("lead_has_email")
@@ -91,7 +90,6 @@ def compute_icp_score(
         score += 15
         reasons.append("already_enriched")
 
-    # Interaction history (shows we've reached them before)
     ic = interaction_counts or {}
     if ic.get("call", 0) >= 1:
         score += 8
@@ -103,7 +101,6 @@ def compute_icp_score(
         score += 6
         reasons.append("prior_email_contact")
 
-    # Engagement signals (they responded/interacted)
     ec = engagement_counts or {}
     if ec.get("reply", 0) >= 1 or ec.get("whatsapp_reply", 0) >= 1:
         score += 10
@@ -137,6 +134,31 @@ def score_lead(session: Session, company_id: int, lead_id: int) -> dict[str, Any
     ).first()
     if not lead:
         return {"error": "Lead not found"}
+
+    # Try ML-powered lead scoring first; fall back to heuristic ICP.
+    try:
+        from services.tabular.lead_scorer import score_lead_ml, invalidate_lead_scorer_cache
+        ml_result = score_lead_ml(session, company_id, lead)
+        if ml_result.get("provider") != "heuristic_baseline":
+            lead.lead_score = Decimal(str(ml_result["score"]))
+            lead.lead_score_reasons_json = {
+                "reasons": ml_result.get("reasons", []),
+                "priority": ml_result.get("priority", "low"),
+            }
+            lead.updated_at = utc_now()
+            session.add(lead)
+            session.commit()
+            session.refresh(lead)
+            return {
+                "lead_id": lead.id,
+                "score": str(lead.lead_score) if lead.lead_score is not None else None,
+                "priority": ml_result.get("priority", "low"),
+                "reasons": ml_result.get("reasons", []),
+                "provider": ml_result.get("provider"),
+                "conversion_probability": ml_result.get("conversion_probability"),
+            }
+    except Exception as exc:
+        logger.debug("[LeadScorer] ML scoring unavailable, using heuristic: %s", exc)
 
     interaction_counts = _fetch_interaction_counts(session, company_id, lead_id)
     engagement_counts = _fetch_engagement_counts(session, company_id, lead_id)

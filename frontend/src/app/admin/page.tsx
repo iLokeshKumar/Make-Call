@@ -5,7 +5,7 @@ import { Loader2, Shield, ShieldCheck, UserCheck, UserX, Plus, X, Check, Edit2 }
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 type AdminUser = {
   id: number;
@@ -502,6 +502,77 @@ function PermissionsTab({ permissions }: { permissions: Permission[] }) {
   );
 }
 
+/* TabPFN training-seed uploader */
+function TabPFNSeedCard({ sessionTimeout, onToast }: {
+  sessionTimeout: () => void;
+  onToast: (msg: string) => void;
+}) {
+  const [file, setFile] = useState<File | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [msgError, setMsgError] = useState(false);
+
+  const upload = async () => {
+    if (!file) return;
+    setUploading(true); setMsg(null); setMsgError(false);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const res = await apiFetch(`${API_BASE}/proposals/tabpfn/seed`, { method: "POST", body: fd });
+      if (res.status === 401) { sessionTimeout(); return; }
+      const body = await res.json().catch(() => null);
+      if (!res.ok) {
+        const detail = body?.detail;
+        throw new Error(typeof detail === "string" ? detail : "Upload failed.");
+      }
+      setMsg(`Ingested ${body?.ingested ?? 0} training rows.`);
+      onToast("TabPFN training data seeded");
+      setFile(null);
+    } catch (e) {
+      setMsgError(true);
+      setMsg(e instanceof Error ? e.message : "Upload failed.");
+    } finally { setUploading(false); }
+  };
+
+  return (
+    <div className="rounded-2xl glass border border-white/40 dark:border-white/10 p-6 space-y-4">
+      <div>
+        <h3 className="text-base font-semibold text-slate-800 dark:text-slate-100">Training Seed</h3>
+        <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+          Upload an Excel sheet of past deals to seed the proposal win-score model. The sheet needs a
+          win/loss column (<code>target</code> / <code>outcome</code> / <code>win</code>) plus any feature
+          columns (<code>deal_size</code>, <code>discount_percent</code>, <code>industry</code>…). Applies company-wide.
+        </p>
+      </div>
+      {msg && (
+        <div className={`rounded-xl px-4 py-2 text-sm ${
+          msgError
+            ? "bg-red-50 text-red-700 border border-red-200 dark:bg-red-500/10 dark:text-red-300 dark:border-red-500/20"
+            : "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20"
+        }`}>
+          {msg}
+        </div>
+      )}
+      <div className="flex flex-wrap items-center gap-3">
+        <input
+          type="file"
+          accept=".xlsx,.xls"
+          onChange={(e) => setFile(e.target.files?.[0] ?? null)}
+          className="text-sm text-slate-600 dark:text-slate-300 file:mr-3 file:rounded-xl file:border-0 file:bg-violet-100 file:px-3 file:py-2 file:text-sm file:font-semibold file:text-violet-700 dark:file:bg-violet-500/10 dark:file:text-violet-300"
+        />
+        <button
+          onClick={upload}
+          disabled={!file || uploading}
+          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-50"
+        >
+          {uploading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+          Upload &amp; Seed
+        </button>
+      </div>
+    </div>
+  );
+}
+
 /* Page */
 export default function AdminPage() {
   const { user, sessionTimeout } = useAuth();
@@ -595,6 +666,8 @@ export default function AdminPage() {
           {activeTab === "Permissions" && <PermissionsTab permissions={permissions} />}
         </>
       )}
+
+      <TabPFNSeedCard sessionTimeout={sessionTimeout} onToast={setToast} />
     </div>
   );
 }

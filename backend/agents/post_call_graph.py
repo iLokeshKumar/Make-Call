@@ -79,6 +79,7 @@ def book_demo_node(state: RioState) -> RioState:
                     questions=state.get("questions_asked", []),
                     icp_score=state.get("icp_score", 0.85),
                     suggested_action="book_demo",
+                    parent_interaction_id=state.get("call_interaction_id"),
                 )
         state["agent_results"]["book_demo"] = {"email_sent": bool(lead_email)}
     except Exception as exc:
@@ -174,6 +175,11 @@ async def run_post_call_workflow(
 
             config = {"configurable": {"thread_id": f"post_call_{company_id}_{lead_id}"}}
             final = await post_call_app.ainvoke(state, config=config)
+            try:
+                from agents.post_call import _schedule_call_eval
+                _schedule_call_eval(company_id, lead_id)
+            except Exception as e_eval:
+                logger.warning("[PostCallGraph] failed to trigger call eval: %s", e_eval)
             return {
                 "lead_id": lead_id,
                 "next_action": final.get("agent_results", {}).get("post_call", {}).get("next", ""),
@@ -190,6 +196,11 @@ async def run_post_call_workflow(
         state = book_demo_node(state)
     else:
         state = nurture_node(state)
+    try:
+        from agents.post_call import _schedule_call_eval
+        _schedule_call_eval(company_id, lead_id)
+    except Exception as e_eval:
+        logger.warning("[PostCallGraph] failed to trigger fallback call eval: %s", e_eval)
     return {
         "lead_id": lead_id,
         "next_action": state.get("agent_results", {}).get("post_call", {}).get("next", ""),

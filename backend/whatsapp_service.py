@@ -14,6 +14,9 @@ def send_whatsapp_message(
     account_sid: str = None,
     auth_token: str = None,
     from_whatsapp_number: str = None,
+    session=None,
+    company_id: int = None,
+    lead_id: int = None,
 ):
     """
     Sends a WhatsApp message using Twilio.
@@ -24,6 +27,21 @@ def send_whatsapp_message(
     - auth_token: Optional Twilio Token (fallback to env)
     - from_whatsapp_number: Optional sender number (fallback to env)
     """
+    # Opt-out enforcement: check before sending if caller provides session context
+    if session is not None and company_id is not None and lead_id is not None:
+        try:
+            from fastapi import HTTPException
+            from services.leads.opt_out_service import is_lead_opted_out
+            if is_lead_opted_out(session, company_id, lead_id, "whatsapp"):
+                raise HTTPException(status_code=400, detail="Lead has opted out of WhatsApp")
+        except Exception as exc:
+            # Re-raise HTTPException, log and block other unexpected errors
+            from fastapi import HTTPException as _HTTPException
+            if isinstance(exc, _HTTPException):
+                raise
+            logger.error("Opt-out check failed: %s", exc)
+            raise
+
     account_sid = account_sid or os.getenv("TWILIO_ACCOUNT_SID")
     auth_token = auth_token or os.getenv("TWILIO_AUTH_TOKEN")
     from_whatsapp_number = from_whatsapp_number or os.getenv("WHATSAPP_NUMBER_FROM", "whatsapp:+14155238886")

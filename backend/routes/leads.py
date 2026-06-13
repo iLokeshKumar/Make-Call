@@ -758,8 +758,9 @@ async def get_best_call_times(
 ):
     """
     Return the top N predicted call windows for this lead, ranked by connection probability.
-    Uses a GradientBoostingClassifier trained on the company's own historical outcomes,
-    falling back to a heuristic frequency table if training data is insufficient.
+    Uses TabPFN-3 (with GradientBoostingClassifier fallback) trained on the company's own
+    historical outcomes, falling back to a heuristic frequency table if training data is
+    insufficient.
     """
     lead = session.exec(
         select(Lead).where(
@@ -1024,4 +1025,72 @@ async def get_lead_context(
         ],
         "opt_out_channels": opt_out_channels,
         "latest_coach_score": latest_coach_score,
+        "proposals": _lead_proposals(session, current_user.company_id, lead_id),
     }
+
+
+def _lead_proposals(session, company_id: int, lead_id: int):
+    """Best-effort proposal list for the lead context payload."""
+    try:
+        from services.proposal.proposal_service import list_proposals
+        return list_proposals(session, company_id, lead_id=lead_id)
+    except Exception:  # noqa: BLE001
+        return []
+
+
+@router.get("/leads/{lead_id}/channel-propensity")
+async def get_channel_propensity(
+    lead_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Predict the best outreach channel for this lead using TabPFN-3."""
+    lead = session.exec(
+        select(Lead).where(
+            Lead.id == lead_id,
+            Lead.company_id == current_user.company_id,
+        )
+    ).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    from services.tabular.channel_scorer import predict_best_channel
+    result = predict_best_channel(session, current_user.company_id, lead)
+    return {"lead_id": lead_id, **result}
+
+
+@router.get("/leads/{lead_id}/churn-risk")
+async def get_churn_risk(
+    lead_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Predict disengagement/churn risk for this lead using TabPFN-3."""
+    lead = session.exec(
+        select(Lead).where(
+            Lead.id == lead_id,
+            Lead.company_id == current_user.company_id,
+        )
+    ).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    from services.tabular.churn_scorer import predict_churn_risk
+    result = predict_churn_risk(session, current_user.company_id, lead)
+    return {"lead_id": lead_id, **result}
+
+
+@router.post("/leads/rescore-batch")
+async def batch_rescore_leads(
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Rescore all unscored leads for this company using ML lead scorer."""
+    from services.leads.demand_generation_service import process_recent_unscored_leads
+    results = process_recent_unscored_leads(
+        session=session,
+        company_id=current_user.company_id,
+        actor_user_id=current_user.id,
+        limit=50,
+    )
+    return {"processed": len(results), "results": results}

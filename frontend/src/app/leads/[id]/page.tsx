@@ -19,6 +19,7 @@ import EmailThread from "@/components/leads/email_thread";
 import CompetitorBadges from "@/components/leads/competitor_badges";
 import EnrichmentTrace from "@/components/leads/enrichment_trace";
 import SalesCoachPanel from "@/components/leads/sales_coach_panel";
+import CallEvalPanel from "@/components/leads/call_eval_panel";
 import BestCallTimes from "@/components/leads/best_call_times";
 import ExplainNextAction from "@/components/leads/explain_next_action";
 import AgentActionsTimeline from "@/components/leads/agent_actions_timeline";
@@ -38,7 +39,7 @@ import {
   formatNextActionLabel,
   humanizeInteractionTitle,
 } from "@/utils/interaction_format";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 function cleanNotes(notes: string | null | undefined): string {
     if (!notes) return "";
@@ -88,6 +89,29 @@ type Requirement = {
   decision_maker?: string | null;
   pain_points?: string | null;
   required_products?: string | null;
+};
+
+type VoiceAgentOption = {
+  agent: {
+    id: number;
+    name: string;
+    is_default: boolean;
+  };
+};
+
+type ProposalSummary = {
+  id: number;
+  status: string;
+  intent_type: string;
+  intent_confidence: number;
+  quote_id?: number | null;
+  quote_number?: string | null;
+  spec?: Record<string, unknown> | null;
+  solution?: Record<string, unknown> | null;
+  validation?: { status?: string; blockers?: string[]; warnings?: string[] } | null;
+  tabular_scores?: Record<string, unknown> | null;
+  document?: { id: number; title?: string; pdf_path?: string | null } | null;
+  created_at: string;
 };
 
 type Interaction = {
@@ -241,6 +265,8 @@ export default function LeadDetailPage() {
   const [callMessage, setCallMessage] = useState<string | null>(null);
   const [callInteractionId, setCallInteractionId] = useState<number | null>(null);
   const [callStatus, setCallStatus] = useState<string | null>(null);
+  const [voiceAgents, setVoiceAgents] = useState<VoiceAgentOption[]>([]);
+  const [selectedVoiceAgentId, setSelectedVoiceAgentId] = useState<string>("");
 
   // Warm transfer state
   const [showTransferModal, setShowTransferModal] = useState(false);
@@ -277,6 +303,12 @@ export default function LeadDetailPage() {
   const [quoteMsg, setQuoteMsg] = useState<string | null>(null);
   const [quoteMsgError, setQuoteMsgError] = useState(false);
 
+  // Proposal / RFQ
+  const [proposals, setProposals] = useState<ProposalSummary[]>([]);
+  const [proposalBusy, setProposalBusy] = useState(false);
+  const [proposalMsg, setProposalMsg] = useState<string | null>(null);
+  const [proposalMsgError, setProposalMsgError] = useState(false);
+
   const queryClient = useQueryClient();
   const contextQuery = useQuery({
     queryKey: ["lead-context", leadId],
@@ -287,6 +319,39 @@ export default function LeadDetailPage() {
       if (!res.ok) throw new Error("Lead not found or you do not have access to it.");
       return res.json();
     },
+  });
+
+  const dealTimelineQuery = useQuery({
+    queryKey: ["deal-timeline", leadId],
+    enabled: !!user && !!leadId,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/deal-timeline`);
+      if (res.ok) {
+        const data = await res.json();
+        return data.events || [];
+      }
+      return [];
+    }
+  });
+
+  const propensityQuery = useQuery({
+    queryKey: ["channel-propensity", leadId],
+    enabled: !!user && !!leadId,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/channel-propensity`);
+      if (res.ok) return res.json();
+      return null;
+    }
+  });
+
+  const churnQuery = useQuery({
+    queryKey: ["churn-risk", leadId],
+    enabled: !!user && !!leadId,
+    queryFn: async () => {
+      const res = await apiFetch(`${API_BASE}/crm/leads/${leadId}/churn-risk`);
+      if (res.ok) return res.json();
+      return null;
+    }
   });
 
   useEffect(() => {
@@ -307,22 +372,16 @@ export default function LeadDetailPage() {
     setInteractions(Array.isArray(ctx.interactions) ? ctx.interactions : []);
     setTasks(Array.isArray(ctx.tasks) ? ctx.tasks : []);
 
-    const dealEvents: DealEvent[] = [];
-    for (const q of ctx.quotes ?? []) {
-      dealEvents.push({ kind: "quote", ...q });
-    }
-    for (const a of ctx.appointments ?? []) {
-      dealEvents.push({
-        kind: "appointment", id: a.id,
-        date: a.appointment_time, status: a.status,
-        demo_type: "Demo", products: null, location: null,
-        notes: a.notes, meeting_link: null });
-    }
-    dealEvents.sort((a, b) => (a.date || "").localeCompare(b.date || ""));
-    setDealTimeline(dealEvents);
     setFeedbackItems(Array.isArray(ctx.feedback) ? ctx.feedback : []);
+    setProposals(Array.isArray(ctx.proposals) ? ctx.proposals : []);
     setLoading(false);
   }, [user, leadId, contextQuery.data, contextQuery.isLoading, contextQuery.error, sessionTimeout]);
+
+  useEffect(() => {
+    if (dealTimelineQuery.data) {
+      setDealTimeline(dealTimelineQuery.data);
+    }
+  }, [dealTimelineQuery.data]);
 
   useEffect(() => {
     if (!lead) return;
@@ -336,6 +395,19 @@ export default function LeadDetailPage() {
     setPincodeDraft(lead.pincode || "");
     setGstNumberDraft(lead.gst_number || "");
   }, [lead]);
+
+  useEffect(() => {
+    if (!user) return;
+    apiFetch(`${API_BASE}/crm/voice-agents`)
+      .then((res) => (res.ok ? res.json() : []))
+      .then((data: VoiceAgentOption[]) => {
+        const items = Array.isArray(data) ? data : [];
+        setVoiceAgents(items);
+        const defaultAgent = items.find((item) => item.agent.is_default);
+        if (defaultAgent) setSelectedVoiceAgentId(String(defaultAgent.agent.id));
+      })
+      .catch(() => setVoiceAgents([]));
+  }, [user]);
 
   const aiQuery = useQuery<{ summary: string }>({
     queryKey: ["ai-insights", leadId],
@@ -729,6 +801,50 @@ export default function LeadDetailPage() {
     finally { setQuoteSaving(false); }
   }
 
+  async function proposalErrorMessage(res: Response, fallback: string): Promise<string> {
+    const body = await res.json().catch(() => null);
+    const detail = body?.detail;
+    if (typeof detail === "string") return detail;
+    if (detail && typeof detail === "object" && typeof detail.message === "string") return detail.message;
+    return fallback;
+  }
+
+  async function handleGenerateProposal() {
+    if (!user || !lead) return;
+    setProposalBusy(true); setProposalMsg(null); setProposalMsgError(false);
+    try {
+      const res = await apiFetch(`${API_BASE}/proposals/draft`, {
+        method: "POST",
+        body: JSON.stringify({ lead_id: lead.id }),
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) throw new Error(await proposalErrorMessage(res, "Could not generate proposal."));
+      setProposalMsg("Proposal drafted successfully.");
+      queryClient.invalidateQueries({ queryKey: ["lead-context", leadId] });
+    } catch (e) {
+      setProposalMsgError(true);
+      setProposalMsg(e instanceof Error ? e.message : "Could not generate proposal.");
+    } finally { setProposalBusy(false); }
+  }
+
+  async function handleSendProposal(proposalId: number) {
+    if (!user) return;
+    setProposalBusy(true); setProposalMsg(null); setProposalMsgError(false);
+    try {
+      const res = await apiFetch(`${API_BASE}/proposals/${proposalId}/send`, {
+        method: "POST",
+        body: JSON.stringify({ channels: ["email"] }),
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) throw new Error(await proposalErrorMessage(res, "Could not queue proposal send."));
+      setProposalMsg("Proposal send queued for approval.");
+      queryClient.invalidateQueries({ queryKey: ["lead-context", leadId] });
+    } catch (e) {
+      setProposalMsgError(true);
+      setProposalMsg(e instanceof Error ? e.message : "Could not send proposal.");
+    } finally { setProposalBusy(false); }
+  }
+
   async function handleCall() {
     if (!user || !lead?.normalized_phone) return;
 
@@ -737,7 +853,7 @@ export default function LeadDetailPage() {
     setCallStatus(null);
     try {
       const response = await apiFetch(
-        `${API_BASE}/make-call?to=${encodeURIComponent(lead.normalized_phone)}&lead_id=${lead.id}`,
+        `${API_BASE}/make-call?to=${encodeURIComponent(lead.normalized_phone)}&lead_id=${lead.id}${selectedVoiceAgentId ? `&agent_id=${selectedVoiceAgentId}` : ""}`,
         {
           method: "POST"
         }
@@ -1264,6 +1380,25 @@ export default function LeadDetailPage() {
         </div>
       </div>
 
+      {voiceAgents.length > 0 && (
+        <div className="mb-4 rounded-2xl border border-white/40 bg-white/70 px-4 py-3 dark:border-white/10 dark:bg-slate-900/70">
+          <label className="flex flex-col gap-2 text-sm text-slate-600 dark:text-slate-300 md:flex-row md:items-center">
+            <span className="font-medium">Voice agent</span>
+            <select
+              value={selectedVoiceAgentId}
+              onChange={(e) => setSelectedVoiceAgentId(e.target.value)}
+              className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 dark:border-slate-700 dark:bg-slate-950 dark:text-slate-100"
+            >
+              {voiceAgents.map((item) => (
+                <option key={item.agent.id} value={item.agent.id}>
+                  {item.agent.name}{item.agent.is_default ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
+          </label>
+        </div>
+      )}
+
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">
         <div className="space-y-6 xl:col-span-1">
           <LeadProfileCard
@@ -1308,6 +1443,88 @@ export default function LeadDetailPage() {
               leadId={leadId}
               onSessionTimeout={sessionTimeout}
             />
+          </CollapsibleSection>
+
+          {/* AI Predictive Insights */}
+          <CollapsibleSection title="AI Tabular Insights" icon={Brain}>
+            <div className="space-y-5 text-sm p-1">
+              <div>
+                <span className="text-xs font-semibold text-slate-400 block uppercase tracking-wider mb-2">Outreach Channel Propensity</span>
+                {propensityQuery.isLoading ? (
+                  <div className="flex items-center text-xs text-slate-450"><Loader2 className="h-3 w-3 animate-spin mr-1.5" /> Predicting channel...</div>
+                ) : propensityQuery.data ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-650 dark:text-slate-350">Best Channel:</span>
+                      <span className="px-2 py-0.5 rounded text-xs font-bold uppercase bg-violet-100 text-violet-750 dark:bg-violet-950/40 dark:text-violet-350">
+                        {propensityQuery.data.best_channel || "call"}
+                      </span>
+                    </div>
+                    {propensityQuery.data.channel_ranking && (
+                      <div className="flex flex-wrap gap-1.5 items-center mt-1">
+                        <span className="text-[10px] text-slate-400">Ranking:</span>
+                        {propensityQuery.data.channel_ranking.map((ch: string, idx: number) => (
+                          <span key={ch} className="px-1.5 py-0.5 rounded bg-slate-100 dark:bg-slate-800 text-[10px] font-mono text-slate-605 dark:text-slate-350">
+                            {idx + 1}. {ch}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                    {propensityQuery.data.confidences && Object.keys(propensityQuery.data.confidences).length > 0 && (
+                      <div className="space-y-1.5 mt-2 bg-slate-50/50 dark:bg-slate-900/20 p-2.5 rounded-lg border border-slate-150 dark:border-slate-800/80">
+                        {Object.entries(propensityQuery.data.confidences).map(([ch, prob]: any) => (
+                          <div key={ch} className="flex items-center justify-between text-[11px] font-mono">
+                            <span className="capitalize">{ch}:</span>
+                            <span className="font-semibold text-slate-700 dark:text-slate-200">{(prob * 100).toFixed(1)}%</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-xs text-slate-405">No channel predictions available</span>
+                )}
+              </div>
+
+              <div className="border-t border-slate-150 dark:border-slate-800/80 pt-3">
+                <span className="text-xs font-semibold text-slate-400 block uppercase tracking-wider mb-2">Disengagement / Churn Risk</span>
+                {churnQuery.isLoading ? (
+                  <div className="flex items-center text-xs text-slate-450"><Loader2 className="h-3 w-3 animate-spin mr-1.5" /> Evaluating risk...</div>
+                ) : churnQuery.data ? (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-650 dark:text-slate-350">Risk Level:</span>
+                      <span className={`px-2 py-0.5 rounded text-xs font-bold uppercase ${
+                        churnQuery.data.churn_risk_label === "high"
+                          ? "bg-rose-105 text-rose-700 dark:bg-rose-900/30 dark:text-rose-350"
+                          : churnQuery.data.churn_risk_label === "medium"
+                          ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300"
+                          : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
+                      }`}>
+                        {churnQuery.data.churn_risk_label || "low"}
+                      </span>
+                    </div>
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-semibold text-slate-650 dark:text-slate-350">Disengagement Prob:</span>
+                      <span className="font-bold text-xs font-mono">
+                        {((churnQuery.data.disengagement_risk ?? 0) * 100).toFixed(1)}%
+                      </span>
+                    </div>
+                    {churnQuery.data.reasons && (
+                      <div className="flex flex-wrap gap-1 mt-1.5">
+                        {churnQuery.data.reasons.map((r: string, idx: number) => (
+                          <span key={idx} className="px-1.5 py-0.5 rounded bg-slate-50 dark:bg-slate-850 text-[10px] font-mono text-slate-500">
+                            {r}
+                          </span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ) : (
+                  <span className="text-xs text-slate-405">No disengagement risk computed</span>
+                )}
+              </div>
+            </div>
           </CollapsibleSection>
 
           {/* Sales Intelligence */}
@@ -1583,6 +1800,151 @@ export default function LeadDetailPage() {
             )}
           </CollapsibleSection>
 
+          <CollapsibleSection title="Proposal / RFQ" icon={FileText} defaultOpen={proposals.length > 0}>
+            <div className="mb-4 flex items-center justify-between gap-3">
+              <p className="text-xs text-slate-500 dark:text-slate-400">
+                AI proposal: requirement → solution → pricing → validation → Score.
+              </p>
+              <button
+                type="button"
+                onClick={handleGenerateProposal}
+                disabled={proposalBusy}
+                className="inline-flex flex-shrink-0 items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
+              >
+                {proposalBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Plus className="h-3.5 w-3.5" />}
+                Generate Proposal
+              </button>
+            </div>
+
+            {proposalMsg && (
+              <div className={`mb-3 rounded-xl px-4 py-2 text-sm ${
+                proposalMsgError
+                  ? "bg-red-50 text-red-700 border border-red-200 dark:bg-red-500/10 dark:text-red-300 dark:border-red-500/20"
+                  : "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/10 dark:text-emerald-300 dark:border-emerald-500/20"
+              }`}>
+                {proposalMsg}
+              </div>
+            )}
+
+            {proposals.length === 0 ? (
+              <p className="text-sm text-slate-400">No proposal yet. Generate one from the lead&apos;s requirement.</p>
+            ) : (() => {
+              const p = proposals[0];
+              const spec = (p.spec || {}) as Record<string, unknown>;
+              const solution = (p.solution || {}) as Record<string, unknown>;
+              const validation: { status?: string; blockers?: string[]; warnings?: string[] } = p.validation || {};
+              const scores = (p.tabular_scores || {}) as Record<string, unknown>;
+              const blocked = validation.status === "blocked";
+              const items = Array.isArray(solution.recommended_items) ? (solution.recommended_items as Record<string, unknown>[]) : [];
+              const winPct = typeof scores.win_probability === "number" ? Math.round(scores.win_probability * 100) : null;
+              return (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="rounded-full bg-violet-100 px-3 py-1 text-xs font-semibold text-violet-700 dark:bg-violet-500/10 dark:text-violet-300">
+                      {(p.intent_type || "quote").toUpperCase()} · {Math.round((p.intent_confidence || 0) * 100)}% confidence
+                    </span>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${
+                      blocked
+                        ? "bg-red-100 text-red-700 dark:bg-red-500/10 dark:text-red-300"
+                        : "bg-emerald-100 text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300"
+                    }`}>
+                      {p.status}
+                    </span>
+                    {p.quote_number && (
+                      <span className="rounded-full bg-amber-100 px-3 py-1 text-xs font-semibold text-amber-700 dark:bg-amber-500/10 dark:text-amber-300">
+                        Quote {p.quote_number}
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="rounded-xl border border-slate-200 p-3 dark:border-white/10">
+                    <p className="mb-1 text-xs font-semibold text-slate-600 dark:text-slate-400">Requirement</p>
+                    <p className="text-sm text-slate-700 dark:text-slate-300">
+                      {String(spec.required_products || spec.buyer_problem || "—")}
+                    </p>
+                    {Array.isArray(spec.missing_fields) && (spec.missing_fields as string[]).length > 0 && (
+                      <p className="mt-1 text-xs text-amber-600 dark:text-amber-400">
+                        Missing: {(spec.missing_fields as string[]).join(", ")}
+                      </p>
+                    )}
+                  </div>
+
+                  {items.length > 0 && (
+                    <div className="rounded-xl border border-slate-200 p-3 dark:border-white/10">
+                      <p className="mb-2 text-xs font-semibold text-slate-600 dark:text-slate-400">Recommended Solution</p>
+                      <ul className="space-y-1">
+                        {items.map((it, idx) => {
+                          const matched = it.matched as Record<string, unknown> | null | undefined;
+                          return (
+                            <li key={idx} className="flex items-center justify-between gap-2 text-sm">
+                              <span className="text-slate-700 dark:text-slate-300">
+                                {matched
+                                  ? `${matched.name} ×${matched.quantity}`
+                                  : `${it.requested} (no catalog match)`}
+                              </span>
+                              {matched && (
+                                <span className="flex-shrink-0 tabular-nums text-slate-500">
+                                  {String(matched.currency || "")} {String(matched.unit_price ?? "")}
+                                </span>
+                              )}
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+
+                  {((validation.blockers?.length ?? 0) > 0 || (validation.warnings?.length ?? 0) > 0) && (
+                    <div className="space-y-1 rounded-xl border border-slate-200 p-3 dark:border-white/10">
+                      {(validation.blockers || []).map((b, i) => (
+                        <p key={`b${i}`} className="text-xs text-red-600 dark:text-red-400">⛔ {b}</p>
+                      ))}
+                      {(validation.warnings || []).map((w, i) => (
+                        <p key={`w${i}`} className="text-xs text-amber-600 dark:text-amber-400">⚠ {w}</p>
+                      ))}
+                    </div>
+                  )}
+
+                  <div className="rounded-xl border border-slate-200 p-3 dark:border-white/10">
+                    <p className="mb-1 text-xs font-semibold text-slate-600 dark:text-slate-400">Win Score</p>
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl font-bold text-violet-600 dark:text-violet-300">
+                        {winPct !== null ? `${winPct}%` : "—"}
+                      </span>
+                      <div className="text-xs text-slate-500">
+                        <p>Pricing risk: {String(scores.pricing_risk || "—")}</p>
+                        <p>
+                          Provider: {String(scores.provider || "—")}
+                          {scores.fallback_reason ? ` (${String(scores.fallback_reason)})` : ""}
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap gap-2">
+                    <a
+                      href={`${API_BASE}/proposals/${p.id}/pdf`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-violet-400 hover:text-violet-600 dark:border-white/10 dark:text-slate-300"
+                    >
+                      <FileText className="h-3.5 w-3.5" /> Download PDF
+                    </a>
+                    <button
+                      type="button"
+                      onClick={() => handleSendProposal(p.id)}
+                      disabled={proposalBusy || blocked}
+                      title={blocked ? "Proposal is blocked by validation" : undefined}
+                      className="inline-flex items-center gap-1.5 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 disabled:opacity-60"
+                    >
+                      <Send className="h-3.5 w-3.5" /> Send Proposal
+                    </button>
+                  </div>
+                </div>
+              );
+            })()}
+          </CollapsibleSection>
+
           <CollapsibleSection title="Add Manual Note" icon={Edit3}>
             <p className="mb-3 text-sm text-slate-500 dark:text-slate-400">Keep your team in sync by quickly logging insights.</p>
             <textarea
@@ -1745,6 +2107,10 @@ export default function LeadDetailPage() {
                               : <p className="text-xs text-slate-500 italic">No transcript recorded for this call.</p>
                             }
                             <SalesCoachPanel
+                              interactionId={ci.id}
+                              onSessionTimeout={sessionTimeout}
+                            />
+                            <CallEvalPanel
                               interactionId={ci.id}
                               onSessionTimeout={sessionTimeout}
                             />

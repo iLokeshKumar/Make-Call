@@ -13,9 +13,9 @@ logger = logging.getLogger(__name__)
 class SmallestTTS:
     def __init__(self, api_key: str = None, voice_id: str = None, model: str = None):
         self.provider = "Smallest"
-        self.model = model or "lightning-v3.1"
+        self.model = model or "lightning_v3.1_pro"
         self.api_key = api_key or os.getenv("SMALLEST_API_KEY")
-        self.voice_id = voice_id or "magnus"
+        self.voice_id = voice_id or "meher"
         self.sample_rate = 24000
         self.last_latency = 0.0
 
@@ -31,12 +31,13 @@ class SmallestTTS:
         first_byte_time = 0.0
         ctx = context_id or f"ctx_{int(time.time() * 1000)}"
 
-        ws_url = f"wss://api.smallest.ai/waves/v1/{self.model}/get_speech/stream"
+        ws_url = "wss://api.smallest.ai/waves/v1/tts/live"
         headers = {"Authorization": f"Bearer {self.api_key}"}
 
         payload = {
             "text": text,
             "voice_id": self.voice_id,
+            "model": self.model,
             "sample_rate": self.sample_rate,
             "context_id": ctx,
         }

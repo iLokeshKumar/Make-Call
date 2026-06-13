@@ -37,8 +37,10 @@ async def run(
     body: str = "",
     cta_url: str = "",
     cta_label: str = "",
-    # send_quote payload
+    # send_quote / send_proposal payload
     quote_id: int | None = None,
+    proposal_id: int | None = None,
+    proposal_document_id: int | None = None,
     channels: list | None = None,
     message: str | None = None,
     **_unused: Any,    # absorb any extra keys without crashing
@@ -63,6 +65,8 @@ async def run(
                     "cta_url": cta_url,
                     "cta_label": cta_label,
                     "quote_id": quote_id,
+                    "proposal_id": proposal_id,
+                    "proposal_document_id": proposal_document_id,
                     "channels": channels,
                     "message": message,
                 }
@@ -99,6 +103,15 @@ def _handle_send_email(session, company_id, actor_user_id, lead_id, payload) -> 
 
 def _handle_send_whatsapp(session, company_id, actor_user_id, lead_id, payload) -> dict:
     from services.communication.communication_service import send_whatsapp_to_lead
+    from services.leads.opt_out_service import is_lead_opted_out
+
+    # Enforce opt-out before dispatching any WhatsApp message
+    if lead_id is not None and is_lead_opted_out(session, company_id, lead_id, "whatsapp"):
+        logger.warning(
+            "[send_agent] WhatsApp blocked — lead %s opted out (company=%s)", lead_id, company_id
+        )
+        return {"ok": False, "error": "Lead has opted out of WhatsApp", "channel": "whatsapp"}
+
     # communication_service accepts `body` (not `message`) — stay consistent
     body = payload["body"] or payload["message"] or ""
     result = send_whatsapp_to_lead(
@@ -128,8 +141,59 @@ def _handle_send_quote(session, company_id, actor_user_id, lead_id, payload) -> 
     return {"ok": True, "channel": "quote", "result": result}
 
 
+def _handle_send_proposal(session, company_id, actor_user_id, lead_id, payload) -> dict:
+    from services.communication.communication_service import send_quote_to_lead
+    from services.proposal.proposal_service import mark_proposal_sent
+    from services.quote.quote_service import mark_quote_status
+    from models.models import ProposalDocument
+
+    if payload["proposal_id"] is None:
+        return {"ok": False, "error": "send_proposal requires proposal_id"}
+    if payload["quote_id"] is None:
+        return {"ok": False, "error": "send_proposal requires quote_id"}
+
+    channels = payload["channels"] or ["email"]
+    attachment_paths: list[str] = []
+    if payload["proposal_document_id"] is not None:
+        doc = session.get(ProposalDocument, payload["proposal_document_id"])
+        if doc and doc.company_id == company_id and doc.pdf_path:
+            attachment_paths.append(doc.pdf_path)
+    result = send_quote_to_lead(
+        session=session,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        quote_id=payload["quote_id"],
+        channels=channels,
+        subject=payload["subject"] or None,
+        message=payload["message"],
+        attachment_paths=attachment_paths,
+    )
+    mark_proposal_sent(
+        session=session,
+        company_id=company_id,
+        proposal_id=payload["proposal_id"],
+        document_id=payload["proposal_document_id"],
+        actor_user_id=actor_user_id,
+    )
+    mark_quote_status(
+        session=session,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        quote_id=payload["quote_id"],
+        status="sent",
+    )
+    return {
+        "ok": True,
+        "channel": "proposal",
+        "proposal_id": payload["proposal_id"],
+        "proposal_document_id": payload["proposal_document_id"],
+        "result": result,
+    }
+
+
 _HANDLERS = {
     "send_email": _handle_send_email,
     "send_whatsapp": _handle_send_whatsapp,
     "send_quote": _handle_send_quote,
+    "send_proposal": _handle_send_proposal,
 }

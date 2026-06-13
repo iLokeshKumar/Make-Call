@@ -30,6 +30,7 @@ def enqueue_email(
     body: str,
     html_body: str | None,
     company_name: str | None = None,
+    attachment_paths: list[str] | None = None,
     feedback_id: int | None = None,
     dedupe_key: str | None = None,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
@@ -60,6 +61,7 @@ def enqueue_email(
         body=body,
         html_body=html_body,
         company_name=company_name,
+        attachment_paths=attachment_paths,
         status="pending",
         attempts=0,
         max_attempts=max_attempts,
@@ -134,6 +136,7 @@ def process_outbox_batch(
                 body=item.body,
                 html_body=item.html_body,
                 company_name=item.company_name or "Rio CRM",
+                attachment_paths=item.attachment_paths or [],
                 **smtp_kwargs,
             )
             item.status = "sent"

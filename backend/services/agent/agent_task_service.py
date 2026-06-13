@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 _DEFAULT_APPROVAL_REQUIRED: set[str] = {
     "send_email",
     "send_quote",
+    "send_proposal",
     "send_whatsapp_bulk",
     # closer agent escalates to a human when it can't drive a deal to close_won on its own. The handoff task carries the negotiation summary; a human reviewer sees it in /agents/approvals.
     "handoff",

@@ -14,8 +14,11 @@ Usage:
         interaction_id="42",
         lead_id=7,
         lead_name="Ramesh Kumar",
-        status="ringing",       # "ringing" | "connected" | "ended"
-        outcome=None,           # set only on "ended"
+        status="ringing",       # pre-call: "queued" | "scheduled" | "prepared" | "initiated" | "ringing"
+                                # active:   "in_progress" | "connected"
+                                # terminal: "ended"
+        outcome=None,           # set only on "ended": "completed" | "failed" | "busy" | "no_answer"
+                                #   | "cancelled" | "error" | "low_balance" | "stopped"
     )
 """
 from __future__ import annotations

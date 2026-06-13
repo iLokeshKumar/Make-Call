@@ -25,7 +25,11 @@ MAX_UTTERANCE_MS = 6000          # force a final even without a silence gap
 class GroqSTT:
     def __init__(self, api_key: str = None, model: str = None):
         self.provider = "Groq"
-        self.model = model or "whisper-large-v3-turbo"
+        self.model = "whisper-large-v3-turbo"
+        # model param repurposed as language code (e.g. "hi", "ta", "auto")
+        self.language = (model or "auto") if model and not model.startswith("whisper") else "auto"
+        if model and model.startswith("whisper"):
+            self.model = model
         self.api_key = api_key
         self.client = Groq(api_key=self.api_key) if self.api_key else None
 
@@ -51,12 +55,11 @@ class GroqSTT:
         file_obj = ("audio.wav", wav_bytes)
 
         def _call() -> Any:
-            return self.client.audio.transcriptions.create(
-                model=self.model,
-                file=file_obj,
-                response_format="verbose_json",
-                language="en",
-            )
+            kwargs: dict = dict(model=self.model, file=file_obj, response_format="verbose_json")
+            lang = getattr(self, "language", "auto")
+            if lang and lang not in ("auto", ""):
+                kwargs["language"] = lang
+            return self.client.audio.transcriptions.create(**kwargs)
 
         result = await asyncio.to_thread(_call)
         text = getattr(result, "text", None)

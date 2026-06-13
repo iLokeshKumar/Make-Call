@@ -37,7 +37,23 @@ logger = logging.getLogger(__name__)
 
 # Agent registry — maps name -> importable module
 
+# Agent module registry — maps agent name -> importable module path.
+#
+# Three categories (only Category A agents are wired into the LangGraph StateGraph
+# via _build_orchestrator_graph/_make_node; Categories B and C dispatch through
+# run_agent() → inspect.signature(mod.run)):
+#
+# A. LangGraph ReAct agents (also in supervisor AGENT_LIST, have create_agent(llm)):
+#    knowledge, enrichment, researcher, post_call, coach, ism,
+#    campaign, quote, proposal, analytics
+#
+# B. Legacy non-LLM side-effecting agents (procedural async def run(session, task)):
+#    send, webhook_sink, webhook_handlers, outreacher, closer, reply_classifier
+#
+# C. Phase 7 workflow/policy agents (procedural async def run(session, task), no LLM):
+#    gsm, gsm_manager, purchase, scm, service, installation, finance, ism_manager
 _AGENT_MODULES: dict[str, str] = {
+    # ── A. LangGraph ReAct (supervisor-routed, LLM-driven) ──────────────────
     "knowledge":  "agents.knowledge",
     "enrichment": "agents.enrichment",
     "researcher": "agents.researcher",
@@ -46,20 +62,27 @@ _AGENT_MODULES: dict[str, str] = {
     "ism":        "agents.ism",
     "campaign":   "agents.campaign",
     "quote":      "agents.quote",
+    "proposal":   "agents.proposal",
     "analytics":  "agents.analytics",
-    # Side-effecting send executor — invoked by the worker when it claims an
-    # AgentTask with assigned_agent="send". Not LLM-driven; just dispatches
-    # to communication_service based on task_type.
+    # ── B. Legacy non-LLM (worker-dispatched, side-effecting) ───────────────
+    # send: dispatches to communication_service based on AgentTask.task_type
     "send":       "agents.send",
-    # Webhook audit sink — Phase 1 no-op; Phase 2 (Week 3+) replaces with
-    # per-event-type handlers reading from AgentTask.input_json["payload"].
+    # webhook_sink/handlers: audit sink; handlers read AgentTask.input_json["payload"]
     "webhook_sink": "agents.webhook_sink",
     "webhook_handlers": "agents.webhook_handlers",
-    # Week 7 — three-agent split. outreacher + closer carry ISM dispatch + deal
-    # closure; reply_classifier buckets inbound replies into roadmap intents.
+    # outreacher/closer: ISM dispatch + deal closure; reply_classifier: buckets inbound replies
     "outreacher":       "agents.outreacher",
     "closer":           "agents.closer",
     "reply_classifier": "agents.reply_classifier",
+    # ── C. Phase 7 workflow/policy agents (procedural, no LLM calls) ────────
+    "gsm":          "agents.gsm",
+    "gsm_manager":  "agents.gsm_manager",
+    "purchase":     "agents.purchase",
+    "scm":          "agents.scm",
+    "service":      "agents.service_agent",
+    "installation": "agents.installation",
+    "finance":      "agents.finance",
+    "ism_manager":  "agents.ism_manager",
 }
 
 

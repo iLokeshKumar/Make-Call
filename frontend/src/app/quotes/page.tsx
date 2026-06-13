@@ -11,7 +11,8 @@ import {
   Send,
   Trash2,
   XCircle,
-  DollarSign } from "lucide-react";
+  DollarSign,
+  ShoppingBag } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
@@ -351,6 +352,26 @@ export default function QuotesPage() {
       showToast(e instanceof Error ? e.message : `Action failed`, true);
     } finally {
       setActionLoading((a) => ({ ...a, [id]: { ...a[id], [action]: false } }));
+    }
+  }
+
+  async function handleConvertToOrder(id: number) {
+    setActionLoading((a) => ({ ...a, [id]: { ...a[id], convertToOrder: true } }));
+    try {
+      const res = await apiFetch(`${API_BASE}/crm/orders/from-quote/${id}`, {
+        method: "POST"
+      });
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || "Failed to convert quote to order");
+      }
+      showToast("Quote converted to order successfully!");
+      fetchQuotes();
+    } catch (e) {
+      showToast(e instanceof Error ? e.message : "Conversion failed", true);
+    } finally {
+      setActionLoading((a) => ({ ...a, [id]: { ...a[id], convertToOrder: false } }));
     }
   }
 
@@ -790,6 +811,22 @@ export default function QuotesPage() {
                                 <Loader2 className="h-4 w-4 animate-spin" />
                               ) : (
                                 <XCircle className="h-4 w-4" />
+                              )}
+                            </button>
+                          )}
+
+                          {/* Close & Order — if accepted */}
+                          {quote.status === "accepted" && (
+                            <button
+                              title="Close & Convert to Order"
+                              onClick={() => handleConvertToOrder(quote.id)}
+                              disabled={actionLoading[quote.id]?.convertToOrder}
+                              className="rounded-lg p-1.5 text-indigo-500 hover:bg-indigo-50 hover:text-indigo-700 disabled:opacity-50 dark:hover:bg-indigo-500/10"
+                            >
+                              {actionLoading[quote.id]?.convertToOrder ? (
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                              ) : (
+                                <ShoppingBag className="h-4 w-4" />
                               )}
                             </button>
                           )}

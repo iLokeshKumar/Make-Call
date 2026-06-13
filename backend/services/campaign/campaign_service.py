@@ -8,6 +8,9 @@ from fastapi import HTTPException
 from sqlalchemy import or_
 from sqlmodel import Session, select
 
+import os
+import random
+
 from models.models import (
     Campaign,
     CampaignCreate,
@@ -16,6 +19,8 @@ from models.models import (
     CampaignStepCreate,
     CampaignStepUpdate,
     CampaignStepsReorder,
+    Company,
+    Interaction,
     Lead,
     User,
     utc_now,
@@ -37,6 +42,7 @@ def create_campaign(
     campaign = Campaign(
         company_id=company_id,
         name=data.name.strip(),
+        agent_id=data.agent_id,
         channel=data.channel.strip().lower(),
         objective=data.objective.strip().lower(),
         description=data.description,
@@ -488,11 +494,13 @@ def process_campaign_call_step(
     if step.channel != "call":
         raise HTTPException(status_code=400, detail="Current campaign step is not a call step")
 
+    campaign = get_campaign_or_404(session, company_id, recipient.campaign_id)
     call_task = create_call_task(
         session=session,
         company_id=company_id,
         actor_user_id=actor_user_id,
         lead_id=recipient.lead_id,
+        agent_id=campaign.agent_id,
         campaign_id=recipient.campaign_id,
         campaign_step_id=step.id,
         assigned_user_id=assigned_user_id,
@@ -656,6 +664,14 @@ def execute_campaign_recipient_step(
             campaign_recipient_id=recipient.id,
         )
 
+    if step.channel == "email":
+        return process_campaign_email_step(
+            session=session,
+            company_id=recipient.company_id,
+            actor_user_id=actor_user_id,
+            recipient_id=recipient.id,
+        )
+
     if not step.template_id:
         raise HTTPException(status_code=400, detail="Non-call campaign step requires template_id")
 
@@ -665,29 +681,6 @@ def execute_campaign_recipient_step(
         template_id=step.template_id,
         lead_id=lead.id,
     )
-
-    if step.channel == "email":
-        result = send_email_to_lead(
-            session=session,
-            company_id=recipient.company_id,
-            actor_user_id=actor_user_id,
-            lead_id=lead.id,
-            subject=rendered["subject"] or "Message from Sales",
-            body=rendered["body"],
-        )
-        recipient.last_contact_at = utc_now()
-        recipient.updated_at = utc_now()
-        recipient.updated_by = actor_user_id
-        session.add(recipient)
-        session.commit()
-
-        return {
-            "recipient_id": recipient.id,
-            "campaign_id": recipient.campaign_id,
-            "step_order": recipient.current_step,
-            "channel": "email",
-            "result": result,
-        }
 
     if step.channel == "whatsapp":
         result = send_whatsapp_to_lead(
@@ -797,3 +790,201 @@ def run_due_campaign_recipients(
             })
 
     return results
+
+
+def process_campaign_email_step(
+    session: Session,
+    company_id: int,
+    actor_user_id: int,
+    recipient_id: int,
+) -> dict:
+    """
+    Render an email template with full dynamic context (agent name, dates,
+    custom fields, A/B subjects) and enqueue via the email outbox.
+
+    Advancement to the next campaign step is intentionally left to the caller
+    (run_due_campaign_recipients) — same pattern as process_campaign_call_step.
+    """
+    from email_service import get_styled_html
+    from services.analytics.email_tracking_service import (
+        build_open_tracking_pixel,
+        build_unsubscribe_url,
+        generate_tracking_token,
+        rewrite_click_tracking_links,
+    )
+    from services.communication.email_outbox_service import enqueue_email
+    from services.leads.engagement_service import record_email_sent
+    from services.leads.opt_out_service import is_lead_opted_out
+
+    recipient = session.exec(
+        select(CampaignRecipient).where(
+            CampaignRecipient.id == recipient_id,
+            CampaignRecipient.company_id == company_id,
+        )
+    ).first()
+    if not recipient:
+        raise HTTPException(status_code=404, detail="Campaign recipient not found")
+
+    step = get_current_step(session, company_id, recipient.campaign_id, recipient.current_step)
+    if not step:
+        raise HTTPException(status_code=404, detail="Campaign step not found")
+    if step.channel != "email":
+        raise HTTPException(status_code=400, detail="Current campaign step is not an email step")
+    if not step.template_id:
+        raise HTTPException(status_code=400, detail="Email step has no template_id")
+
+    lead = session.exec(
+        select(Lead).where(
+            Lead.id == recipient.lead_id,
+            Lead.company_id == company_id,
+        )
+    ).first()
+    if not lead:
+        raise HTTPException(status_code=404, detail="Lead not found")
+
+    if not lead.email:
+        logger.warning(
+            "campaign email skipped: no email address lead_id=%s campaign_id=%s",
+            lead.id, recipient.campaign_id,
+        )
+        return {
+            "recipient_id": recipient.id,
+            "campaign_id": recipient.campaign_id,
+            "step_order": step.step_order,
+            "channel": "email",
+            "skipped": "no_email",
+        }
+
+    if is_lead_opted_out(session, company_id, lead.id, "email"):
+        logger.info(
+            "campaign email skipped: opted out lead_id=%s campaign_id=%s",
+            lead.id, recipient.campaign_id,
+        )
+        return {
+            "recipient_id": recipient.id,
+            "campaign_id": recipient.campaign_id,
+            "step_order": step.step_order,
+            "channel": "email",
+            "skipped": "opted_out",
+        }
+
+    # A/B variant selection
+    ab_ratio = (getattr(step, "ab_split_ratio", None) or 0.5)
+    ab_variant = "A" if random.random() < ab_ratio else "B"
+
+    # Pre-generate tracking token so {{unsubscribe_url}} can be rendered
+    # inside the template body before the Interaction row is created.
+    tracking_token = generate_tracking_token()
+    tracking_base = (
+        os.getenv("TRACKING_BASE_URL")
+        or os.getenv("FRONTEND_BASE_URL")
+        or os.getenv("DOMAIN")
+        or "http://localhost:6060"
+    ).rstrip("/")
+    unsubscribe_url = build_unsubscribe_url(tracking_base, tracking_token, "email")
+
+    rendered = render_template_by_id(
+        session=session,
+        company_id=company_id,
+        template_id=step.template_id,
+        lead_id=lead.id,
+        actor_user_id=actor_user_id,
+        campaign_id=recipient.campaign_id,
+        extra_context={"unsubscribe_url": unsubscribe_url},
+        ab_variant=ab_variant,
+    )
+
+    subject = rendered["subject"] or "Message from our team"
+    body = rendered["body"]
+
+    company = session.exec(select(Company).where(Company.id == company_id)).first()
+    company_name = company.name if company else "Rio CRM"
+    company_website = (company.website if company and company.website else "") or ""
+
+    tracked_body = rewrite_click_tracking_links(body, tracking_base, tracking_token)
+    plain_body = f"{tracked_body}\n\nTo unsubscribe: {unsubscribe_url}"
+
+    html_body = (
+        get_styled_html(
+            subject=subject,
+            body=tracked_body,
+            lead_name=lead.name,
+            company_name=company_name,
+            company_website=company_website,
+            unsubscribe_url=unsubscribe_url,
+        )
+        + build_open_tracking_pixel(tracking_base, tracking_token)
+    )
+
+    # Create Interaction BEFORE enqueueing so the tracking token is stored and
+    # the unsubscribe endpoint (which looks up token in metadata_json) works.
+    interaction = Interaction(
+        company_id=company_id,
+        lead_id=lead.id,
+        campaign_id=recipient.campaign_id,
+        user_id=actor_user_id,
+        type="communication",
+        channel="email",
+        direction="outbound",
+        source="campaign",
+        content=subject,
+        delivery_status="queued",
+        metadata_json={
+            "tracking_token": tracking_token,
+            "ab_variant": ab_variant,
+            "step_order": step.step_order,
+            "template_id": step.template_id,
+        },
+        status="pending",
+        started_at=utc_now(),
+        ended_at=utc_now(),
+        created_by=actor_user_id,
+        updated_by=actor_user_id,
+    )
+    session.add(interaction)
+    session.commit()
+    session.refresh(interaction)
+
+    enqueue_email(
+        session=session,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        to_email=lead.email,
+        subject=subject,
+        body=plain_body,
+        html_body=html_body,
+        company_name=company_name,
+        dedupe_key=f"campaign:{recipient.campaign_id}:lead:{lead.id}:step:{step.step_order}",
+    )
+
+    record_email_sent(
+        session=session,
+        company_id=company_id,
+        actor_user_id=actor_user_id,
+        lead_id=lead.id,
+        interaction_id=interaction.id,
+        tracking_payload={"tracking_token": tracking_token, "ab_variant": ab_variant},
+    )
+
+    recipient.ab_variant = ab_variant
+    recipient.last_contact_at = utc_now()
+    recipient.updated_at = utc_now()
+    recipient.updated_by = actor_user_id
+    session.add(recipient)
+    session.commit()
+
+    logger.info(
+        "campaign email queued lead_id=%s campaign_id=%s step=%s ab=%s",
+        lead.id, recipient.campaign_id, step.step_order, ab_variant,
+    )
+
+    return {
+        "recipient_id": recipient.id,
+        "campaign_id": recipient.campaign_id,
+        "step_order": step.step_order,
+        "channel": "email",
+        "queued": True,
+        "ab_variant": ab_variant,
+        "interaction_id": interaction.id,
+        "tracking_token": tracking_token,
+    }

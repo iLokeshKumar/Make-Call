@@ -1,9 +1,13 @@
 import logging
+import mimetypes
 import os
 import re
 import smtplib
+from email import encoders
+from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from pathlib import Path
 from typing import Optional
 
 from utils.encryption import decrypt_value
@@ -251,6 +255,7 @@ def send_smtp_email(
     smtp_password: Optional[str] = None,
     smtp_from_email: Optional[str] = None,
     smtp_security: Optional[str] = None,  # "ssl" | "starttls" | "none"
+    attachment_paths: Optional[list[str]] = None,
 ) -> bool:
     to_email = decrypt_value(to_email)
 
@@ -270,7 +275,7 @@ def send_smtp_email(
         return False
 
     try:
-        message = MIMEMultipart("alternative")
+        message = MIMEMultipart("mixed")
         message["From"] = f"Rio from {company_name} <{smtp_from_email}>"
         message["To"] = to_email
         message["Subject"] = subject
@@ -282,9 +287,26 @@ def send_smtp_email(
                 message["X-Request-Id"] = req_id
         except Exception:  # noqa: BLE001
             pass
-        message.attach(MIMEText(body, "plain"))
+        alternative = MIMEMultipart("alternative")
+        alternative.attach(MIMEText(body, "plain"))
         if html_body:
-            message.attach(MIMEText(html_body, "html"))
+            alternative.attach(MIMEText(html_body, "html"))
+        message.attach(alternative)
+
+        for raw_path in attachment_paths or []:
+            if not raw_path:
+                continue
+            path = Path(raw_path)
+            if not path.exists() or not path.is_file():
+                logger.warning("Skipping missing email attachment: %s", raw_path)
+                continue
+            ctype, _ = mimetypes.guess_type(str(path))
+            maintype, subtype = (ctype or "application/octet-stream").split("/", 1)
+            part = MIMEBase(maintype, subtype)
+            part.set_payload(path.read_bytes())
+            encoders.encode_base64(part)
+            part.add_header("Content-Disposition", "attachment", filename=path.name)
+            message.attach(part)
 
         if smtp_security == "ssl":
             with smtplib.SMTP_SSL(smtp_host, smtp_port) as server:

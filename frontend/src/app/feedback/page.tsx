@@ -9,7 +9,7 @@ import { useRouter } from "next/navigation";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 type FeedbackItem = {
   id: number;
@@ -262,10 +262,20 @@ function SendCsatModal({ onClose, onSent }: { onClose: () => void; onSent: () =>
     setSending(true);
     setError("");
     try {
+      // Auto-link to most recent call interaction for this lead
+      let interactionId: number | null = null;
+      try {
+        const ir = await apiFetch(`${API_BASE}/crm/interactions?lead_id=${selectedLead.id}&type=call&limit=1`);
+        if (ir.ok) {
+          const idata = await ir.json();
+          interactionId = idata.items?.[0]?.id ?? null;
+        }
+      } catch { /* non-fatal */ }
+
       const res = await apiFetch(`${API_BASE}/feedback/csat/send`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ lead_id: selectedLead.id, expires_hours: Number(hours) || 72 }) });
+        body: JSON.stringify({ lead_id: selectedLead.id, expires_hours: Number(hours) || 72, ...(interactionId ? { interaction_id: interactionId } : {}) }) });
       if (!res.ok) {
         const d = await res.json().catch(() => ({}));
         throw new Error(d.detail || "Failed to queue CSAT");

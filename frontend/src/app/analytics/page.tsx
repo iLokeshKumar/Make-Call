@@ -8,7 +8,12 @@ import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+import CampaignStatusTimelineChart from "@/components/analytics/CampaignStatusTimelineChart";
+import CampaignConversionChart from "@/components/analytics/CampaignConversionChart";
+import FunnelChart from "@/components/analytics/FunnelChart";
+import HorizontalMetricBars from "@/components/analytics/HorizontalMetricBars";
+import LatencyTrendChart from "@/components/analytics/LatencyTrendChart";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 type EngagementSummary = {
   event_counts: Record<string, number>;
@@ -17,6 +22,7 @@ type EngagementSummary = {
   quote_status_counts: Record<string, number>;
   call_task_status_counts: Record<string, number>;
   campaign_conversion_trends: { campaign_id: number; name: string; responded: number; sent: number; conversion_rate: number }[];
+  campaign_status_over_time: { day: string; status: string; count: number }[];
   campaign_funnel: { status: string; count: number; percent: number }[];
   meta: Record<string, unknown>;
 };
@@ -52,7 +58,29 @@ const ENGINE_PALETTE: Record<string, string> = {
 const engineColor = (e: string) => ENGINE_PALETTE[e] ?? "#94a3b8";
 
 const CALL_STATUS_COLORS: Record<string, string> = {
-  completed: "bg-emerald-500", failed: "bg-red-500", queued: "bg-blue-500", pending: "bg-slate-400" };
+  // terminal
+  completed:   "bg-emerald-500",
+  failed:      "bg-red-500",
+  error:       "bg-red-400",
+  busy:        "bg-orange-500",
+  no_answer:   "bg-amber-500",
+  cancelled:   "bg-slate-400",
+  low_balance: "bg-pink-500",
+  stopped:     "bg-slate-500",
+  // active
+  in_progress: "bg-green-500",
+  connected:   "bg-green-500",
+  ringing:     "bg-yellow-400",
+  initiated:   "bg-indigo-400",
+  // pre-call / queued
+  queued:      "bg-blue-500",
+  scheduled:   "bg-cyan-500",
+  prepared:    "bg-teal-500",
+  dialing:     "bg-violet-500",
+  wrapup:      "bg-purple-400",
+  // default
+  pending:     "bg-slate-400",
+};
 
 function Pulse() {
   return (
@@ -513,54 +541,23 @@ export default function AnalyticsPage() {
               {/* Channel breakdown */}
               <div className="glass rounded-2xl border border-white/10 p-5">
                 <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Channel Breakdown</p>
-                <div className="space-y-3">
-                  {Object.entries(summary.channel_counts).map(([ch, cnt]) => {
-                    const max = Math.max(...Object.values(summary.channel_counts), 1);
-                    return (
-                      <div key={ch} className="flex items-center gap-3">
-                        <span className="w-20 text-xs text-slate-400 capitalize">{ch}</span>
-                        <div className="flex-1 h-[5px] rounded-full bg-white/10 overflow-hidden">
-                          <div className="h-full rounded-full bg-violet-500 transition-all duration-700"
-                            style={{ width: `${(cnt / max) * 100}%` }} />
-                        </div>
-                        <span className="w-8 text-right text-xs font-bold text-slate-300">{cnt}</span>
-                      </div>
-                    );
-                  })}
-                </div>
+                <HorizontalMetricBars
+                  rows={Object.entries(summary.channel_counts).map(([label, value]) => ({ label, value }))}
+                />
               </div>
 
               {/* Campaign conversion */}
               {summary.campaign_conversion_trends.length > 0 && (
                 <div className="glass rounded-2xl border border-white/10 p-5">
                   <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Campaign Conversion</p>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-white/10">
-                          {["Campaign", "Sent", "Responded", "Rate"].map(h => (
-                            <th key={h} className="px-3 py-2 text-left text-slate-500 font-medium">{h}</th>
-                          ))}
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {summary.campaign_conversion_trends.map(c => (
-                          <tr key={c.campaign_id} className="border-b border-white/5 hover:bg-white/5">
-                            <td className="px-3 py-2 text-slate-300 font-medium">{c.name}</td>
-                            <td className="px-3 py-2 text-slate-400">{c.sent}</td>
-                            <td className="px-3 py-2 text-slate-400">{c.responded}</td>
-                            <td className="px-3 py-2">
-                              <span className={clsx("font-bold",
-                                c.conversion_rate >= 30 ? "text-emerald-400" :
-                                c.conversion_rate >= 10 ? "text-amber-400" : "text-red-400")}>
-                                {c.conversion_rate.toFixed(1)}%
-                              </span>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
+                  <CampaignConversionChart rows={summary.campaign_conversion_trends} />
+                </div>
+              )}
+
+              {summary.campaign_status_over_time.length > 0 && (
+                <div className="glass rounded-2xl border border-white/10 p-5">
+                  <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Campaign Status Timeline</p>
+                  <CampaignStatusTimelineChart rows={summary.campaign_status_over_time} limitDays={5} />
                 </div>
               )}
 
@@ -794,35 +791,7 @@ export default function AnalyticsPage() {
                   {latency.trend.length === 0 ? (
                     <p className="text-center py-16 text-slate-600">No trend data for this period.</p>
                   ) : (
-                    <div className="glass rounded-2xl border border-white/10 overflow-hidden">
-                      <table className="w-full text-xs">
-                        <thead>
-                          <tr className="bg-white/5 border-b border-white/10">
-                            {["Date", "Engine", "Avg", "Turns", "Bar"].map(h => (
-                              <th key={h} className="px-4 py-3 text-left text-slate-500 font-medium">{h}</th>
-                            ))}
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {latency.trend.map((t, i) => {
-                            const maxMs = Math.max(...latency.trend.map(x => x.avg_ms), 1);
-                            return (
-                              <tr key={i} className="border-b border-white/5 hover:bg-white/5">
-                                <td className="px-4 py-2 font-mono text-slate-400">{t.day}</td>
-                                <td className="px-4 py-2 font-mono text-[10px]" style={{ color: engineColor(t.engine) }}>{t.engine}</td>
-                                <td className="px-4 py-2 font-bold text-slate-200">{fms(t.avg_ms)}</td>
-                                <td className="px-4 py-2 text-slate-500">{t.turns}</td>
-                                <td className="px-4 py-2 w-32">
-                                  <div className="h-[4px] rounded bg-white/10 overflow-hidden">
-                                    <div className="h-full rounded" style={{ width: `${(t.avg_ms / maxMs) * 100}%`, background: engineColor(t.engine) }} />
-                                  </div>
-                                </td>
-                              </tr>
-                            );
-                          })}
-                        </tbody>
-                      </table>
-                    </div>
+                    <LatencyTrendChart trend={latency.trend} formatMs={fms} colorForEngine={engineColor} />
                   )}
                   {latency.trend.length > 1 && <DoDSummary trend={latency.trend} />}
                 </div>
@@ -963,7 +932,6 @@ export default function AnalyticsPage() {
                 <div className="glass rounded-2xl border border-white/10 p-6">
                   <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-5">Conversion Funnel</p>
                   {(() => {
-                    const totalCalls = conv.total_calls || 1;
                     const connected  = perf?.connected_calls ?? 0;
                     const stages: { label: string; value: number; color: string }[] = [
                       { label: "Called",     value: conv.total_calls,    color: "#818cf8" },
@@ -972,31 +940,15 @@ export default function AnalyticsPage() {
                       { label: "Quoted",     value: conv.quotes_sent,    color: "#fbbf24" },
                       { label: "Closed Won", value: conv.closed_won,     color: "#a78bfa" },
                     ];
+                    const totalCalls = Math.max(conv.total_calls || 0, 1);
                     return (
-                      <div className="space-y-3">
-                        {stages.map((s, i) => {
-                          const pct = ((s.value / totalCalls) * 100).toFixed(1);
-                          const barW = Math.max((s.value / totalCalls) * 100, s.value > 0 ? 2 : 0);
-                          const indent = i * 12;
-                          return (
-                            <div key={s.label} className="flex items-center gap-3" style={{ paddingLeft: indent }}>
-                              <span className="w-20 text-xs text-slate-400 shrink-0">{s.label}</span>
-                              <div className="flex-1 h-[18px] rounded bg-white/5 overflow-hidden">
-                                <div
-                                  className="h-full rounded transition-all duration-700 flex items-center px-2"
-                                  style={{ width: `${barW}%`, background: s.color + "99" }}
-                                />
-                              </div>
-                              <span className="w-16 text-right font-mono text-xs font-bold shrink-0" style={{ color: s.color }}>
-                                {s.value.toLocaleString()}
-                              </span>
-                              <span className="w-12 text-right font-mono text-[10px] text-slate-500 shrink-0">
-                                {pct}%
-                              </span>
-                            </div>
-                          );
-                        })}
-                      </div>
+                      <FunnelChart
+                        items={stages.map((stage) => ({
+                          status: stage.label,
+                          count: stage.value,
+                          percent: (stage.value / totalCalls) * 100,
+                        }))}
+                      />
                     );
                   })()}
                 </div>

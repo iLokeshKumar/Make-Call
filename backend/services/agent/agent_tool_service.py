@@ -359,6 +359,47 @@ async def book_meeting(
     timezone_str = resolve_lead_timezone(lead, session=session, company_id=company_id)
     appointment_time_text = format_datetime_for_timezone(appointment_time, timezone_str)
     # Use structured notes format so the journey parser renders correctly
+    # Try to create a Google Calendar event with Meet link
+    meet_link: str | None = None
+    calendar_event_id: str | None = None
+    try:
+        from routes.calendar import get_company_calendar_credentials
+        from googleapiclient.discovery import build as _gcal_build
+        import uuid as _uuid
+        gcal_creds = get_company_calendar_credentials(session, company_id)
+        if gcal_creds:
+            service = _gcal_build("calendar", "v3", credentials=gcal_creds, cache_discovery=False)
+            start_iso = appointment_time.strftime("%Y-%m-%dT%H:%M:%S")
+            end_iso = (appointment_time + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
+            event_body: dict = {
+                "summary": f"{meeting_type.title()} with {lead.name}",
+                "description": f"Rio Sales Assistant – {meeting_type.title()} Meeting\nLead: {lead.name}\nEmail: {lead.email or ''}",
+                "start": {"dateTime": start_iso, "timeZone": "UTC"},
+                "end": {"dateTime": end_iso, "timeZone": "UTC"},
+                "conferenceData": {
+                    "createRequest": {
+                        "requestId": str(_uuid.uuid4()),
+                        "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                    }
+                },
+            }
+            if lead.email:
+                event_body["attendees"] = [{"email": lead.email}]
+            created = service.events().insert(
+                calendarId="primary",
+                body=event_body,
+                conferenceDataVersion=1,
+                sendUpdates="all",
+            ).execute()
+            meet_link = (
+                created.get("conferenceData", {})
+                .get("entryPoints", [{}])[0]
+                .get("uri")
+            )
+            calendar_event_id = created.get("id")
+    except Exception as _exc:
+        logger.warning("[book_meeting] Google Meet creation failed for company %s: %s", company_id, _exc)
+
     appointment = Appointment(
         company_id=company_id,
         lead_id=lead.id,
@@ -366,6 +407,8 @@ async def book_meeting(
         appointment_time=appointment_time,
         status="scheduled",
         notes=f"demo type={meeting_type}; location=online",
+        meeting_link=meet_link,
+        calendar_event_id=calendar_event_id,
         created_by=actor_user_id,
         updated_by=actor_user_id,
     )
@@ -386,13 +429,14 @@ async def book_meeting(
     email_sent = False
     if lead.email:
         try:
+            meet_line = f"\n\nJoin meeting: {meet_link}" if meet_link else ""
             send_email_to_lead(
                 session=session,
                 company_id=company_id,
                 actor_user_id=actor_user_id,
                 lead_id=lead.id,
                 subject=f"{meeting_type.title()} scheduled",
-                body=f"Your {meeting_type} is scheduled for {appointment_time_text}.",
+                body=f"Your {meeting_type} is scheduled for {appointment_time_text}.{meet_line}",
             )
             email_sent = True
         except Exception:
@@ -405,8 +449,10 @@ async def book_meeting(
         "lead_name": lead.name,
         "lead_email": lead.email,
         "appointment_time": appointment_time.isoformat(),
+        "meeting_link": meet_link,
         "email_sent": email_sent,
-        "message": f"{meeting_type.title()} scheduled for {lead.name}.",
+        "message": f"{meeting_type.title()} scheduled for {lead.name}."
+        + (f" Google Meet: {meet_link}" if meet_link else ""),
     }
 
 

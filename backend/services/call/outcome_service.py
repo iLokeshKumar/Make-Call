@@ -274,7 +274,10 @@ def get_retry_policy(
 ) -> dict[str, Any]:
     """
     Determine retry policy based on outcome and attempt count.
-    
+
+    Pass per-agent overrides via `config`:
+      { "max_retries": int, "retry_delay_minutes": int, "retry_backoff_multiplier": float }
+
     Returns:
     {
         "should_retry": bool,
@@ -295,18 +298,40 @@ def get_retry_policy(
         OUTCOME_FOLLOW_UP: {"max_attempts": 1, "retry_hours": []},
         OUTCOME_ANSWERED: {"max_attempts": 1, "retry_hours": []},
     }
-    
+
+    # Per-agent override from runtime_json
+    agent_max_retries: int | None = None
+    agent_delay_minutes: int | None = None
+    agent_backoff_mult: float | None = None
+    if config:
+        agent_max_retries = config.get("max_retries")
+        agent_delay_minutes = config.get("retry_delay_minutes")
+        agent_backoff_mult = config.get("retry_backoff_multiplier")
+
     config_for_outcome = retry_config.get(outcome, {"max_attempts": 1, "retry_hours": []})
     max_attempts = config_for_outcome["max_attempts"]
-    retry_hours_list = config_for_outcome["retry_hours"]
-    
+    retry_hours_list = list(config_for_outcome["retry_hours"])
+
+    # Apply per-agent override for max_retries
+    if agent_max_retries is not None and agent_max_retries >= 0:
+        max_attempts = agent_max_retries + 1
+
+    # Apply per-agent delay and backoff: build a fresh retry_hours_list
+    if agent_delay_minutes is not None and agent_delay_minutes >= 1:
+        base_delay_hours = agent_delay_minutes / 60.0
+        mult = agent_backoff_mult if agent_backoff_mult is not None else 1.0
+        retry_hours_list = [
+            round(base_delay_hours * (mult ** i), 2)
+            for i in range(max(0, max_attempts - 1))
+        ]
+
     max_attempts_reached = attempt_count >= max_attempts
     should_retry = not max_attempts_reached and attempt_count < len(retry_hours_list)
-    
+
     retry_after_hours = None
     if attempt_count < len(retry_hours_list):
         retry_after_hours = retry_hours_list[attempt_count]
-    
+
     return {
         "should_retry": should_retry,
         "retry_after_hours": retry_after_hours,
@@ -497,6 +522,7 @@ def apply_call_outcome(
     raw_status: str | None,
     transcript: str | None,
     confidence: Decimal | None = None,
+    retry_config: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     task = get_call_task_or_404(session, company_id, task_id)
     interaction = session.get(Interaction, interaction_id) if interaction_id is not None else None
@@ -506,7 +532,7 @@ def apply_call_outcome(
     if task.last_outcome in ANSWERED_OUTCOMES and normalized_outcome not in ANSWERED_OUTCOMES:
         normalized_outcome = task.last_outcome
 
-    retry_policy = get_retry_policy(normalized_outcome, task.attempt_count)
+    retry_policy = get_retry_policy(normalized_outcome, task.attempt_count, config=retry_config)
     now = utc_now()
 
     if interaction is not None:

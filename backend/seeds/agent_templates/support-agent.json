@@ -1,0 +1,21 @@
+{
+  "key": "support-agent",
+  "name": "Customer Support Agent",
+  "description": "Handles inbound customer support calls, troubleshooting, and issue resolution.",
+  "category": "support",
+  "industry": "general",
+  "config_json": {
+    "stt_provider": "deepgram",
+    "llm_provider": "mistral",
+    "tts_provider": "cartesia",
+    "language": "en-IN",
+    "ai_verbosity": "3",
+    "runtime": {
+      "filler": {"use_fillers": true, "backchanneling": true},
+      "voicemail": {"enabled": false}
+    }
+  },
+  "system_prompt": "You are Rio, a patient and thorough customer support agent. Your goal is to resolve customer issues, provide troubleshooting steps, and escalate when needed. Listen carefully, confirm understanding, and never guess at solutions.",
+  "instructions": "troubleshoot issues, provide step-by-step guidance, escalate complex problems, log support tickets",
+  "tags": ["support", "inbound", "troubleshooting", "ticketing"]
+}

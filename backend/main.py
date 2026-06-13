@@ -2,13 +2,19 @@ import os
 import sys
 import time
 import asyncio
-# On Windows, use the Selector event loop so psycopg's async code is compatible.
-# Must be set before any async pools or libraries are imported/initialized.
+
 if sys.platform.startswith("win"):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception:
-        pass
+    except Exception as _e:
+        # Logger isn't configured yet (this runs at import time), so print
+        # to stderr so we don't silently fall through to ProactorEventLoop
+        # on Windows, which breaks subprocess transports we rely on.
+        import sys as _sys
+        print(
+            f"[startup] WARN: failed to set WindowsSelectorEventLoopPolicy: {_e!r}",
+            file=_sys.stderr,
+        )
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -18,6 +24,7 @@ _env_path = Path(__file__).parent / ".env"
 load_dotenv(_env_path, override=False)
 
 from fastapi import FastAPI, Request, WebSocket
+from fastapi import WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -29,18 +36,41 @@ from config import settings as app_settings
 from database import engine, init_db, rls_company_id
 from models.models import BackgroundJob, CallStatusEvent, CallTask, Company, Interaction, IsmActivityEvent, Lead, SentimentEvent, User, utc_now
 from pipelines.voice_pipeline import VoicePipeline
-from routes import admin, analytics, auth, automation, call_task, campaign, feedback, quote, requirement, templates, telephony, tracking
+from routes import admin, analytics, auth, automation, call_task, campaign, evals, feedback, proposal, quote, requirement, templates, telephony, tracking
 from routes import accounts, coach, competitors, interactions, lead_import, leads, objections, products, settings as crm_settings
 from routes import knowledge
+from routes import voice_agents as voice_agents_routes
+from routes import sub_accounts as sub_accounts_routes
+from routes import sip_trunks as sip_trunks_routes
+from routes import compliance as compliance_routes
 from routes import agents as agent_routes
 from routes import agent_tasks as agent_tasks_routes
 from routes import metrics as metrics_routes
+from routes import observability_metrics as observability_metrics_routes
 from routes import ism_rules as ism_rules_routes
+from routes import phone_numbers as phone_numbers_routes
+from routes import calendar as calendar_routes
+from routes import webhooks as webhook_router
+from routes import dispositions as dispositions_router
+from routes import events as events_router
+from routes import mark_tracking as mark_tracking_router
+from routes import agent_templates as agent_templates_router
+from routes import provider_credentials as provider_credentials_router
+from routes import observability_metrics as observability_metrics_routes
+from routes import cost as cost_router
+from routes import integrations as integrations_router
+from routes import orders as orders_router
+from routes import invoices as invoices_router
+from routes import payments as payments_router
+from routes import tickets as tickets_router
+from routes import installations as installations_router
+from routes import contacts as contacts_router
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
 from utils.tracing import configure_tracing
 from services.call import call_status_broadcaster, sentiment_broadcaster
+from services.voice_agent_runtime_service import log_voice_agent_event, resolve_agent_for_call
 
 logger = setup_logger(__name__)
 
@@ -221,13 +251,13 @@ def ensure_interaction(
     interaction_id: str | None,
     source: str,
 ) -> str:
-    # Valid interaction_id provided — verify it exists and reuse it
+
     if interaction_id and interaction_id.isdigit() and int(interaction_id) != 0:
         existing = session.get(Interaction, int(interaction_id))
         if existing:
             return interaction_id
 
-    # No valid id passed — find the most recent active call interaction for this lead/user to avoid creating duplicate interactions for outbound calls where the interaction_id wasn't forwarded correctly.
+
     query = select(Interaction).where(
         Interaction.type == "call",
         Interaction.status == "active",
@@ -240,7 +270,7 @@ def ensure_interaction(
     if recent:
         return str(recent.id)
 
-    # Nothing found — create a new interaction as last resort
+
     interaction = Interaction(
         company_id=target_user.company_id if target_user else (lead.company_id if lead else 0),
         lead_id=lead.id if lead else None,
@@ -262,10 +292,16 @@ def ensure_interaction(
     return str(interaction.id)
 
 
+def _parse_optional_int(value: str | None) -> int | None:
+    if value and value.isdigit() and int(value) != 0:
+        return int(value)
+    return None
+
+
 async def run_media_stream(websocket: WebSocket, source: str) -> None:
     await websocket.accept()
 
-    # Assign a request ID for this call so all pipeline log lines are traceable
+
     req_id = websocket.headers.get("X-Request-ID") or generate_request_id()
     request_id_var.set(req_id)
     logger.info("WS connect [%s] source=%s", req_id, source)
@@ -274,14 +310,15 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
     lead_id = websocket.query_params.get("lead_id")
     raw_interaction_id = websocket.query_params.get("interaction_id")
     call_task_id = websocket.query_params.get("call_task_id")
+    agent_id = websocket.query_params.get("agent_id")
 
-    # Twilio Media Streams strips query parameters from the wss:// URL. Context arrives in the `start` event's customParameters.  Twilio frame order is `connected` → `start` → `media` → … so we keep reading until `start` (or timeout / `media` arrives, meaning we missed it).  Buffer consumed frames so the pipeline still sees them.
+
     replayed_frames: list[str] = []
     if any(v in (None, "", "0") for v in (user_id, lead_id, raw_interaction_id)):
         import asyncio as _asyncio
         import json as _json
         try:
-            for _ in range(5):  # cap on frames consumed
+            for _ in range(5):
                 raw = await _asyncio.wait_for(websocket.receive_text(), timeout=5.0)
                 replayed_frames.append(raw)
                 try:
@@ -295,6 +332,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                     lead_id = lead_id or str(custom.get("lead_id") or "") or None
                     raw_interaction_id = raw_interaction_id or str(custom.get("interaction_id") or "") or None
                     call_task_id = call_task_id or str(custom.get("call_task_id") or "") or None
+                    agent_id = agent_id or str(custom.get("agent_id") or "") or None
                     break
                 if event == "media":
                     # Already past start without seeing customParameters — shouldn't happen with current TwiML, but bail to avoid eating audio frames into the buffer.
@@ -344,6 +382,30 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             return
 
         interaction_id = ensure_interaction(session, target_user, lead, raw_interaction_id, source)
+        resolved_runtime = resolve_agent_for_call(
+            session=session,
+            company_id=target_user.company_id,
+            user=target_user,
+            agent_id=_parse_optional_int(agent_id),
+            interaction_id=_parse_optional_int(interaction_id),
+            call_task_id=_parse_optional_int(call_task_id),
+        )
+        log_voice_agent_event(
+            session=session,
+            company_id=target_user.company_id,
+            agent_id=resolved_runtime.agent.id,
+            interaction_id=_parse_optional_int(interaction_id),
+            call_task_id=_parse_optional_int(call_task_id),
+            event_type="call_started",
+            summary="Voice media stream connected",
+            payload={
+                "source": source,
+                "prompt_version_id": resolved_runtime.prompt_version.id,
+                "stt_provider": resolved_runtime.stt_provider,
+                "llm_provider": resolved_runtime.llm_provider,
+                "tts_provider": resolved_runtime.tts_provider,
+            },
+        )
 
         # If lead wasn't resolved from WebSocket params (e.g., lead_id=0), fetch it from the reused outbound interaction so lead context and latency logging get the correct lead_id.
         if not lead:
@@ -351,23 +413,20 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 db_interaction = session.get(Interaction, int(interaction_id))
                 if db_interaction and db_interaction.lead_id:
                     lead = session.get(Lead, db_interaction.lead_id)
-            except (ValueError, TypeError):
-                pass
+            except (ValueError, TypeError) as _e:
+                # interaction_id wasn't an int - rare but possible from old
+                # webhook payloads. Lead context will be missing for this call.
+                logger.warning(
+                    "Could not resolve lead from interaction_id=%r: %s",
+                    interaction_id, _e,
+                )
 
         lead_context = get_comprehensive_lead_context(session, lead.id) if lead else None
 
         company = session.get(Company, target_user.company_id) if target_user else None
         company_name = company.name if company else "Rio CRM"
 
-        from credentials_service import get_user_setting_value
-        system_prompt = (
-            (
-                get_user_setting_value(session, target_user.id, "SYSTEM_PROMPT")
-                or get_company_setting_value(session, target_user.company_id, "SYSTEM_PROMPT")
-            )
-            if target_user
-            else None
-        ) or "You are Rio, a concise inside-sales voice assistant."
+        system_prompt = resolved_runtime.system_prompt or "You are Rio, a concise inside-sales voice assistant."
 
         # Append a standard closing instruction to every call so Rio always asks for verbal feedback before hanging up.
         system_prompt += (
@@ -420,11 +479,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             "Do not promise that a follow-up call, reminder, or future outreach has been scheduled unless a booking or scheduling tool result in this call confirms it.\n"
             "If no scheduling tool was used, say you can note the preference or that someone will follow up, but do not claim the event is already scheduled."
         )
-        verbosity_level = (
-            get_company_setting_value(session, target_user.company_id, "AI_VERBOSITY")
-            if target_user
-            else None
-        ) or "2"
+        verbosity_level = resolved_runtime.ai_verbosity or "2"
         verbosity_rules = {
             "1": "ULTRA-CONCISE: Usually one short sentence. No lists, no multiple options, no filler, no repeated restatement.",
             "2": "BALANCED: Usually 1-2 short sentences. Keep spoken replies compact, direct, and easy to interrupt.",
@@ -432,21 +487,9 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
         }
         system_prompt += f"\n\n### VERBOSITY\n{verbosity_rules.get(str(verbosity_level), verbosity_rules['2'])}"
 
-        stt_provider = (
-            get_company_setting_value(session, target_user.company_id, "STT_PROVIDER")
-            if target_user
-            else None
-        ) or "deepgram"
-        llm_provider = (
-            get_company_setting_value(session, target_user.company_id, "LLM_PROVIDER")
-            if target_user
-            else None
-        ) or "mistral"
-        tts_provider = (
-            get_company_setting_value(session, target_user.company_id, "TTS_PROVIDER")
-            if target_user
-            else None
-        ) or "cartesia"
+        stt_provider = resolved_runtime.stt_provider
+        llm_provider = resolved_runtime.llm_provider
+        tts_provider = resolved_runtime.tts_provider
 
         SARVAM_LANGUAGE_CODES = {
             "hi": "hi-IN", "ta": "ta-IN", "te": "te-IN",
@@ -499,6 +542,7 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             lead_context=lead_context,
             lead_id=lead.id if lead else None,
             lead_language=lead_language_code,
+            runtime_json=resolved_runtime.runtime.runtime_json if resolved_runtime.runtime else {},
         )
 
         try:
@@ -517,7 +561,10 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 status="connected",
             )
         except Exception:
-            pass
+            # Broadcasting is best-effort - the live dashboard will miss this
+            # status, but the call itself must not fail. Log the full stack
+            # so we know when the broadcaster is broken.
+            logger.exception("call_status_broadcaster.publish(connected) failed")
 
         max_call_duration = app_settings.MAX_CALL_DURATION_SECONDS
         _ended_outcome: str | None = None
@@ -569,6 +616,17 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                 except Exception as exc:
                     logger.warning("Could not update CallTask %s: %s", call_task_id, exc)
 
+            log_voice_agent_event(
+                session=session,
+                company_id=target_user.company_id,
+                agent_id=resolved_runtime.agent.id,
+                interaction_id=_parse_optional_int(interaction_id),
+                call_task_id=_parse_optional_int(call_task_id),
+                event_type="call_ended",
+                summary=f"Call ended with status {call_status}",
+                payload={"status": call_status, "outcome": _ended_outcome},
+            )
+
             try:
                 if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and target_user:
                     _ct_end = session.get(CallTask, int(call_task_id))
@@ -583,7 +641,9 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
                         outcome=_ended_outcome,
                     )
             except Exception:
-                pass
+                # Best-effort broadcast - log so we know when the live feed
+                # is dropping "ended" events but don't fail the call cleanup.
+                logger.exception("call_status_broadcaster.publish(ended) failed")
 
             # Enqueue post-call processing as a crash-safe background job. The automation worker picks this up and runs extract_and_save_requirements + dispatch_next_action. Writing the job row is synchronous and survives a FastAPI process restart — unlike an in-process asyncio.create_task.
             if db_interaction and db_interaction.lead_id and db_interaction.transcript and target_user:
@@ -659,6 +719,26 @@ def _log_startup_checks() -> None:
     logger.info("[Startup] Key validation complete.")
 
 
+async def _campaign_schedule_loop() -> None:
+    """Background loop: tick campaign schedules every 60 seconds."""
+    import asyncio as _asyncio
+    poll_interval = int(os.getenv("CAMPAIGN_SCHEDULE_POLL_INTERVAL", "60"))
+    from sqlmodel import Session as _Session
+    from services.campaign.dialer_service import process_campaign_schedule_tick
+    logger.info("[CampaignScheduler] Loop started (interval=%ds)", poll_interval)
+    while True:
+        try:
+            await _asyncio.sleep(poll_interval)
+            with _Session(engine) as session:
+                fired = process_campaign_schedule_tick(session)
+                if fired:
+                    logger.info("[CampaignScheduler] Fired %d schedule(s)", len(fired))
+        except _asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.exception("[CampaignScheduler] Tick error: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio as _asyncio
@@ -671,15 +751,26 @@ async def lifespan(app: FastAPI):
     enable_bg_workers = app_settings.ENABLE_BACKGROUND_WORKERS
     imap_task = None
     outbox_task = None
+    schedule_task = None
+    asr_task = None
     if enable_bg_workers:
         imap_task = _asyncio.create_task(imap_poll_loop())
         outbox_task = _asyncio.create_task(email_outbox_loop())
+        schedule_task = _asyncio.create_task(_campaign_schedule_loop())
+        # ASR cleanup loop (in-process). If you prefer cron/Task Scheduler, use scripts/asr_cleanup_runner.py as a fallback.
+        try:
+            from services.asr_maintenance import asr_cleanup_loop
+            asr_enabled = os.getenv("ENABLE_ASR_CLEANUP", "1") == "1"
+            if asr_enabled:
+                asr_task = _asyncio.create_task(asr_cleanup_loop())
+        except Exception as _exc:
+            logger.exception("Failed to start ASR cleanup loop: %s", _exc)
     else:
         logger.warning("Background workers disabled via ENABLE_BACKGROUND_WORKERS=0")
     try:
         yield
     finally:
-        for task in (imap_task, outbox_task):
+        for task in (imap_task, outbox_task, schedule_task, asr_task):
             if task:
                 task.cancel()
         cleanup_bridge_executor()
@@ -687,6 +778,43 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="Multi-Tenant CRM API", lifespan=lifespan)
 _process_start_time: float = time.time()
+
+
+# ── Exception handlers ─────────────────────────────────────────────────────────
+
+
+# Lazily import QuotaExceededError so circular deps don't block startup.
+_QuotaExceededError: type[Exception] | None = None
+def _get_quota_exceeded() -> type[Exception]:
+    global _QuotaExceededError
+    if _QuotaExceededError is None:
+        try:
+            from services.core.usage_service import QuotaExceededError as _Q
+            _QuotaExceededError = _Q
+        except ImportError:
+            _QuotaExceededError = type("QuotaExceededError", (Exception,), {})
+    return _QuotaExceededError
+
+
+@app.exception_handler(_get_quota_exceeded())
+async def quota_exceeded_handler(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    logger.warning(
+        "Quota exceeded: metric=%s",
+        getattr(exc, "metric", "?"),
+    )
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": getattr(exc, "message", str(exc)),
+            "metric": getattr(exc, "metric", None),
+            "used": getattr(exc, "used", None),
+            "limit": getattr(exc, "limit", None),
+            "tier": getattr(exc, "tier", None),
+        },
+    )
+
+
 app.add_middleware(_RLSMiddleware)
 app.add_middleware(_CSRFMiddleware)
 app.add_middleware(_RequestContextMiddleware)
@@ -727,20 +855,43 @@ app.include_router(objections.router)
 app.include_router(competitors.router)
 app.include_router(coach.router)
 app.include_router(campaign.router)
+app.include_router(proposal.router)
 app.include_router(quote.router)
 app.include_router(requirement.router)
 app.include_router(call_task.router)
 app.include_router(templates.router)
 app.include_router(telephony.router)
 app.include_router(tracking.router)
+app.include_router(evals.router)
 app.include_router(feedback.router)
 app.include_router(knowledge.router)
 app.include_router(agent_routes.router)
 app.include_router(agent_tasks_routes.router, prefix="/crm")
+app.include_router(voice_agents_routes.router)
 app.include_router(metrics_routes.router)
+app.include_router(observability_metrics_routes.router)
 app.include_router(ism_rules_routes.router, prefix="/crm")
+app.include_router(phone_numbers_routes.router, prefix="/crm")
+app.include_router(sub_accounts_routes.router)
+app.include_router(sip_trunks_routes.router)
+app.include_router(compliance_routes.router)
+app.include_router(calendar_routes.router)
+app.include_router(webhook_router.router, prefix="/crm", tags=["webhooks"])
 from routes import agent_analytics as agent_analytics_routes
 app.include_router(agent_analytics_routes.router, prefix="/crm")
+app.include_router(dispositions_router.router)
+app.include_router(events_router.router)
+app.include_router(mark_tracking_router.router)
+app.include_router(agent_templates_router.router)
+app.include_router(provider_credentials_router.router)
+app.include_router(cost_router.router)
+app.include_router(integrations_router.router)
+app.include_router(orders_router.router, prefix="/crm")
+app.include_router(invoices_router.router, prefix="/crm")
+app.include_router(payments_router.router, prefix="/crm")
+app.include_router(tickets_router.router, prefix="/crm")
+app.include_router(installations_router.router, prefix="/crm")
+app.include_router(contacts_router.router, prefix="/crm")
 
 try:
     from mcp_server import get_mcp_asgi_app
@@ -839,6 +990,21 @@ async def exotel_media_stream(websocket: WebSocket):
     await run_media_stream(websocket, "exotel")
 
 
+@app.websocket("/plivo-media-stream")
+async def plivo_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "plivo")
+
+
+@app.websocket("/vobiz-media-stream")
+async def vobiz_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "vobiz")
+
+
+@app.websocket("/enablex-media-stream")
+async def enablex_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "enablex")
+
+
 @app.websocket("/ws/sentiment/{interaction_id}")
 async def live_sentiment(websocket: WebSocket, interaction_id: str):
     """
@@ -870,8 +1036,12 @@ async def live_sentiment(websocket: WebSocket, interaction_id: str):
                 if idle_ticks % 150 == 0:  # ~30s: 150 × 200ms
                     await websocket.send_json({"type": "ping"})
             await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        # Normal client disconnect - quiet path.
+        logger.debug("live_sentiment ws disconnected interaction_id=%s", interaction_id)
     except Exception:
-        pass
+        # Anything else is a real bug; surface it.
+        logger.exception("live_sentiment ws crashed interaction_id=%s", interaction_id)
 
 
 @app.websocket("/ws/call-monitor/{company_id}")
@@ -921,8 +1091,10 @@ async def call_monitor(
                 if idle_ticks % 60 == 0:  # ~30s: 60 × 500ms
                     await websocket.send_json({"type": "ping"})
             await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        logger.debug("call_monitor ws disconnected company_id=%s", company_id)
     except Exception:
-        pass
+        logger.exception("call_monitor ws crashed company_id=%s", company_id)
 
 
 @app.websocket("/ws/ism-activity/{company_id}")
@@ -974,5 +1146,7 @@ async def ism_activity_monitor(
                 if idle_ticks % 60 == 0:  # ~30s
                     await websocket.send_json({"type": "ping"})
             await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        logger.debug("ism_activity_monitor ws disconnected company_id=%s", company_id)
     except Exception:
-        pass
+        logger.exception("ism_activity_monitor ws crashed company_id=%s", company_id)

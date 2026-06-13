@@ -2,6 +2,7 @@ from __future__ import annotations
 import logging
 from langchain_core.tools import tool
 from utils.tracing import traceable, traceable_async
+from agents._format_utils import to_compact
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +25,7 @@ def get_lead_profile(lead_id: int, company_id: int) -> str:
             ).first()
             if not lead:
                 return f"Lead {lead_id} not found for company {company_id}."
-            return str({
+            return to_compact({
                 "id": lead.id,
                 "name": lead.name,
                 "email": lead.email,
@@ -60,7 +61,7 @@ def get_interaction_history(lead_id: int, company_id: int, limit: int = 10) -> s
                 .order_by(Interaction.started_at.desc())
                 .limit(limit)
             ).all()
-            return str([{
+            return to_compact([{
                 "id": r.id, "type": r.interaction_type,
                 "started_at": str(r.started_at), "outcome": r.outcome, "summary": r.summary,
             } for r in rows])

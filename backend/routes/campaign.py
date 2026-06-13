@@ -1,9 +1,13 @@
+from datetime import datetime
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from auth import PermissionChecker
 from database import get_session
-from models.models import CampaignCreate, CampaignStepCreate, CampaignStepUpdate, CampaignStepsReorder, User, CampaignRecipient
+from models.models import Campaign, CampaignCreate, CampaignSchedule, CampaignStepCreate, CampaignStepUpdate, CampaignStepsReorder, User, CampaignRecipient, utc_now
 from services.core.feature_flag_service import require_feature
 from services.campaign.campaign_service import (
     add_campaign_step,
@@ -303,3 +307,181 @@ async def retry_campaign_recipient_route(
         actor_user_id=current_user.id,
         recipient_id=recipient_id,
     )
+
+
+# ---------------------------------------------------------------------------
+# Campaign Schedule endpoints
+# ---------------------------------------------------------------------------
+
+class CampaignScheduleUpsert(BaseModel):
+    agent_id: Optional[int] = None
+    start_date: datetime
+    end_date: Optional[datetime] = None
+    daily_start_hour: int = 9
+    daily_end_hour: int = 18
+    days_of_week: list[int] = [0, 1, 2, 3, 4]
+    timezone: str = "Asia/Kolkata"
+    max_concurrent_calls: int = 5
+    calls_per_minute: int = 10
+
+
+@router.get("/{campaign_id}/schedule")
+async def get_campaign_schedule(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.read")),
+):
+    sched = session.exec(
+        select(CampaignSchedule).where(
+            CampaignSchedule.campaign_id == campaign_id,
+            CampaignSchedule.company_id == current_user.company_id,
+        )
+    ).first()
+    if not sched:
+        raise HTTPException(status_code=404, detail="No schedule found")
+    return sched
+
+
+@router.post("/{campaign_id}/schedule")
+async def upsert_campaign_schedule(
+    campaign_id: int,
+    data: CampaignScheduleUpsert,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    campaign = session.exec(
+        select(Campaign).where(
+            Campaign.id == campaign_id,
+            Campaign.company_id == current_user.company_id,
+        )
+    ).first()
+    if not campaign:
+        raise HTTPException(status_code=404, detail="Campaign not found")
+
+    sched = session.exec(
+        select(CampaignSchedule).where(
+            CampaignSchedule.campaign_id == campaign_id,
+            CampaignSchedule.company_id == current_user.company_id,
+        )
+    ).first()
+
+    if sched:
+        sched.agent_id = data.agent_id
+        sched.start_date = data.start_date
+        sched.end_date = data.end_date
+        sched.daily_start_hour = data.daily_start_hour
+        sched.daily_end_hour = data.daily_end_hour
+        sched.days_of_week = data.days_of_week
+        sched.timezone = data.timezone
+        sched.max_concurrent_calls = data.max_concurrent_calls
+        sched.calls_per_minute = data.calls_per_minute
+        sched.status = "active"
+        sched.next_run_at = data.start_date
+        sched.updated_at = utc_now()
+        sched.updated_by = current_user.id
+    else:
+        sched = CampaignSchedule(
+            company_id=current_user.company_id,
+            campaign_id=campaign_id,
+            agent_id=data.agent_id,
+            start_date=data.start_date,
+            end_date=data.end_date,
+            daily_start_hour=data.daily_start_hour,
+            daily_end_hour=data.daily_end_hour,
+            days_of_week=data.days_of_week,
+            timezone=data.timezone,
+            max_concurrent_calls=data.max_concurrent_calls,
+            calls_per_minute=data.calls_per_minute,
+            status="active",
+            next_run_at=data.start_date,
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+    session.add(sched)
+    session.commit()
+    session.refresh(sched)
+    return sched
+
+
+@router.patch("/{campaign_id}/schedule/pause")
+async def pause_campaign_schedule(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    sched = session.exec(
+        select(CampaignSchedule).where(
+            CampaignSchedule.campaign_id == campaign_id,
+            CampaignSchedule.company_id == current_user.company_id,
+        )
+    ).first()
+    if not sched:
+        raise HTTPException(status_code=404, detail="No schedule found")
+    sched.status = "paused"
+    sched.updated_at = utc_now()
+    sched.updated_by = current_user.id
+    session.add(sched)
+    session.commit()
+    return {"status": "paused"}
+
+
+@router.patch("/{campaign_id}/schedule/resume")
+async def resume_campaign_schedule(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    sched = session.exec(
+        select(CampaignSchedule).where(
+            CampaignSchedule.campaign_id == campaign_id,
+            CampaignSchedule.company_id == current_user.company_id,
+        )
+    ).first()
+    if not sched:
+        raise HTTPException(status_code=404, detail="No schedule found")
+    sched.status = "active"
+    sched.updated_at = utc_now()
+    sched.updated_by = current_user.id
+    session.add(sched)
+    session.commit()
+    return {"status": "active"}
+
+
+@router.delete("/{campaign_id}/schedule")
+async def delete_campaign_schedule(
+    campaign_id: int,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    sched = session.exec(
+        select(CampaignSchedule).where(
+            CampaignSchedule.campaign_id == campaign_id,
+            CampaignSchedule.company_id == current_user.company_id,
+        )
+    ).first()
+    if not sched:
+        raise HTTPException(status_code=404, detail="No schedule found")
+    session.delete(sched)
+    session.commit()
+    return {"status": "deleted"}
+
+
+@router.post("/{campaign_id}/run-now")
+async def run_campaign_now(
+    campaign_id: int,
+    force: bool = False,
+    limit: int = 20,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("campaign.manage")),
+):
+    """Manually fire queued call tasks for this campaign. If force=true, bypasses time window check."""
+    from services.campaign.dialer_service import run_batch_dialer_for_campaign
+    results = run_batch_dialer_for_campaign(
+        session=session,
+        company_id=current_user.company_id,
+        actor_user_id=current_user.id,
+        campaign_id=campaign_id,
+        limit=limit,
+        force=force,
+    )
+    return {"campaign_id": campaign_id, "results": results}

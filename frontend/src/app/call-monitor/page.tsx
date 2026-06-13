@@ -3,15 +3,21 @@
 import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
-import { Phone, PhoneCall, PhoneOff, Loader2, UserCheck, Database, Sparkles, X, ExternalLink } from "lucide-react";
+import { Phone, PhoneCall, PhoneOff, Loader2, UserCheck, Database, Sparkles, X, ExternalLink, AlertCircle, CheckCircle } from "lucide-react";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 
 // Types
 
-type CallStatus = "ringing" | "connected" | "ended";
+type CallStatus =
+  // pre-call
+  | "prepared" | "scheduled" | "queued" | "initiated" | "ringing"
+  // active
+  | "in_progress" | "connected"
+  // terminal
+  | "ended";
 
 interface CallRow {
   call_task_id: number | null;
@@ -44,6 +50,28 @@ function rowKey(msg: { call_task_id: number | null; interaction_id: string | nul
 }
 
 function StatusBadge({ status, outcome }: { status: CallStatus; outcome: string | null }) {
+  // Pre-call states
+  if (status === "prepared" || status === "scheduled") {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300">
+        <Loader2 className="w-3 h-3" /> {humanize(status)}
+      </span>
+    );
+  }
+  if (status === "queued") {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300">
+        <Loader2 className="w-3 h-3 animate-spin" /> Queued
+      </span>
+    );
+  }
+  if (status === "initiated") {
+    return (
+      <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 dark:bg-indigo-900/40 dark:text-indigo-300">
+        <Phone className="w-3 h-3 animate-pulse" /> Initiated
+      </span>
+    );
+  }
   if (status === "ringing") {
     return (
       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-yellow-100 text-yellow-800 dark:bg-yellow-900/40 dark:text-yellow-300">
@@ -51,15 +79,28 @@ function StatusBadge({ status, outcome }: { status: CallStatus; outcome: string 
       </span>
     );
   }
-  if (status === "connected") {
+  // Active states
+  if (status === "connected" || status === "in_progress") {
     return (
       <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-green-100 text-green-800 dark:bg-green-900/40 dark:text-green-300">
         <PhoneCall className="w-3 h-3" /> Connected
       </span>
     );
   }
+  // Terminal — show outcome with colour coding
+  const outcomeColors: Record<string, string> = {
+    completed:    "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
+    failed:       "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+    error:        "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300",
+    busy:         "bg-orange-100 text-orange-700 dark:bg-orange-900/40 dark:text-orange-300",
+    no_answer:    "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
+    cancelled:    "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
+    low_balance:  "bg-pink-100 text-pink-700 dark:bg-pink-900/40 dark:text-pink-300",
+    stopped:      "bg-slate-100 text-slate-600 dark:bg-slate-700 dark:text-slate-300",
+  };
+  const cls = (outcome && outcomeColors[outcome]) || "bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300";
   return (
-    <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600 dark:bg-gray-700 dark:text-gray-300">
+    <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-medium ${cls}`}>
       <PhoneOff className="w-3 h-3" /> {humanize(outcome) || "Ended"}
     </span>
   );
@@ -110,7 +151,7 @@ function WarmTransferModal({
         interaction_id: String(interactionId),
         transfer_to: phone.trim() });
       if (name.trim()) params.set("isr_name", name.trim());
-      const res = await apiFetch(`${API_BASE}/telephony/warm-transfer?${params}`, {
+      const res = await apiFetch(`${API_BASE}/warm-transfer?${params}`, {
         method: "POST"
       });
       if (!res.ok) {
@@ -209,7 +250,85 @@ export default function CallMonitorPage() {
   const [error, setError] = useState<string | null>(null);
   const [transferRow, setTransferRow] = useState<CallRow | null>(null);
 
+  // Live event logs state
+  const [eventLogs, setEventLogs] = useState<any[]>([]);
+  const [eventsConnected, setEventsConnected] = useState(false);
+  const [showInjectModal, setShowInjectModal] = useState<CallRow | null>(null);
+  const [injectEventType, setInjectEventType] = useState("user_speech");
+  const [injectPayload, setInjectPayload] = useState('{\n  "text": "Yes, I am interested"\n}');
+  const [injecting, setInjecting] = useState(false);
+  const [injectError, setInjectError] = useState<string | null>(null);
+  const [injectSuccess, setInjectSuccess] = useState(false);
+
   const wsRef = useRef<WebSocket | null>(null);
+  const eventsWsRef = useRef<WebSocket | null>(null);
+
+  useEffect(() => {
+    if (!user || !user?.company_id) return;
+
+    if (eventsWsRef.current) {
+      eventsWsRef.current.close();
+      eventsWsRef.current = null;
+    }
+
+    const url = `${WS_BASE}/crm/events/ws/${user.company_id}`;
+    const ws = new WebSocket(url);
+    eventsWsRef.current = ws;
+
+    ws.onopen = () => setEventsConnected(true);
+    ws.onclose = () => setEventsConnected(false);
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data as string);
+        if (msg.type === "ping") return;
+        setEventLogs(prev => [msg, ...prev].slice(0, 100));
+      } catch (e) {
+        console.error("Failed to parse event WS message", e);
+      }
+    };
+
+    return () => {
+      ws.close();
+      eventsWsRef.current = null;
+    };
+  }, [user, user?.company_id]);
+
+  async function handleInjectEvent(e: React.FormEvent) {
+    e.preventDefault();
+    if (!showInjectModal || !showInjectModal.interaction_id) return;
+    setInjecting(true);
+    setInjectError(null);
+    setInjectSuccess(false);
+
+    try {
+      let parsedPayload = {};
+      if (injectPayload.trim()) {
+        parsedPayload = JSON.parse(injectPayload.trim());
+      }
+      
+      const url = `${API_BASE}/crm/events/inject?interaction_id=${showInjectModal.interaction_id}&event_type=${injectEventType}`;
+      const res = await apiFetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(parsedPayload),
+      });
+
+      if (res.ok) {
+        setInjectSuccess(true);
+        setTimeout(() => {
+          setShowInjectModal(null);
+          setInjectSuccess(false);
+        }, 1500);
+      } else {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.detail || "Event injection failed");
+      }
+    } catch (err) {
+      setInjectError(err instanceof Error ? err.message : "Parsing or network error");
+    } finally {
+      setInjecting(false);
+    }
+  }
 
   useEffect(() => {
     if (!user) return;
@@ -281,14 +400,20 @@ export default function CallMonitorPage() {
     };
   }, [user, user?.company_id, selectedCampaign, sessionTimeout]);
 
-  // Sorted: active calls first (ringing/connected), then ended by most recent
+  // Sorted: active calls first (connected/in_progress), then ringing/initiated, then pre-call, then ended
   const sorted = [...rows.values()].sort((a, b) => {
-    const rank = (s: CallStatus) => (s === "connected" ? 0 : s === "ringing" ? 1 : 2);
+    const rank = (s: CallStatus) => {
+      if (s === "connected" || s === "in_progress") return 0;
+      if (s === "ringing" || s === "initiated") return 1;
+      if (s === "queued" || s === "prepared" || s === "scheduled") return 2;
+      return 3; // ended
+    };
     if (rank(a.status) !== rank(b.status)) return rank(a.status) - rank(b.status);
     return new Date(b.ts).getTime() - new Date(a.ts).getTime();
   });
 
   const activeCalls = sorted.filter((r) => r.status !== "ended").length;
+  const liveCalls   = sorted.filter((r) => r.status === "connected" || r.status === "in_progress").length;
 
   return (
     <div className="p-6 max-w-6xl mx-auto">
@@ -472,9 +597,23 @@ export default function CallMonitorPage() {
                           <button
                             title="Warm transfer to ISR"
                             onClick={() => setTransferRow(row)}
-                            className="inline-flex items-center gap-1 rounded-lg bg-violet-100 dark:bg-violet-500/10 px-2 py-1 text-[11px] font-semibold text-violet-700 dark:text-violet-300 hover:bg-violet-200 dark:hover:bg-violet-500/20 transition"
+                            className="inline-flex items-center gap-1 rounded-lg bg-violet-100 dark:bg-violet-500/10 px-2 py-1 text-[11px] font-semibold text-violet-700 dark:text-violet-300 hover:bg-violet-200 dark:hover:bg-violet-500/20 transition animate-pulse"
                           >
                             <UserCheck className="h-3 w-3" /> Transfer
+                          </button>
+                        )}
+                        {/* Inject event */}
+                        {isActive && row.interaction_id && (
+                          <button
+                            title="Inject Event"
+                            onClick={() => {
+                              setShowInjectModal(row);
+                              setInjectError(null);
+                              setInjectSuccess(false);
+                            }}
+                            className="inline-flex items-center gap-1 rounded-lg bg-indigo-100 dark:bg-indigo-500/10 px-2 py-1 text-[11px] font-semibold text-indigo-700 dark:text-indigo-300 hover:bg-indigo-200 dark:hover:bg-indigo-500/20 transition border border-indigo-200/50"
+                          >
+                            <Sparkles className="h-3 w-3" /> Inject
                           </button>
                         )}
                       </div>
@@ -487,11 +626,138 @@ export default function CallMonitorPage() {
         </div>
       )}
 
+      {/* Event Streaming Log Viewer */}
+      {user && (
+        <div className="mt-8 rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-md">
+                <Sparkles className="h-5 w-5 text-white" />
+              </div>
+              <div>
+                <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Live Call Event Stream</h3>
+                <p className="text-sm text-slate-500 dark:text-slate-400">
+                  Real-time pipeline monitoring WebSocket connection: {eventsConnected ? (
+                    <span className="text-emerald-500 font-bold">● Connected</span>
+                  ) : (
+                    <span className="text-slate-400">● Reconnecting...</span>
+                  )}
+                </p>
+              </div>
+            </div>
+            {eventLogs.length > 0 && (
+              <button
+                onClick={() => setEventLogs([])}
+                className="text-xs font-semibold text-slate-400 hover:text-slate-600 dark:hover:text-slate-300"
+              >
+                Clear Stream
+              </button>
+            )}
+          </div>
+
+          <div className="bg-slate-950 text-slate-200 p-4 rounded-xl font-mono text-xs overflow-y-auto max-h-60 space-y-1.5 border border-slate-900 shadow-inner">
+            {eventLogs.length === 0 ? (
+              <p className="text-slate-500 italic">No events received yet. Active call actions (speech, barge-in, DND) will stream here...</p>
+            ) : (
+              eventLogs.map((log, index) => (
+                <div key={log.event_id || index} className="flex items-start gap-2 border-b border-slate-900/50 pb-1 last:border-none">
+                  <span className="text-slate-500">[{new Date(log.ts).toLocaleTimeString()}]</span>
+                  <span className="text-indigo-400 font-bold">#{log.interaction_id}</span>
+                  <span className="text-amber-500 font-bold">{log.event_type}</span>
+                  <span className={`px-1.5 py-0.2 rounded text-[10px] uppercase font-bold ${
+                    log.status === "completed" ? "bg-emerald-950/40 text-emerald-400" : "bg-blue-950/40 text-blue-400"
+                  }`}>
+                    {log.status}
+                  </span>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      )}
+
       {transferRow && user && (
         <WarmTransferModal
           row={transferRow}
           onClose={() => setTransferRow(null)}
         />
+      )}
+
+      {/* Event Injection Modal */}
+      {showInjectModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/10 max-w-md w-full overflow-hidden shadow-2xl">
+            <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/10">
+              <h2 className="font-bold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+                <Sparkles className="h-5 w-5 text-indigo-500 animate-pulse" /> Inject Call Event
+              </h2>
+              <button onClick={() => setShowInjectModal(null)} className="text-slate-400 hover:text-slate-600">✕</button>
+            </div>
+            <form onSubmit={handleInjectEvent} className="p-6 space-y-4">
+              {injectError && (
+                <div className="text-sm text-red-650 bg-red-50 dark:bg-red-950/30 rounded-lg p-3 flex items-center gap-2">
+                  <AlertCircle className="h-4 w-4 text-red-500" /> {injectError}
+                </div>
+              )}
+              {injectSuccess && (
+                <div className="text-sm text-emerald-650 bg-emerald-50 dark:bg-emerald-950/30 rounded-lg p-3 flex items-center gap-2">
+                  <CheckCircle className="h-4 w-4 text-emerald-500" /> Event Injected Successfully!
+                </div>
+              )}
+
+              <div className="space-y-1">
+                <span className="text-xs text-slate-400 block font-semibold">TARGET CALL</span>
+                <span className="text-sm font-bold block text-slate-800 dark:text-slate-200">
+                  {showInjectModal.lead_name || `Lead #${showInjectModal.lead_id}`}
+                </span>
+                <span className="text-xs text-slate-400 block font-mono">Interaction ID: #{showInjectModal.interaction_id}</span>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Event Type</label>
+                <select
+                  value={injectEventType}
+                  onChange={e => setInjectEventType(e.target.value)}
+                  className="w-full p-2.5 rounded-lg border border-slate-350 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none"
+                >
+                  <option value="user_speech">User Speech (Simulate Speech Text)</option>
+                  <option value="barge_in">Barge In (Interrupt Rio)</option>
+                  <option value="dtmf_press">DTMF Press (Press Keypad)</option>
+                  <option value="system_hangup">System Hangup (Force End Call)</option>
+                  <option value="rio_silence">Rio Silence Timeout</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Payload (JSON)</label>
+                <textarea
+                  value={injectPayload}
+                  onChange={e => setInjectPayload(e.target.value)}
+                  placeholder='{ "text": "Customer statement" }'
+                  className="w-full p-2.5 rounded-lg border border-slate-350 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  rows={4}
+                />
+              </div>
+
+              <div className="flex justify-end gap-3 pt-4 border-t border-slate-200 dark:border-slate-850">
+                <button
+                  type="button"
+                  onClick={() => setShowInjectModal(null)}
+                  className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={injecting || injectSuccess}
+                  className="flex items-center gap-2 px-5 py-2 rounded-lg bg-indigo-600 text-white text-sm font-semibold hover:bg-indigo-700 disabled:opacity-50"
+                >
+                  {injecting ? <Loader2 className="h-4 w-4 animate-spin" /> : "Inject Event"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
       )}
     </div>
   );

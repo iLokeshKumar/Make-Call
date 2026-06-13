@@ -120,7 +120,7 @@ def get_qwen_tools() -> list:
                     "properties": {
                         "company_size": {"type": "string"},
                         "industry": {"type": "string"},
-                        "employee_count": {"type": "integer"}
+                        "employee_count": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
                     },
                     "required": ["company_size", "industry", "employee_count"]
                 }
@@ -139,7 +139,7 @@ def get_claude_tools() -> list:
                 "properties": {
                     "company_size": {"type": "string"},
                     "industry": {"type": "string"},
-                    "employee_count": {"type": "integer"}
+                    "employee_count": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
                 },
                 "required": ["company_size", "industry", "employee_count"]
             }
@@ -159,7 +159,7 @@ def get_openai_tools() -> list:
                     "properties": {
                         "company_size": {"type": "string"},
                         "industry": {"type": "string"},
-                        "employee_count": {"type": "integer"}
+                        "employee_count": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
                     },
                     "required": ["company_size", "industry", "employee_count"]
                 }

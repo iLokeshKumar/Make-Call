@@ -2,11 +2,12 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   reactCompiler: true,
+  allowedDevOrigins: ["127.0.0.1", "localhost"],
   async rewrites() {
     return [
       {
         source: "/uploads/:path*",
-        destination: "http://localhost:6060/uploads/:path*",
+        destination: "http://127.0.0.1:6060/uploads/:path*",
       },
     ];
   },

@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
-import { ArrowRight, BrainCircuit, CheckCircle2, ClipboardList, PhoneCall, Users } from "lucide-react";
+import { ArrowRight, BrainCircuit, CheckCircle2, ClipboardList, PhoneCall, Users, ShoppingCart, Receipt, Ticket, Wrench } from "lucide-react";
 
 import AIRecommendation from "@/components/dashboard/ai_recommendation";
 import MetricCard from "@/components/dashboard/metric_card";
@@ -14,7 +14,7 @@ import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
 import { reportUiLatency } from "@/utils/uiLatency";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 type Lead = {
   id: number;
@@ -270,6 +270,27 @@ export default function Home() {
                   The backend already handles automation. This UI makes it actionable by showing what happened, what matters, and what the rep should do next.
                 </p>
               </div>
+            </div>
+          </div>
+
+          <div className="rounded-2xl glass border border-white/40 p-5 dark:border-white/10">
+            <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-500 dark:text-slate-400">Operations</h2>
+            <div className="grid grid-cols-2 gap-2">
+              {[
+                { label: "Orders", href: "/orders", icon: ShoppingCart, color: "text-blue-600 dark:text-blue-400" },
+                { label: "Invoices", href: "/invoices", icon: Receipt, color: "text-emerald-600 dark:text-emerald-400" },
+                { label: "Tickets", href: "/tickets", icon: Ticket, color: "text-amber-600 dark:text-amber-400" },
+                { label: "Installations", href: "/installations", icon: Wrench, color: "text-violet-600 dark:text-violet-400" },
+              ].map(({ label, href, icon: Icon, color }) => (
+                <Link
+                  key={href}
+                  href={href}
+                  className="flex items-center gap-2 rounded-xl border border-white/30 bg-white/40 px-3 py-2.5 text-sm font-medium text-slate-700 transition hover:bg-white/70 dark:border-white/10 dark:bg-white/5 dark:text-slate-200 dark:hover:bg-white/10"
+                >
+                  <Icon className={`h-4 w-4 ${color}`} />
+                  {label}
+                </Link>
+              ))}
             </div>
           </div>
         </div>
