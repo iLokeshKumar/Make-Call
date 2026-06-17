@@ -9,6 +9,7 @@ from .ringg_ai import RinggAISTT
 from .assemblyai import AssemblyAISTT
 from .azure import AzureSTT
 from .inworld import InworldSTT
+from .vachana import VachanaSTT
 
 def get_stt_service(provider: str, api_key: str = None, model: str = None):
     provider = provider.lower()
@@ -34,5 +35,7 @@ def get_stt_service(provider: str, api_key: str = None, model: str = None):
         return AssemblyAISTT(api_key=api_key, model=model)
     elif provider == "inworld":
         return InworldSTT(api_key=api_key, model=model)
+    elif provider == "vachana":
+        return VachanaSTT(api_key=api_key, model=model)
     else:
         return DeepgramSTT(api_key=api_key, model=model)

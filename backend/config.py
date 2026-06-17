@@ -59,6 +59,14 @@ class AppConfig(BaseSettings):
     LLM_PROVIDER: str = "mistral"
     LLM_MODEL: Optional[str] = None
 
+    # Forex Providers
+    API_LAYER_API_KEY: Optional[str] = None
+
+    # Truecaller Business Integration
+    TRUECALLER_KEY_ID: Optional[str] = None
+    TRUECALLER_API_KEY: Optional[str] = None
+    TRUECALLER_CLIENT_ACCOUNT_ID: Optional[str] = None
+
     # STT providers
     DEEPGRAM_API_KEY: Optional[str] = None
     SARVAM_API_KEY: Optional[str] = None

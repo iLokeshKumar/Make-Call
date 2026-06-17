@@ -37,6 +37,24 @@ export default function CostTab({ sessionTimeout }: { sessionTimeout: () => void
   const [startDate, setStartDate] = useState("");
   const [endDate, setEndDate] = useState("");
 
+  // Provider Rates Config
+  type ConfiguredRate = {
+    id: number;
+    category: string;
+    provider: string;
+    model_or_voice: string | null;
+    rate_per_second: number;
+    is_active: boolean;
+  };
+  const [ratesList, setRatesList] = useState<ConfiguredRate[]>([]);
+  const [ratesLoading, setRatesLoading] = useState(false);
+  const [formCategory, setFormCategory] = useState("stt");
+  const [formProvider, setFormProvider] = useState("");
+  const [formModelVoice, setFormModelVoice] = useState("");
+  const [formRatePerSecond, setFormRatePerSecond] = useState("");
+  const [submittingRate, setSubmittingRate] = useState(false);
+
+
   const fetchFiltersAndRate = useCallback(async () => {
     try {
       const agentsRes = await apiFetch(`${CRM_BASE}/voice-agents`);
@@ -90,6 +108,70 @@ export default function CostTab({ sessionTimeout }: { sessionTimeout: () => void
     fetchBreakdown();
   }, [fetchBreakdown]);
 
+  const fetchRates = useCallback(async () => {
+    setRatesLoading(true);
+    try {
+      const res = await apiFetch(`${CRM_BASE}/cost/rates`);
+      if (res.ok) {
+        setRatesList(await res.json());
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setRatesLoading(false);
+    }
+  }, []);
+
+  const handleAddRate = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!formProvider) return;
+    const rateVal = parseFloat(formRatePerSecond);
+    if (isNaN(rateVal) || rateVal < 0) return;
+
+    setSubmittingRate(true);
+    try {
+      const res = await apiFetch(`${CRM_BASE}/cost/rates`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          category: formCategory,
+          provider: formProvider,
+          model_or_voice: formModelVoice || null,
+          rate_per_second: rateVal,
+          is_active: true,
+        }),
+      });
+      if (res.ok) {
+        setFormProvider("");
+        setFormModelVoice("");
+        setFormRatePerSecond("");
+        fetchRates();
+      }
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setSubmittingRate(false);
+    }
+  };
+
+  const handleDeleteRate = async (id: number) => {
+    try {
+      const res = await apiFetch(`${CRM_BASE}/cost/rates/${id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) {
+        fetchRates();
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  };
+
+  useEffect(() => {
+    fetchRates();
+  }, [fetchRates]);
+
+
   // Aggregate stats from breakdown rows
   const stats = breakdown.reduce((acc, row) => {
     acc.totalCalls += row.total_calls;
@@ -112,8 +194,21 @@ export default function CostTab({ sessionTimeout }: { sessionTimeout: () => void
 
   const avgCostPerMinute = stats.totalMinutes > 0 ? stats.totalCost / stats.totalMinutes : 0;
 
+  const currencySymbols: Record<string, string> = {
+    USD: "$",
+    EUR: "€",
+    GBP: "£",
+    INR: "₹",
+    AUD: "A$",
+    CAD: "C$",
+    SGD: "S$",
+    JPY: "¥",
+    AED: "د.إ",
+    CNY: "¥",
+  };
+
   const fmtCost = (val: number) => {
-    const symbol = currency === "INR" ? "₹" : "$";
+    const symbol = currencySymbols[currency] || `${currency} `;
     return `${symbol}${val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}`;
   };
 
@@ -131,6 +226,14 @@ export default function CostTab({ sessionTimeout }: { sessionTimeout: () => void
             >
               <option value="USD">USD ($)</option>
               <option value="INR">INR (₹)</option>
+              <option value="EUR">EUR (€)</option>
+              <option value="GBP">GBP (£)</option>
+              <option value="AUD">AUD (A$)</option>
+              <option value="CAD">CAD (C$)</option>
+              <option value="SGD">SGD (S$)</option>
+              <option value="JPY">JPY (¥)</option>
+              <option value="AED">AED (د.إ)</option>
+              <option value="CNY">CNY (¥)</option>
             </select>
           </div>
 
@@ -220,7 +323,7 @@ export default function CostTab({ sessionTimeout }: { sessionTimeout: () => void
         <h4 className="font-bold text-sm text-slate-800 dark:text-slate-200">Sub-Services Cost Partition</h4>
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="p-3 bg-slate-50/50 dark:bg-slate-900/30 border border-slate-150 dark:border-slate-800 rounded-xl">
-            <span className="text-[10px] text-slate-400 block font-semibold uppercase">Speech-To-Text (STT)</span>
+            <span className="text-[10px] text-slate-400 block font-semibold uppercase">Speech-To-Text</span>
             <span className="text-sm font-bold text-slate-700 dark:text-slate-200 block mt-1">{fmtCost(stats.sttCost)}</span>
           </div>
           <div className="p-3 bg-slate-50/50 dark:bg-slate-900/30 border border-slate-150 dark:border-slate-800 rounded-xl">
@@ -279,6 +382,120 @@ export default function CostTab({ sessionTimeout }: { sessionTimeout: () => void
                     </td>
                     <td className="px-4 py-3 font-bold text-slate-900 dark:text-white">{fmtCost(row.total_cost)}</td>
                     <td className="px-4 py-3 text-slate-500 text-xs">{fmtCost(row.cost_per_minute)}/m</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Configured Rates Editor */}
+      <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">
+        <div>
+          <h4 className="font-bold text-base text-slate-800 dark:text-slate-200">Custom Provider Rates</h4>
+          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">
+            Override the default hardcoded calling estimation rates. Cost is calculated per-second of call duration.
+          </p>
+        </div>
+
+        <form onSubmit={handleAddRate} className="grid grid-cols-1 md:grid-cols-5 gap-4 items-end bg-slate-50/50 dark:bg-slate-900/30 p-4 rounded-xl border border-slate-200 dark:border-slate-850">
+          <div className="flex flex-col">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Category</span>
+            <select
+              value={formCategory}
+              onChange={e => setFormCategory(e.target.value)}
+              className="p-2 rounded-lg border border-slate-350 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 focus:outline-none"
+            >
+              <option value="stt">Speech-To-Text</option>
+              <option value="llm">Language Model</option>
+              <option value="tts">Text-To-Speech</option>
+              <option value="telephony">Telephony</option>
+            </select>
+          </div>
+
+          <div className="flex flex-col">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Provider</span>
+            <input
+              type="text"
+              placeholder="e.g. twilio, cartesia, openai"
+              value={formProvider}
+              onChange={e => setFormProvider(e.target.value.toLowerCase())}
+              required
+              className="p-2 rounded-lg border border-slate-350 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex flex-col">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Model / Voice</span>
+            <input
+              type="text"
+              placeholder="e.g. aura-asteria-en, gpt-4o"
+              value={formModelVoice}
+              onChange={e => setFormModelVoice(e.target.value)}
+              className="p-2 rounded-lg border border-slate-350 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 focus:outline-none"
+            />
+          </div>
+
+          <div className="flex flex-col">
+            <span className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">Rate per Second (USD)</span>
+            <input
+              type="number"
+              step="0.00000001"
+              placeholder="e.g. 0.00000450"
+              value={formRatePerSecond}
+              onChange={e => setFormRatePerSecond(e.target.value)}
+              required
+              className="p-2 rounded-lg border border-slate-350 dark:border-slate-700 bg-white dark:bg-slate-800 text-xs font-semibold text-slate-700 dark:text-slate-200 focus:outline-none"
+            />
+          </div>
+
+          <button
+            type="submit"
+            disabled={submittingRate}
+            className="flex items-center justify-center gap-2 px-4 py-2 bg-violet-600 hover:bg-violet-700 text-white rounded-lg text-xs font-bold transition-all h-9 disabled:opacity-50 cursor-pointer"
+          >
+            {submittingRate ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+            Add / Update Rate
+          </button>
+        </form>
+
+        {ratesLoading ? (
+          <div className="flex items-center justify-center py-6 text-slate-500">
+            <Loader2 className="h-5 w-5 animate-spin mr-2 text-violet-500" />
+            Loading rates...
+          </div>
+        ) : ratesList.length === 0 ? (
+          <p className="text-center text-slate-400 text-xs py-4">No custom rates configured. Using live API lookup.</p>
+        ) : (
+          <div className="overflow-x-auto rounded-xl border border-slate-200 dark:border-slate-800">
+            <table className="w-full text-xs">
+              <thead className="bg-slate-50 dark:bg-slate-800/60 text-[10px] text-slate-500 dark:text-slate-400 uppercase tracking-wide">
+                <tr>
+                  <th className="px-4 py-2.5 text-left">Category</th>
+                  <th className="px-4 py-2.5 text-left">Provider</th>
+                  <th className="px-4 py-2.5 text-left">Model / Voice</th>
+                  <th className="px-4 py-2.5 text-left">Rate per Second</th>
+                  <th className="px-4 py-2.5 text-left">Estimated per Min</th>
+                  <th className="px-4 py-2.5 text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-100 dark:divide-slate-800 font-mono">
+                {ratesList.map(rate => (
+                  <tr key={rate.id} className="hover:bg-slate-50/60 dark:hover:bg-white/[0.02]">
+                    <td className="px-4 py-2.5 uppercase font-semibold text-slate-600 dark:text-slate-350">{rate.category}</td>
+                    <td className="px-4 py-2.5 text-slate-700 dark:text-slate-200 font-semibold">{rate.provider}</td>
+                    <td className="px-4 py-2.5 text-slate-500 dark:text-slate-400">{rate.model_or_voice || "—"}</td>
+                    <td className="px-4 py-2.5 font-semibold text-slate-700 dark:text-slate-200">${Number(rate.rate_per_second).toFixed(8)}</td>
+                    <td className="px-4 py-2.5 text-slate-500">${(Number(rate.rate_per_second) * 60).toFixed(4)}/m</td>
+                    <td className="px-4 py-2.5 text-right">
+                      <button
+                        onClick={() => handleDeleteRate(rate.id)}
+                        className="text-red-500 hover:text-red-700 text-xs font-semibold px-2 py-1 rounded hover:bg-red-50/50 dark:hover:bg-red-950/20 transition-all cursor-pointer"
+                      >
+                        Delete
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

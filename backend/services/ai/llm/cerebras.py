@@ -10,7 +10,6 @@ from credentials_service import get_company_setting_value
 
 logger = logging.getLogger(__name__)
 
-# Patterns that definitively identify a streaming token as JSON / tool-call leakage. These are checked against the current token AND the last ~80 chars of accumulated output.
 _JSON_TOKEN_PATTERNS = (
     '"arguments":', '"name":', '"id":', '": "',
     '"email":', '"phone":', '"lead_id":', '"status":',
@@ -18,7 +17,7 @@ _JSON_TOKEN_PATTERNS = (
     '"value":', '"type":', '"data":', '"content":',
     '"message":', '"role":', '"action":', '"parameters":',
 )
-# Regex for bare key-value pair in a sliding window: "some_key": "..." or "some_key": 123
+
 _JSON_KV_RE = re.compile(r'"[a-z_]{2,24}"\s*:\s*["{0-9\[Ttf]')
 
 class CerebrasLLM(BaseLLM):
@@ -38,7 +37,7 @@ class CerebrasLLM(BaseLLM):
             "Content-Type": "application/json"
         }
         
-        # Deep-sanitize messages to ensure absolute JSON serialization
+
         def sanitize_obj(obj):
             if isinstance(obj, list):
                 return [sanitize_obj(i) for i in obj]
@@ -46,7 +45,7 @@ class CerebrasLLM(BaseLLM):
                 return {k: sanitize_obj(v) for k, v in obj.items()}
             if hasattr(obj, "__dict__"):
                 return sanitize_obj(obj.__dict__)
-            # Support for type('tc'...) objects from VoicePipeline
+
             if hasattr(obj, "id") and hasattr(obj, "function"):
                 return {
                     "id": obj.id,
@@ -58,21 +57,21 @@ class CerebrasLLM(BaseLLM):
                 }
             return str(obj)
 
-        # Context Truncation: Use tool-safe history to preventing orphan tool messages
         final_history = self.get_safe_history(limit=8)
         
-        # Strengthen Cerebras instructions against JSON speech
+
         system_msg = [m for m in final_history if m["role"] == "system"]
         if system_msg:
             system_msg[0]["content"] += "\n\nCRITICAL: Never output tool calls, JSON, or markdown in your speech. Always use the provided tool-calling interface."
 
         sanitized_messages = sanitize_obj(final_history)
 
-        # Prepare payload
+
         payload = {
             "model": self.model,
             "messages": sanitized_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": 0.7,
             "max_tokens": 2048
         }
@@ -107,6 +106,7 @@ class CerebrasLLM(BaseLLM):
                 error_occurred = False
                 _json_depth = 0        # brace-depth tracker for { ... } JSON blocks
                 _kv_window = ""        # sliding window for bare key:value detection
+                _last_usage_raw = None
 
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(url, headers=headers, json=payload) as resp:
@@ -167,6 +167,8 @@ class CerebrasLLM(BaseLLM):
 
                                     choices = chunk.get('choices', [])
                                     if not choices:
+                                        if chunk.get('usage'):
+                                            _last_usage_raw = chunk['usage']
                                         continue
 
                                     delta = choices[0].get('delta', {})
@@ -272,10 +274,15 @@ class CerebrasLLM(BaseLLM):
                         )
                         formatted_tool_calls.append(obj)
 
+                self.last_usage = {
+                    "prompt_tokens": _last_usage_raw.get("prompt_tokens") if _last_usage_raw else None,
+                    "completion_tokens": _last_usage_raw.get("completion_tokens") if _last_usage_raw else None,
+                }
                 yield {
-                    "type": "finished", 
-                    "full_reply": full_reply, 
-                    "tool_calls": formatted_tool_calls if formatted_tool_calls else None
+                    "type": "finished",
+                    "full_reply": full_reply,
+                    "tool_calls": formatted_tool_calls if formatted_tool_calls else None,
+                    "usage": self.last_usage,
                 }
                 return # Successful completion
 

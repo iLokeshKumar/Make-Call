@@ -62,6 +62,8 @@ ALL_INTEGRATION_KEYS = {
     "AZURE_SPEECH_REGION",
     "AZURE_STT_MODEL",
     "AZURE_SPEECH_ENDPOINT",
+    "VACHANA_API_KEY",
+    "VACHANA_STT_MODEL",
     # TTS
     "CARTESIA_API_KEY",
     "ELEVENLABS_API_KEY",
@@ -92,6 +94,8 @@ ALL_INTEGRATION_KEYS = {
     "KITTEN_TTS_MODEL",
     "KITTEN_TTS_VOICE",
     "MISTRAL_VOICE_ID",
+    "VACHANA_TTS_MODEL",
+    "VACHANA_VOICE_ID",
     # LLM
     "OPENAI_API_KEY",
     "MISTRAL_API_KEY",
@@ -123,6 +127,7 @@ ALL_INTEGRATION_KEYS = {
     "AIRLLM_MODEL",
     "AIRLLM_COMPRESSION",
     "AIRLLM_MAX_NEW_TOKENS",
+    "INWORLD_LLM_MODEL",
     # Email / SMTP
     "SMTP_SERVER",
     "SMTP_PORT",
@@ -139,6 +144,10 @@ ALL_INTEGRATION_KEYS = {
     "LUSHA_API_KEY",
     "ZOOMINFO_CLIENT_ID",
     "ZOOMINFO_API_KEY",
+    "API_LAYER_API_KEY",
+    "TRUECALLER_KEY_ID",
+    "TRUECALLER_API_KEY",
+    "TRUECALLER_CLIENT_ACCOUNT_ID"
 }
 
 SECRET_INTEGRATION_KEYS = {
@@ -169,6 +178,7 @@ SECRET_INTEGRATION_KEYS = {
     "ZOOMINFO_CLIENT_ID",
     "ZOOMINFO_API_KEY",
     "GROQ_API_KEY",
+    "VACHANA_API_KEY",
     "PLIVO_AUTH_TOKEN",
     "VOBIZ_AUTH_TOKEN",
     "ASSEMBLYAI_API_KEY",
@@ -180,6 +190,10 @@ SECRET_INTEGRATION_KEYS = {
     "AWS_SECRET_ACCESS_KEY",
     "AZURE_LLM_API_KEY",
     "AZURE_SPEECH_API_KEY",
+    "API_LAYER_API_KEY",
+    "TRUECALLER_KEY_ID",
+    "TRUECALLER_API_KEY",
+    "TRUECALLER_CLIENT_ACCOUNT_ID"
 }
 
 PLAIN_INTEGRATION_KEYS = ALL_INTEGRATION_KEYS - SECRET_INTEGRATION_KEYS
@@ -241,7 +255,7 @@ async def create_company_prompt(
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("settings.manage_company")),
 ):
-    # Determine next version
+
     last = session.exec(select(CompanyPrompt.version).where(CompanyPrompt.company_id == current_user.company_id).order_by(CompanyPrompt.version.desc()).limit(1)).first()
     next_version = (last or 0) + 1
     prompt = CompanyPrompt(
@@ -317,10 +331,6 @@ async def upsert_company_settings(
     session.commit()
     _sc.invalidate_user(current_user.company_id)
 
-    # Propagate global provider changes to all VoiceAgentRuntimeConfig rows so
-    # that stale per-row defaults (set at agent-creation time) don't shadow the
-    # company-level setting.  Per-agent customisations can still be re-applied
-    # from the Voice Agents page.
     _PROVIDER_MAPPING = {
         "LLM_PROVIDER": "llm_provider",
         "STT_PROVIDER": "stt_provider",

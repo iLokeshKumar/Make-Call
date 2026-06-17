@@ -4,7 +4,7 @@ from sqlmodel import Session, select, func, text
 from datetime import datetime, timezone, timedelta
 from typing import List, Optional
 from database import get_session
-from models.models import AnalyticsAlert, LatencyLog, User
+from models.models import AnalyticsAlert, LatencyLog, User, UsageEvent
 from auth import get_current_user
 from services.core.auth_service import user_has_any_permission
 from services.analytics.analytics_service import (
@@ -388,6 +388,174 @@ async def campaign_drilldown(
     return get_campaign_drilldown(session, current_user.company_id, campaign_id)
 
 
+@router.get("/voice-overview")
+async def voice_overview(
+    date_from: Optional[str] = None,
+    date_to: Optional[str] = None,
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """Voice call analytics: outcomes, daily volume, hourly heatmap, per-agent stats."""
+    now = datetime.now(timezone.utc)
+    if date_from:
+        try:
+            since = datetime.strptime(date_from, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_from (YYYY-MM-DD)")
+    else:
+        since = now - timedelta(days=30)
+
+    if date_to:
+        try:
+            until = datetime.strptime(date_to, "%Y-%m-%d").replace(
+                hour=23, minute=59, second=59, tzinfo=timezone.utc
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid date_to (YYYY-MM-DD)")
+    else:
+        until = now
+
+    cid = current_user.company_id
+
+    # ── Outcome distribution ────────────────────────────────────────────────
+    outcome_rows = session.execute(
+        text("""
+            SELECT status, COUNT(*) AS cnt
+            FROM interactions
+            WHERE company_id = :cid
+              AND type = 'call'
+              AND started_at >= :since
+              AND started_at <= :until
+              AND deleted_at IS NULL
+            GROUP BY status
+            ORDER BY cnt DESC
+        """),
+        {"cid": cid, "since": since, "until": until},
+    ).all()
+
+    total_calls = sum(r[1] for r in outcome_rows)
+    CONNECTED_STATUSES = {"completed", "ended", "active", "in_progress", "connected"}
+    outcome_distribution = [
+        {
+            "status": r[0] or "unknown",
+            "count": int(r[1]),
+            "pct": round(float(r[1]) / total_calls * 100, 1) if total_calls else 0,
+            "connected": (r[0] or "") in CONNECTED_STATUSES,
+        }
+        for r in outcome_rows
+    ]
+    connected_count = sum(o["count"] for o in outcome_distribution if o["connected"])
+
+    # ── Summary scalars ─────────────────────────────────────────────────────
+    summary_row = session.execute(
+        text("""
+            SELECT
+                COUNT(*) AS total,
+                SUM(CASE WHEN direction = 'outbound' THEN 1 ELSE 0 END) AS outbound,
+                SUM(CASE WHEN direction = 'inbound'  THEN 1 ELSE 0 END) AS inbound,
+                ROUND(AVG(recording_duration)::numeric, 1)              AS avg_dur,
+                ROUND(SUM(recording_duration)::numeric / 60.0, 1)       AS total_min
+            FROM interactions
+            WHERE company_id = :cid
+              AND type = 'call'
+              AND started_at >= :since
+              AND started_at <= :until
+              AND deleted_at IS NULL
+        """),
+        {"cid": cid, "since": since, "until": until},
+    ).one()
+
+    # ── Daily volume by status ──────────────────────────────────────────────
+    daily_rows = session.execute(
+        text("""
+            SELECT DATE(started_at) AS day, status, COUNT(*) AS cnt
+            FROM interactions
+            WHERE company_id = :cid
+              AND type = 'call'
+              AND started_at >= :since
+              AND started_at <= :until
+              AND deleted_at IS NULL
+            GROUP BY DATE(started_at), status
+            ORDER BY day ASC
+        """),
+        {"cid": cid, "since": since, "until": until},
+    ).all()
+
+    daily_volume = [
+        {"day": str(r[0]), "status": r[1] or "unknown", "count": int(r[2])}
+        for r in daily_rows
+    ]
+
+    # ── Hourly heatmap ──────────────────────────────────────────────────────
+    hourly_rows = session.execute(
+        text("""
+            SELECT EXTRACT(HOUR FROM started_at)::int AS hr, COUNT(*) AS cnt
+            FROM interactions
+            WHERE company_id = :cid
+              AND type = 'call'
+              AND started_at >= :since
+              AND started_at <= :until
+              AND deleted_at IS NULL
+            GROUP BY EXTRACT(HOUR FROM started_at)
+            ORDER BY hr
+        """),
+        {"cid": cid, "since": since, "until": until},
+    ).all()
+
+    hour_map = {r[0]: int(r[1]) for r in hourly_rows}
+    hourly_heatmap = [{"hour": h, "count": hour_map.get(h, 0)} for h in range(24)]
+
+    # ── Per-agent stats ─────────────────────────────────────────────────────
+    agent_rows = session.execute(
+        text("""
+            SELECT
+                va.id                                                             AS agent_id,
+                va.name                                                           AS agent_name,
+                COUNT(i.id)                                                       AS total,
+                SUM(CASE WHEN i.status IN ('completed','ended','active','in_progress','connected') THEN 1 ELSE 0 END) AS connected,
+                ROUND(AVG(i.recording_duration)::numeric, 1)                     AS avg_dur
+            FROM interactions i
+            JOIN voice_agents va ON va.id = i.agent_id
+            WHERE i.company_id = :cid
+              AND i.type IN ('call', 'call_completed', 'call_summary')
+              AND i.started_at >= :since
+              AND i.started_at <= :until
+              AND i.deleted_at IS NULL
+            GROUP BY va.id, va.name
+            ORDER BY total DESC
+        """),
+        {"cid": cid, "since": since, "until": until},
+    ).all()
+
+    agent_stats = [
+        {
+            "agent_id": r[0],
+            "agent_name": r[1],
+            "total": int(r[2]),
+            "connected": int(r[3] or 0),
+            "avg_duration": float(r[4] or 0),
+            "connect_rate": round(float(r[3] or 0) / float(r[2]) * 100, 1) if r[2] else 0,
+        }
+        for r in agent_rows
+    ]
+
+    return {
+        "summary": {
+            "total_calls": int(summary_row[0] or 0),
+            "connected": connected_count,
+            "connect_rate_pct": round(connected_count / total_calls * 100, 1) if total_calls else 0,
+            "avg_duration_seconds": float(summary_row[3] or 0),
+            "total_minutes": float(summary_row[4] or 0),
+            "outbound": int(summary_row[1] or 0),
+            "inbound": int(summary_row[2] or 0),
+        },
+        "outcome_distribution": outcome_distribution,
+        "daily_volume": daily_volume,
+        "hourly_heatmap": hourly_heatmap,
+        "agent_stats": agent_stats,
+    }
+
+
 @router.get("/campaign/{campaign_id}/email-report")
 async def campaign_email_report(
     campaign_id: int,
@@ -577,6 +745,80 @@ async def get_latency_by_interaction(
                 "llm_ms": float(r.llm_ms),
                 "tts_ms": float(r.tts_ms),
                 "total_ms": float(r.total_ms),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/usage/summary")
+def get_usage_summary(
+    date_from: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    date_to: Optional[str] = Query(None, description="YYYY-MM-DD"),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(get_current_user),
+):
+    """
+    Aggregated token/character/audio usage per (service_type, provider, model).
+    Default window: last 30 days.
+    """
+    cid = current_user.company_id
+    now = datetime.now(timezone.utc)
+
+    if date_from:
+        dt_from = datetime.fromisoformat(date_from).replace(tzinfo=timezone.utc)
+    else:
+        dt_from = now - timedelta(days=30)
+
+    if date_to:
+        dt_to = datetime.fromisoformat(date_to).replace(tzinfo=timezone.utc) + timedelta(days=1)
+    else:
+        dt_to = now
+
+    rows = session.execute(
+        text("""
+            SELECT
+                service_type,
+                provider,
+                model,
+                context,
+                COUNT(*)                        AS events,
+                SUM(prompt_tokens)              AS prompt_tokens,
+                SUM(completion_tokens)          AS completion_tokens,
+                SUM(total_tokens)               AS total_tokens,
+                SUM(characters)                 AS characters,
+                SUM(audio_seconds)              AS audio_seconds
+            FROM usage_events
+            WHERE company_id = :cid
+              AND created_at >= :dt_from
+              AND created_at < :dt_to
+            GROUP BY service_type, provider, model, context
+            ORDER BY service_type, provider, model
+        """),
+        {"cid": cid, "dt_from": dt_from, "dt_to": dt_to},
+    ).mappings().all()
+
+    def _int(v):
+        return int(v) if v is not None else None
+
+    def _float(v):
+        return float(v) if v is not None else None
+
+    return {
+        "date_from": dt_from.date().isoformat(),
+        "date_to": (dt_to - timedelta(days=1)).date().isoformat(),
+        "rows": [
+            {
+                "service_type": r["service_type"],
+                "provider": r["provider"],
+                "model": r["model"],
+                "context": r["context"],
+                "events": _int(r["events"]),
+                "prompt_tokens": _int(r["prompt_tokens"]),
+                "completion_tokens": _int(r["completion_tokens"]),
+                "total_tokens": _int(r["total_tokens"]),
+                "characters": _int(r["characters"]),
+                "audio_seconds": _float(r["audio_seconds"]),
             }
             for r in rows
         ],

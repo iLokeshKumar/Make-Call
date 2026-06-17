@@ -23,7 +23,7 @@ class ClaudeLLM(BaseLLM):
         """Convert OpenAI-style tools to Anthropic format."""
         claude_tools = []
         for t in mistral_tools:
-            # Ensure we have a dict
+
             if hasattr(t, "to_dict"):
                 tool_dict = t.to_dict()
             elif isinstance(t, dict):
@@ -90,10 +90,15 @@ class ClaudeLLM(BaseLLM):
                 if accumulated_text.strip():
                     yield {"type": "sentence", "content": accumulated_text.strip()}
 
+                self.last_usage = {
+                    "prompt_tokens": final_msg.usage.input_tokens,
+                    "completion_tokens": final_msg.usage.output_tokens,
+                }
                 yield {
                     "type": "finished",
                     "full_reply": full_reply,
-                    "tool_calls": tool_calls if tool_calls else None
+                    "tool_calls": tool_calls if tool_calls else None,
+                    "usage": self.last_usage,
                 }
 
         except Exception as e:

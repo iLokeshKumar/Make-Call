@@ -3,7 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import {
   Activity, BarChart2, Bell, Brain, Clock, Download, Loader2,
-  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2, Zap } from "lucide-react";
+  Mic, Phone, Plus, RefreshCw, Trash2, TrendingDown, TrendingUp, Volume2, Zap, Cpu } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 
@@ -13,6 +13,8 @@ import CampaignConversionChart from "@/components/analytics/CampaignConversionCh
 import FunnelChart from "@/components/analytics/FunnelChart";
 import HorizontalMetricBars from "@/components/analytics/HorizontalMetricBars";
 import LatencyTrendChart from "@/components/analytics/LatencyTrendChart";
+import VoiceOverviewTab from "@/components/analytics/VoiceOverviewTab";
+import UsageTab from "@/components/analytics/UsageTab";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
 type EngagementSummary = {
@@ -230,7 +232,7 @@ type CallConversion = {
   closed_won: number;
 };
 
-const MAIN_TABS = ["Overview", "Latency", "Alerts", "Performance"] as const;
+const MAIN_TABS = ["Overview", "Voice", "Usage", "Latency", "Alerts", "Performance"] as const;
 type MainTab = typeof MAIN_TABS[number];
 type LatencySubTab = "engines" | "calls" | "models" | "trend";
 
@@ -468,6 +470,8 @@ export default function AnalyticsPage() {
             className={clsx("px-5 py-3 text-sm font-semibold capitalize rounded-t-xl transition-all border-b-2",
               activeTab === t ? "text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-white")}>
             {t === "Overview"    ? <><BarChart2 className="inline h-3.5 w-3.5 mr-1.5" />Overview</>    :
+             t === "Voice"       ? <><Phone     className="inline h-3.5 w-3.5 mr-1.5" />Voice</>       :
+             t === "Usage"       ? <><Cpu       className="inline h-3.5 w-3.5 mr-1.5" />Usage</>       :
              t === "Latency"     ? <><Clock     className="inline h-3.5 w-3.5 mr-1.5" />Latency</>     :
              t === "Performance" ? <><Zap       className="inline h-3.5 w-3.5 mr-1.5" />Performance</> :
                                    <><Bell      className="inline h-3.5 w-3.5 mr-1.5" />Alerts</>}
@@ -591,6 +595,16 @@ export default function AnalyticsPage() {
             </>
           )}
         </div>
+      )}
+
+      {/* VOICE TAB */}
+      {activeTab === "Voice" && (
+        <VoiceOverviewTab apiBase={API_BASE} sessionTimeout={sessionTimeout} />
+      )}
+
+      {/* USAGE TAB */}
+      {activeTab === "Usage" && (
+        <UsageTab apiBase={API_BASE} sessionTimeout={sessionTimeout} />
       )}
 
       {/* LATENCY TAB */}

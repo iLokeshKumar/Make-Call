@@ -5,8 +5,6 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
-# Sentence splitting regex for low-latency streaming.
-# Do not split on commas/semicolons; that creates robotic, clause-by-clause TTS.
 SENTENCE_SPLIT_REGEX = re.compile(r'([.?!])\s+')
 
 class BaseLLM(ABC):
@@ -14,6 +12,7 @@ class BaseLLM(ABC):
         self.system_prompt = system_prompt
         self.messages = [{"role": "system", "content": system_prompt}]
         self.provider = "Unknown"
+        self.last_usage: dict = {}
 
     def _prune_history(self, max_non_system: int = 14, max_ephemeral_system: int = 4):
         if len(self.messages) <= 1:

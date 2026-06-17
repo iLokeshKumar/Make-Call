@@ -304,7 +304,101 @@ function ms(s?: number) {
     return s >= 1 ? `${s.toFixed(2)}s` : `${Math.round(s * 1000)}ms`;
 }
 
+type LogTab = "feed" | "turns" | "stats";
+
+interface LogEntry {
+    turn: number;
+    component: "transcriber" | "llm" | "synthesizer" | "function_call";
+    data: Record<string, unknown>;
+    latency?: number;
+}
+
+function buildLogFeed(
+    stt: LatencyTurn[],
+    llm: LatencyTurn[],
+    tts: LatencyTurn[],
+    tools: ToolCallLog[],
+): LogEntry[] {
+    const turnCount = Math.max(stt.length, llm.length, tts.length);
+    const entries: LogEntry[] = [];
+    for (let i = 0; i < turnCount; i++) {
+        if (stt[i]) entries.push({ turn: i, component: "transcriber", data: stt[i] as Record<string, unknown>, latency: stt[i].latency });
+        // tool calls fire after STT, before LLM response
+        tools.filter(t => t.turn_index === i).forEach(tc => {
+            entries.push({ turn: i, component: "function_call", data: tc as unknown as Record<string, unknown>, latency: tc.latency });
+        });
+        if (llm[i]) entries.push({ turn: i, component: "llm", data: llm[i] as Record<string, unknown>, latency: llm[i].latency });
+        if (tts[i]) entries.push({ turn: i, component: "synthesizer", data: tts[i] as Record<string, unknown>, latency: tts[i].latency });
+    }
+    // orphan tool calls
+    tools.filter(t => t.turn_index == null).forEach(tc => {
+        entries.push({ turn: -1, component: "function_call", data: tc as unknown as Record<string, unknown>, latency: tc.latency });
+    });
+    return entries;
+}
+
+const COMPONENT_META = {
+    transcriber: { label: "STT", color: "text-sky-400", border: "border-sky-900/50", bg: "bg-sky-950/40", icon: <Mic className="h-3 w-3" /> },
+    llm: { label: "LLM", color: "text-violet-400", border: "border-violet-900/50", bg: "bg-violet-950/40", icon: <Zap className="h-3 w-3" /> },
+    synthesizer: { label: "TTS", color: "text-emerald-400", border: "border-emerald-900/50", bg: "bg-emerald-950/40", icon: <Phone className="h-3 w-3" /> },
+    function_call: { label: "TOOL", color: "text-amber-400", border: "border-amber-900/40", bg: "bg-amber-950/30", icon: <Wrench className="h-3 w-3" /> },
+};
+
+function LogEntryRow({ entry, idx }: { entry: LogEntry; idx: number }) {
+    const [expanded, setExpanded] = useState(false);
+    const meta = COMPONENT_META[entry.component];
+    const d = entry.data;
+
+    let summary: React.ReactNode = null;
+    let detail: string | null = null;
+
+    if (entry.component === "transcriber") {
+        summary = d.words ? <span className="text-slate-200 text-[11px]">&ldquo;{String(d.words)}&rdquo;</span> : <span className="text-slate-500 text-[11px] italic">no transcript</span>;
+    } else if (entry.component === "llm") {
+        const parts = [
+            d.prompt_tokens != null ? `${d.prompt_tokens} in` : null,
+            d.completion_tokens != null ? `${d.completion_tokens} out` : null,
+            d.model ? String(d.model).split("/").pop() : null,
+        ].filter(Boolean);
+        summary = <span className="text-slate-400 text-[11px] font-mono">{parts.join(" · ")}</span>;
+    } else if (entry.component === "synthesizer") {
+        summary = <span className="text-slate-400 text-[11px] font-mono">{d.characters != null ? `${d.characters} chars` : ""}{d.model ? ` · ${String(d.model).split("/").pop()}` : ""}</span>;
+    } else if (entry.component === "function_call") {
+        const tc = d as unknown as ToolCallLog;
+        summary = <span className="text-amber-300 text-[11px] font-mono font-semibold">{tc.name ?? "tool"}({tc.arguments ? JSON.stringify(tc.arguments).slice(0, 60) : ""})</span>;
+        detail = JSON.stringify({ arguments: tc.arguments, result: tc.result }, null, 2);
+    }
+
+    return (
+        <div
+            className={clsx("rounded-lg border px-3 py-2 cursor-pointer transition-colors", meta.border, meta.bg, expanded ? "opacity-100" : "opacity-90 hover:opacity-100")}
+            onClick={() => detail && setExpanded(e => !e)}
+        >
+            <div className="flex items-center gap-2 flex-wrap">
+                <span className="flex items-center gap-1 shrink-0">
+                    <span className={meta.color}>{meta.icon}</span>
+                    <span className={clsx("text-[10px] font-bold uppercase tracking-wider", meta.color)}>{meta.label}</span>
+                </span>
+                <span className="text-[10px] text-slate-600 font-mono shrink-0">T{entry.turn + 1}</span>
+                <span className="flex-1 min-w-0 truncate">{summary}</span>
+                {entry.latency != null && (
+                    <span className={clsx("text-[10px] font-mono shrink-0", meta.color)}>{ms(entry.latency)}</span>
+                )}
+                {detail && (
+                    <span className="text-[10px] text-slate-600 shrink-0">{expanded ? "▲" : "▼"}</span>
+                )}
+            </div>
+            {expanded && detail && (
+                <pre className="mt-2 text-[10px] text-slate-300 font-mono whitespace-pre-wrap break-all bg-slate-900/60 rounded p-2 max-h-48 overflow-y-auto">
+                    {detail}
+                </pre>
+            )}
+        </div>
+    );
+}
+
 function CallLogModal({ call, onClose }: { call: Interaction; onClose: () => void }) {
+    const [tab, setTab] = useState<LogTab>("feed");
     const rio: RioData | null = (call.metadata_json as Record<string, unknown>)?.rio as RioData ?? null;
     if (!rio) return null;
 
@@ -313,6 +407,13 @@ function CallLogModal({ call, onClose }: { call: Interaction; onClose: () => voi
     const tts = rio.latency_data?.synthesizer?.turns ?? [];
     const tools = rio.tool_call_logs ?? [];
     const turnCount = Math.max(stt.length, llm.length, tts.length);
+    const feed = buildLogFeed(stt, llm, tts, tools);
+
+    const TABS: { id: LogTab; label: string }[] = [
+        { id: "feed", label: "Log Feed" },
+        { id: "turns", label: "Turn Analysis" },
+        { id: "stats", label: "Stats" },
+    ];
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4" onClick={onClose}>
@@ -321,10 +422,10 @@ function CallLogModal({ call, onClose }: { call: Interaction; onClose: () => voi
                 <div className="flex items-center justify-between px-5 py-3 border-b border-slate-800 flex-shrink-0">
                     <div className="flex items-center gap-2">
                         <Activity className="h-4 w-4 text-violet-400" />
-                        <span className="text-sm font-semibold text-slate-100">Call Log</span>
+                        <span className="text-sm font-semibold text-slate-100">Call Logs</span>
                         <span className="text-xs text-slate-500 font-mono ml-1">#{call.id}</span>
                         {rio.execution_id && (
-                            <span className="text-[10px] text-slate-600 font-mono">{rio.execution_id.slice(0, 8)}…</span>
+                            <span className="text-[10px] text-slate-600 font-mono">{rio.execution_id.slice(0, 12)}…</span>
                         )}
                     </div>
                     <button onClick={onClose} className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-800 hover:text-slate-200 transition">
@@ -332,147 +433,215 @@ function CallLogModal({ call, onClose }: { call: Interaction; onClose: () => voi
                     </button>
                 </div>
 
-                <div className="flex-1 overflow-y-auto p-5 space-y-5">
-                    {/* Usage summary */}
-                    {rio.usage_breakdown && (
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
-                            {[
-                                { label: "Audio", value: rio.usage_breakdown.audio_duration != null ? `${rio.usage_breakdown.audio_duration.toFixed(0)}s` : null },
-                                { label: "Input tokens", value: rio.usage_breakdown.input_tokens?.toLocaleString() },
-                                { label: "Output tokens", value: rio.usage_breakdown.output_tokens?.toLocaleString() },
-                                { label: "Cost", value: rio.usage_breakdown.total_cost != null ? `$${rio.usage_breakdown.total_cost.toFixed(4)}` : null },
-                            ].filter(x => x.value != null).map(x => (
-                                <div key={x.label} className="rounded-xl bg-slate-900 border border-slate-800 p-3 text-center">
-                                    <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-1">{x.label}</p>
-                                    <p className="text-sm font-bold text-slate-100">{x.value}</p>
-                                </div>
-                            ))}
+                {/* Usage strip */}
+                {rio.usage_breakdown && (
+                    <div className="flex gap-4 px-5 py-2 border-b border-slate-800 bg-slate-900/50 flex-wrap">
+                        {[
+                            { label: "Audio", value: rio.usage_breakdown.audio_duration != null ? `${rio.usage_breakdown.audio_duration.toFixed(0)}s` : null },
+                            { label: "In tokens", value: rio.usage_breakdown.input_tokens?.toLocaleString() },
+                            { label: "Out tokens", value: rio.usage_breakdown.output_tokens?.toLocaleString() },
+                            { label: "Cost", value: rio.usage_breakdown.total_cost != null ? `$${rio.usage_breakdown.total_cost.toFixed(4)}` : null },
+                        ].filter(x => x.value != null).map(x => (
+                            <div key={x.label} className="flex items-center gap-1.5">
+                                <span className="text-[10px] text-slate-500 uppercase tracking-wider">{x.label}</span>
+                                <span className="text-xs font-bold text-slate-200">{x.value}</span>
+                            </div>
+                        ))}
+                        {turnCount > 0 && (
+                            <div className="flex items-center gap-1.5 ml-auto">
+                                <span className="text-[10px] text-slate-500 uppercase tracking-wider">Turns</span>
+                                <span className="text-xs font-bold text-violet-300">{turnCount}</span>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                {/* Tab bar */}
+                <div className="flex gap-1 px-5 py-2 border-b border-slate-800 flex-shrink-0">
+                    {TABS.map(t => (
+                        <button
+                            key={t.id}
+                            onClick={() => setTab(t.id)}
+                            className={clsx(
+                                "rounded-lg px-3 py-1 text-xs font-semibold transition-colors",
+                                tab === t.id
+                                    ? "bg-violet-600 text-white"
+                                    : "text-slate-400 hover:text-slate-200 hover:bg-slate-800"
+                            )}
+                        >
+                            {t.label}
+                        </button>
+                    ))}
+                </div>
+
+                <div className="flex-1 overflow-y-auto p-5">
+                    {/* ── LOG FEED TAB ── */}
+                    {tab === "feed" && (
+                        <div className="space-y-1.5">
+                            {feed.length === 0 ? (
+                                <p className="text-slate-500 text-xs text-center py-8">No log entries available.</p>
+                            ) : (
+                                feed.map((entry, idx) => (
+                                    <LogEntryRow key={idx} entry={entry} idx={idx} />
+                                ))
+                            )}
                         </div>
                     )}
 
-                    {/* Latency p50 pills */}
-                    {rio.latency_data && (
-                        <div className="flex flex-wrap gap-2">
-                            {[
-                                { label: "STT p50", value: ms(rio.latency_data.transcriber?.p50), color: "text-sky-400" },
-                                { label: "LLM p50", value: ms(rio.latency_data.llm?.p50), color: "text-violet-400" },
-                                { label: "TTS p50", value: ms(rio.latency_data.synthesizer?.p50), color: "text-emerald-400" },
-                            ].filter(x => x.value).map(x => (
-                                <span key={x.label} className="inline-flex items-center gap-1.5 rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-xs font-semibold">
-                                    <Zap className={clsx("h-3 w-3", x.color)} />
-                                    <span className="text-slate-400">{x.label}</span>
-                                    <span className={x.color}>{x.value}</span>
-                                </span>
-                            ))}
-                        </div>
-                    )}
-
-                    {/* Per-turn timeline */}
-                    {turnCount > 0 && (
-                        <div>
-                            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">Turn-by-turn flow</p>
-                            <div className="space-y-3">
-                                {Array.from({ length: turnCount }).map((_, i) => {
-                                    const sttT = stt[i];
-                                    const llmT = llm[i];
-                                    const ttsT = tts[i];
-                                    const turnTools = tools.filter(t => t.turn_index === i);
-                                    return (
-                                        <div key={i} className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 space-y-2">
+                    {/* ── TURN ANALYSIS TAB ── */}
+                    {tab === "turns" && (
+                        <div className="space-y-3">
+                            {turnCount === 0 ? (
+                                <p className="text-slate-500 text-xs text-center py-8">No turn data available.</p>
+                            ) : Array.from({ length: turnCount }).map((_, i) => {
+                                const sttT = stt[i];
+                                const llmT = llm[i];
+                                const ttsT = tts[i];
+                                const turnTools = tools.filter(t => t.turn_index === i);
+                                return (
+                                    <div key={i} className="rounded-xl border border-slate-800 bg-slate-900/60 p-3 space-y-2">
+                                        <div className="flex items-center gap-2">
                                             <p className="text-[10px] font-bold text-slate-500 uppercase">Turn {i + 1}</p>
-                                            <div className="flex flex-wrap gap-2 items-start">
-                                                {/* STT */}
-                                                {sttT && (
-                                                    <div className="flex-1 min-w-[140px] rounded-lg bg-sky-950/50 border border-sky-900/50 px-3 py-2">
-                                                        <div className="flex items-center gap-1.5 mb-1">
-                                                            <Mic className="h-3 w-3 text-sky-400" />
-                                                            <span className="text-[10px] font-bold text-sky-400 uppercase">STT</span>
-                                                            {sttT.latency != null && <span className="text-[10px] text-sky-300 ml-auto">{ms(sttT.latency)}</span>}
-                                                        </div>
-                                                        {sttT.words && <p className="text-[11px] text-slate-300 leading-relaxed line-clamp-2">{sttT.words}</p>}
+                                            {sttT?.words && (
+                                                <p className="text-[11px] text-slate-300 truncate flex-1">&ldquo;{sttT.words}&rdquo;</p>
+                                            )}
+                                        </div>
+                                        <div className="flex flex-wrap gap-2 items-start">
+                                            {sttT && (
+                                                <div className="flex-1 min-w-[140px] rounded-lg bg-sky-950/50 border border-sky-900/50 px-3 py-2">
+                                                    <div className="flex items-center gap-1.5 mb-1">
+                                                        <Mic className="h-3 w-3 text-sky-400" />
+                                                        <span className="text-[10px] font-bold text-sky-400 uppercase">Transcriber</span>
+                                                        {sttT.latency != null && <span className="text-[10px] text-sky-300 ml-auto">{ms(sttT.latency)}</span>}
                                                     </div>
+                                                    {sttT.words && <p className="text-[11px] text-slate-300 leading-relaxed">{sttT.words}</p>}
+                                                </div>
+                                            )}
+                                            {llmT && (
+                                                <div className="flex-1 min-w-[140px] rounded-lg bg-violet-950/50 border border-violet-900/50 px-3 py-2">
+                                                    <div className="flex items-center gap-1.5 mb-1">
+                                                        <Zap className="h-3 w-3 text-violet-400" />
+                                                        <span className="text-[10px] font-bold text-violet-400 uppercase">LLM</span>
+                                                        {llmT.latency != null && <span className="text-[10px] text-violet-300 ml-auto">{ms(llmT.latency)}</span>}
+                                                    </div>
+                                                    <div className="flex gap-2 text-[10px] text-slate-400 flex-wrap">
+                                                        {llmT.prompt_tokens != null && <span>{llmT.prompt_tokens} in</span>}
+                                                        {llmT.completion_tokens != null && <span>{llmT.completion_tokens} out</span>}
+                                                        {llmT.model && <span className="text-slate-500 font-mono">{String(llmT.model).split("/").pop()}</span>}
+                                                    </div>
+                                                </div>
+                                            )}
+                                            {ttsT && (
+                                                <div className="flex-1 min-w-[140px] rounded-lg bg-emerald-950/50 border border-emerald-900/50 px-3 py-2">
+                                                    <div className="flex items-center gap-1.5 mb-1">
+                                                        <Phone className="h-3 w-3 text-emerald-400" />
+                                                        <span className="text-[10px] font-bold text-emerald-400 uppercase">Synthesizer</span>
+                                                        {ttsT.latency != null && <span className="text-[10px] text-emerald-300 ml-auto">{ms(ttsT.latency)}</span>}
+                                                    </div>
+                                                    <div className="text-[10px] text-slate-400">
+                                                        {ttsT.characters != null && <span>{ttsT.characters} chars</span>}
+                                                        {ttsT.model && <span className="ml-2 text-slate-500 font-mono">{String(ttsT.model).split("/").pop()}</span>}
+                                                    </div>
+                                                </div>
+                                            )}
+                                        </div>
+                                        {turnTools.map((tc, j) => (
+                                            <div key={j} className="rounded-lg bg-amber-950/30 border border-amber-900/40 px-3 py-2">
+                                                <div className="flex items-center gap-1.5 mb-1">
+                                                    <Wrench className="h-3 w-3 text-amber-400" />
+                                                    <span className="text-[10px] font-bold text-amber-400">{tc.name ?? "tool"}</span>
+                                                    {tc.latency != null && <span className="text-[10px] text-amber-300 ml-auto">{ms(tc.latency)}</span>}
+                                                </div>
+                                                {tc.arguments && (
+                                                    <p className="text-[10px] text-slate-400 font-mono">args: {JSON.stringify(tc.arguments)}</p>
                                                 )}
-                                                {/* LLM */}
-                                                {llmT && (
-                                                    <div className="flex-1 min-w-[140px] rounded-lg bg-violet-950/50 border border-violet-900/50 px-3 py-2">
-                                                        <div className="flex items-center gap-1.5 mb-1">
-                                                            <Zap className="h-3 w-3 text-violet-400" />
-                                                            <span className="text-[10px] font-bold text-violet-400 uppercase">LLM</span>
-                                                            {llmT.latency != null && <span className="text-[10px] text-violet-300 ml-auto">{ms(llmT.latency)}</span>}
-                                                        </div>
-                                                        <div className="flex gap-2 text-[10px] text-slate-400">
-                                                            {llmT.prompt_tokens != null && <span>{llmT.prompt_tokens} in</span>}
-                                                            {llmT.completion_tokens != null && <span>{llmT.completion_tokens} out</span>}
-                                                        </div>
-                                                    </div>
-                                                )}
-                                                {/* TTS */}
-                                                {ttsT && (
-                                                    <div className="flex-1 min-w-[140px] rounded-lg bg-emerald-950/50 border border-emerald-900/50 px-3 py-2">
-                                                        <div className="flex items-center gap-1.5 mb-1">
-                                                            <Phone className="h-3 w-3 text-emerald-400" />
-                                                            <span className="text-[10px] font-bold text-emerald-400 uppercase">TTS</span>
-                                                            {ttsT.latency != null && <span className="text-[10px] text-emerald-300 ml-auto">{ms(ttsT.latency)}</span>}
-                                                        </div>
-                                                        {ttsT.characters != null && <p className="text-[10px] text-slate-400">{ttsT.characters} chars</p>}
-                                                    </div>
+                                                {tc.result != null && (
+                                                    <p className="text-[10px] text-emerald-400 font-mono mt-0.5">result: {JSON.stringify(tc.result).slice(0, 200)}</p>
                                                 )}
                                             </div>
-                                            {/* Tool calls in this turn */}
-                                            {turnTools.map((tc, j) => (
-                                                <div key={j} className="rounded-lg bg-amber-950/30 border border-amber-900/40 px-3 py-2">
-                                                    <div className="flex items-center gap-1.5 mb-1">
-                                                        <Wrench className="h-3 w-3 text-amber-400" />
-                                                        <span className="text-[10px] font-bold text-amber-400">{tc.name ?? "tool"}</span>
-                                                        {tc.latency != null && <span className="text-[10px] text-amber-300 ml-auto">{ms(tc.latency)}</span>}
-                                                    </div>
-                                                    {tc.arguments && (
-                                                        <p className="text-[10px] text-slate-400 font-mono truncate">
-                                                            {JSON.stringify(tc.arguments)}
-                                                        </p>
-                                                    )}
+                                        ))}
+                                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
+
+                    {/* ── STATS TAB ── */}
+                    {tab === "stats" && (
+                        <div className="space-y-5">
+                            {/* Latency percentile table */}
+                            {rio.latency_data && (
+                                <div>
+                                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">Latency Percentiles</p>
+                                    <div className="rounded-xl border border-slate-800 overflow-hidden">
+                                        <table className="w-full text-xs">
+                                            <thead className="bg-slate-900 text-[10px] text-slate-500 uppercase tracking-wide">
+                                                <tr>
+                                                    <th className="px-4 py-2.5 text-left">Component</th>
+                                                    <th className="px-4 py-2.5 text-right">p50</th>
+                                                    <th className="px-4 py-2.5 text-right">p90</th>
+                                                    <th className="px-4 py-2.5 text-right">p99</th>
+                                                    <th className="px-4 py-2.5 text-right">Turns</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-800 font-mono">
+                                                {[
+                                                    { label: "Transcriber (STT)", key: "transcriber" as const, color: "text-sky-400", turns: stt },
+                                                    { label: "LLM", key: "llm" as const, color: "text-violet-400", turns: llm },
+                                                    { label: "Synthesizer (TTS)", key: "synthesizer" as const, color: "text-emerald-400", turns: tts },
+                                                ].map(row => {
+                                                    const sec = rio.latency_data?.[row.key];
+                                                    return (
+                                                        <tr key={row.key} className="bg-slate-900/40">
+                                                            <td className={clsx("px-4 py-2.5 font-semibold", row.color)}>{row.label}</td>
+                                                            <td className="px-4 py-2.5 text-right text-slate-300">{ms(sec?.p50) ?? "—"}</td>
+                                                            <td className="px-4 py-2.5 text-right text-slate-300">{ms(sec?.p90) ?? "—"}</td>
+                                                            <td className="px-4 py-2.5 text-right text-slate-300">{ms(sec?.p99) ?? "—"}</td>
+                                                            <td className="px-4 py-2.5 text-right text-slate-500">{row.turns.length}</td>
+                                                        </tr>
+                                                    );
+                                                })}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Tool call summary */}
+                            {tools.length > 0 && (
+                                <div>
+                                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">Tool Calls ({tools.length})</p>
+                                    <div className="space-y-2">
+                                        {tools.map((tc, j) => (
+                                            <div key={j} className="rounded-lg bg-amber-950/30 border border-amber-900/40 px-3 py-2">
+                                                <div className="flex items-center gap-2 mb-1">
+                                                    <Wrench className="h-3 w-3 text-amber-400" />
+                                                    <span className="text-[10px] font-bold text-amber-400">{tc.name ?? "tool"}</span>
+                                                    {tc.turn_index != null && <span className="text-[10px] text-slate-600">T{tc.turn_index + 1}</span>}
+                                                    {tc.latency != null && <span className="text-[10px] text-amber-300 ml-auto">{ms(tc.latency)}</span>}
                                                 </div>
-                                            ))}
-                                        </div>
-                                    );
-                                })}
-                            </div>
-                        </div>
-                    )}
-
-                    {/* Orphan tool calls (no turn_index) */}
-                    {tools.filter(t => t.turn_index == null).length > 0 && (
-                        <div>
-                            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">Tool calls</p>
-                            <div className="space-y-2">
-                                {tools.filter(t => t.turn_index == null).map((tc, j) => (
-                                    <div key={j} className="rounded-lg bg-amber-950/30 border border-amber-900/40 px-3 py-2">
-                                        <div className="flex items-center gap-1.5 mb-1">
-                                            <Wrench className="h-3 w-3 text-amber-400" />
-                                            <span className="text-[10px] font-bold text-amber-400">{tc.name ?? "tool"}</span>
-                                            {tc.latency != null && <span className="text-[10px] text-amber-300 ml-auto">{ms(tc.latency)}</span>}
-                                        </div>
-                                        {tc.arguments && (
-                                            <p className="text-[10px] text-slate-400 font-mono truncate">{JSON.stringify(tc.arguments)}</p>
-                                        )}
+                                                {tc.arguments && <p className="text-[10px] text-slate-400 font-mono">args: {JSON.stringify(tc.arguments)}</p>}
+                                                {tc.result != null && <p className="text-[10px] text-emerald-400 font-mono mt-0.5">→ {JSON.stringify(tc.result).slice(0, 300)}</p>}
+                                            </div>
+                                        ))}
                                     </div>
-                                ))}
-                            </div>
-                        </div>
-                    )}
+                                </div>
+                            )}
 
-                    {/* Extracted data */}
-                    {rio.extracted_data && Object.keys(rio.extracted_data).length > 0 && (
-                        <div>
-                            <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">Extracted data</p>
-                            <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
-                                {Object.entries(rio.extracted_data).map(([k, v]) => (
-                                    <div key={k} className="rounded-lg bg-slate-900 border border-slate-800 px-3 py-2">
-                                        <p className="text-[10px] text-slate-500 capitalize mb-0.5">{k.replace(/_/g, " ")}</p>
-                                        <p className="text-xs text-slate-200 font-medium truncate">{String(v)}</p>
+                            {/* Extracted data */}
+                            {rio.extracted_data && Object.keys(rio.extracted_data).length > 0 && (
+                                <div>
+                                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500 mb-3">Extracted Data</p>
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                                        {Object.entries(rio.extracted_data).map(([k, v]) => (
+                                            <div key={k} className="rounded-lg bg-slate-900 border border-slate-800 px-3 py-2">
+                                                <p className="text-[10px] text-slate-500 capitalize mb-0.5">{k.replace(/_/g, " ")}</p>
+                                                <p className="text-xs text-slate-200 font-medium truncate">{String(v)}</p>
+                                            </div>
+                                        ))}
                                     </div>
-                                ))}
-                            </div>
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

@@ -169,8 +169,7 @@ class Account(AuditMixin, table=True):
 class Lead(AuditMixin, table=True):
     __tablename__ = "leads"
     __table_args__ = (
-        # Partial unique index: only enforced for non-deleted leads so that
-        # soft-deleted rows don't block re-creation of the same phone number.
+
         Index(
             "uq_leads_company_phone",
             "company_id", "normalized_phone",
@@ -391,7 +390,7 @@ class CampaignRecipient(AuditMixin, table=True):
     )
     last_interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
     ab_variant: Optional[str] = Field(default=None, max_length=2)
-    # Claim-lock: set to now() when the worker starts processing this recipient. Workers skip rows where this is within the last 10 minutes (prevents double-send when a worker crashes mid-step and restarts before the next cycle).
+
     processing_started_at: Optional[datetime] = Field(
         default=None,
         sa_column=Column(DateTime(timezone=True), nullable=True),
@@ -988,7 +987,7 @@ class KnowledgeDocument(AuditMixin, table=True):
     # products | objections | competitors | playbooks | coaching | sops | transcripts
     collection: str = Field(max_length=50, index=True)
     title: str = Field(max_length=300)
-    content: str                             # full markdown body
+    content: str
     tags: Optional[list] = Field(default=None, sa_column=Column(JSON, nullable=True))
     metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
     chroma_doc_id: Optional[str] = Field(default=None, max_length=200)
@@ -1116,7 +1115,7 @@ class CallStatusEvent(SQLModel, table=True):
     lead_name: Optional[str] = Field(default=None, max_length=200)
     # "ringing" | "connected" | "ended"
     status: str = Field(max_length=30)
-    # Set only on "ended" — mirrors CallTask.last_outcome values
+
     outcome: Optional[str] = Field(default=None, max_length=100)
     created_at: datetime = Field(
         default_factory=utc_now,
@@ -1133,8 +1132,8 @@ class WebhookConfig(AuditMixin, table=True):
 
     id: Optional[int] = Field(default=None, primary_key=True)
     company_id: int = Field(foreign_key="companies.id", index=True)
-    name: str = Field(max_length=150)           # "Zapier CRM Sync"
-    url: str                                   # https://hooks.zapier.com/...
+    name: str = Field(max_length=150)
+    url: str
     events: list[str] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
     secret: Optional[str] = None               # HMAC signing secret (min 16 chars)
     is_active: bool = Field(default=True)
@@ -1337,7 +1336,7 @@ class CallEvalResult(AuditMixin, table=True):
     judge_provider: str = Field(default="mistral", max_length=50)
     judge_model: str = Field(default="mistral-large-latest", max_length=100)
 
-    # 1-5 scores per axis (None = axis skipped / insufficient data)
+
     score_call_summary: Optional[int] = None
     score_lead_qualification: Optional[int] = None
     score_next_action: Optional[int] = None
@@ -1368,15 +1367,43 @@ class CompetitorMention(AuditMixin, table=True):
     company_id: int = Field(foreign_key="companies.id", index=True)
     lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
     interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
-    # Normalised lowercase competitor name, e.g. "salesforce", "hubspot"
+
     competitor_name: str = Field(max_length=200, index=True)
-    # Raw snippet from the transcript that triggered the detection
+
     mention_snippet: Optional[str] = Field(default=None, max_length=500)
-    # Optional counter-script the AI should use when this competitor is mentioned
+
     counter_script: Optional[str] = None
-    # Source: "realtime" (voice pipeline keyword match) or "post_call" (LLM extraction)
+
     source: str = Field(default="post_call", max_length=50)
     detected_at: Optional[datetime] = Field(default_factory=utc_now)
+
+
+class UsageEvent(SQLModel, table=True):
+    """Tracks AI service consumption across all providers and call sites."""
+    __tablename__ = "usage_events"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: Optional[int] = Field(default=None, foreign_key="companies.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+
+    service_type: str = Field(max_length=20)           # "llm" | "stt" | "tts"
+    provider: str = Field(max_length=50)               # "groq" | "claude" | "deepgram" …
+    model: Optional[str] = Field(default=None, max_length=120)
+
+    prompt_tokens: Optional[int] = Field(default=None)
+    completion_tokens: Optional[int] = Field(default=None)
+    total_tokens: Optional[int] = Field(default=None)
+    characters: Optional[int] = Field(default=None)    # TTS characters synthesised
+    audio_seconds: Optional[float] = Field(default=None)  # STT/TTS duration
+
+    context: Optional[str] = Field(default=None, max_length=60)  # "voice_turn" | "post_call" | "eval" …
+    meta: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
 
 
 class Token(SQLModel):
@@ -1545,8 +1572,6 @@ class EmailOutbox(AuditMixin, table=True):
     sent_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     last_issue: Optional[str] = None
 
-    # Distributed tracing — request_id_var (or worker trace_id) at enqueue time. Lets a support ticket → outbound email → backend log walk work in either direction.  Indexed for fast lookup when a customer cites the
-    # X-Request-Id header from their copy of the email.
     request_id: Optional[str] = Field(default=None, max_length=64, index=True)
 
 
@@ -1696,7 +1721,6 @@ class AgentTask(AuditMixin, table=True):
     # Distributed tracing — inherited from request_id_var when the task is created inside an HTTP request, or from the parent task's trace when an executor enqueues a sub-task. See services/agent/agent_task_service.create_agent_task.
     trace_id: Optional[str] = Field(default=None, max_length=64, index=True)
 
-    # Retry
     attempts: int = Field(default=0)
     max_attempts: int = Field(default=3)
     run_after: datetime = Field(
@@ -1727,18 +1751,15 @@ class AgentApproval(AuditMixin, table=True):
     company_id: int = Field(foreign_key="companies.id", index=True)
     task_id: int = Field(foreign_key="agent_tasks.id", index=True)
 
-    # Action description (human-readable)
-    action_type: str = Field(max_length=100)    # send_email | send_quote | crm_update | ...
-    action_summary: str                          # "Send follow-up to Ravi @ TechCorp"
+    action_type: str = Field(max_length=100)
+    action_summary: str
     action_payload: dict = Field(default_factory=dict, sa_column=Column(JSON))
 
-    # Decision
-    status: str = Field(default="pending", max_length=30)  # pending | approved | rejected | expired
+    status: str = Field(default="pending", max_length=30)
     reviewer_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
     reviewed_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     reviewer_note: Optional[str] = None
 
-    # Auto-expiry
     expires_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
 
 
@@ -2107,11 +2128,6 @@ class VoiceAgentGraphUpdate(SQLModel):
     graph_json: dict = {}
     is_enabled: bool = False
 
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 5 — Analytics & Monitoring
-# ═══════════════════════════════════════════════════════════════
-
 class Disposition(SQLModel, table=True):
     """Structured outcome classification template for voice calls.
     Each agent can have multiple dispositions with attached instructions
@@ -2188,11 +2204,6 @@ class CallAudioEvent(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     processed_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
 
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 6 — Ecosystem & Platform
-# ═══════════════════════════════════════════════════════════════
-
 class AgentTemplate(SQLModel, table=True):
     """Pre-built agent configuration templates that can be cloned
     and customised per company. Stored in the platform library."""
@@ -2267,9 +2278,35 @@ class CostRecord(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
 
-# ═══════════════════════════════════════════════════════════════
-# Phase 5 CSV schemas (read/write models)
-# ═══════════════════════════════════════════════════════════════
+class ProviderRate(SQLModel, table=True):
+    """Custom provider rates configured per company (Option A)."""
+    __tablename__ = "provider_rates"
+    __table_args__ = (
+        Index("ix_provider_rates_company_provider", "company_id", "category", "provider"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    category: str = Field(max_length=50, index=True)  # "stt", "llm", "tts", "telephony"
+    provider: str = Field(max_length=50, index=True)  # "deepgram", "openai", "cartesia", "twilio", etc.
+    model_or_voice: Optional[str] = Field(default=None, max_length=100)  # E.g. "aura-asteria-en"
+    rate_per_second: Decimal = Field(default=Decimal("0.00000000"), sa_column=Column(Numeric(12, 8), nullable=False))
+    is_active: bool = Field(default=True)
+    created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+    updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
+
+
+class ProviderRateCreate(SQLModel):
+    category: str = Field(max_length=50)
+    provider: str = Field(max_length=50)
+    model_or_voice: Optional[str] = Field(default=None, max_length=100)
+    rate_per_second: Decimal
+    is_active: bool = True
+
+
+class ProviderRateUpdate(SQLModel):
+    rate_per_second: Optional[Decimal] = None
+    is_active: Optional[bool] = None
 
 class DispositionCreate(SQLModel):
     key: str = Field(max_length=80)
@@ -2313,11 +2350,6 @@ class MarkSummaryRow(SQLModel):
     enqueued_at: Optional[datetime] = None
     delivered_at: Optional[datetime] = None
     latency_ms: Optional[int] = None
-
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 6 CSV schemas
-# ═══════════════════════════════════════════════════════════════
 
 class AgentTemplateCreate(SQLModel):
     key: str = Field(max_length=80)
@@ -2382,11 +2414,6 @@ class CostBreakdownRow(SQLModel):
     telephony_cost: float = 0.0
     total_cost: float = 0.0
     cost_per_minute: float = 0.0
-
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 7 — Commerce (Order → Invoice → Payment)
-# ═══════════════════════════════════════════════════════════════
 
 class Contact(AuditMixin, table=True):
     """Known person at an Account. Separate from Lead (prospect)."""
@@ -2554,11 +2581,6 @@ class Payment(AuditMixin, table=True):
     notes: Optional[str] = None
     metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
 
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 7 — Service Delivery (Tickets, Installation, Dispatch)
-# ═══════════════════════════════════════════════════════════════
-
 class ServiceTicket(AuditMixin, table=True):
     """
     Customer service/support ticket.
@@ -2646,11 +2668,6 @@ class InstallationJob(AuditMixin, table=True):
     customer_signature_url: Optional[str] = None
     photos_json: Optional[list] = Field(default=None, sa_column=Column(JSON, nullable=True))
     csat_score: Optional[int] = None
-
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 7 — Policy Engine & Automation Governance
-# ═══════════════════════════════════════════════════════════════
 
 class ConsentRecord(SQLModel, table=True):
     """
@@ -2747,11 +2764,6 @@ class PolicyDecisionLog(SQLModel, table=True):
     actor_agent: Optional[str] = Field(default=None, max_length=100)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
 
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 7 — Event Store & Workflow Runtime
-# ═══════════════════════════════════════════════════════════════
-
 class EventStore(SQLModel, table=True):
     """
     Immutable append-only event log with correlation IDs.
@@ -2803,12 +2815,6 @@ class WorkflowDefinition(AuditMixin, table=True):
 
 
 class WorkflowInstance(SQLModel, table=True):
-    """
-    Running instance of a WorkflowDefinition tied to a domain entity.
-
-    Status lifecycle:
-      running → completed | failed | cancelled
-    """
     __tablename__ = "workflow_instances"
     __table_args__ = (
         Index("ix_workflow_instances_company_status", "company_id", "status"),
@@ -2849,16 +2855,7 @@ class WorkflowStep(SQLModel, table=True):
     started_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     completed_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
 
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 7 — PII Redaction & Provider Health
-# ═══════════════════════════════════════════════════════════════
-
 class TelephonyProviderHealth(SQLModel, table=True):
-    """
-    Tracks per-provider health for dynamic failover routing.
-    Updated by the call service after each call outcome.
-    """
     __tablename__ = "telephony_provider_health"
     __table_args__ = (
         UniqueConstraint("company_id", "provider", name="uq_telephony_provider_health"),
@@ -2875,11 +2872,6 @@ class TelephonyProviderHealth(SQLModel, table=True):
     last_failure_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
     last_error: Optional[str] = Field(default=None, max_length=500)
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
-
-
-# ═══════════════════════════════════════════════════════════════
-# Phase 7 — Request/Response schemas for new models
-# ═══════════════════════════════════════════════════════════════
 
 class OrderCreate(SQLModel):
     lead_id: int

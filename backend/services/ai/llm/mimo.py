@@ -49,8 +49,7 @@ class MimoLLM(BaseLLM):
             return str(obj)
 
         final_history = self.get_safe_history(limit=10)
-        # Strip reasoning_content from prior assistant turns before sending history
-        # (Mimo rejects history messages that contain reasoning_content)
+
         for msg in final_history:
             if isinstance(msg.get("content"), dict):
                 msg["content"] = msg["content"].get("text", "") or ""
@@ -114,7 +113,6 @@ class MimoLLM(BaseLLM):
                                         continue
                                     delta = choices[0].get("delta", {})
 
-                                    # Skip chunks that are ONLY reasoning_content with no actual content
                                     if "reasoning_content" in delta and not delta.get("content"):
                                         continue
 

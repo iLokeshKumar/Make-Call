@@ -661,6 +661,7 @@ export default function VoiceAgentsPage() {
           runtime_json: {
             ...(runtimeDraft.runtime_json || {}),
             call_features: callFeatures,
+            ambient_noise: callFeatures.ambient_noise,
           },
         }),
       });
@@ -1090,7 +1091,7 @@ export default function VoiceAgentsPage() {
                   <h3 className="mb-4 text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Speech-to-Text (STT)</h3>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     <Field label="STT Provider">
-                      <ProviderSelect value={runtimeDraft.stt_provider || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, stt_provider: v }); markDirty(); }} options={["deepgram", "sarvam", "assemblyai", "groq", "inworld", "ringg_ai", "gladia", "cartesia", "smallest"]} />
+                      <ProviderSelect value={runtimeDraft.stt_provider || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, stt_provider: v }); markDirty(); }} options={["deepgram", "sarvam", "assemblyai", "groq", "inworld", "ringg_ai", "gladia", "cartesia", "smallest", "vachana"]} />
                     </Field>
                     {(!runtimeDraft.stt_provider || runtimeDraft.stt_provider === "deepgram") && (
                       <Field label="Deepgram Model">
@@ -1132,6 +1133,16 @@ export default function VoiceAgentsPage() {
                         />
                       </Field>
                     )}
+                    {runtimeDraft.stt_provider === "vachana" && (
+                      <>
+                        <Field label="Vachana Language">
+                          <ProviderSelect value={(runtimeDraft.runtime_json?.stt_language as string) || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, runtime_json: { ...runtimeDraft.runtime_json, stt_language: v } }); markDirty(); }} options={["hi-IN", "en-IN", "ta-IN", "te-IN", "kn-IN", "ml-IN", "mr-IN", "bn-IN", "gu-IN", "pa-IN", "en-IN,hi-IN"]} />
+                        </Field>
+                        <Field label="Vachana Format">
+                          <ProviderSelect value={(runtimeDraft.runtime_json?.stt_model as string) || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, runtime_json: { ...runtimeDraft.runtime_json, stt_model: v } }); markDirty(); }} options={["verbatim", "transcribe"]} />
+                        </Field>
+                      </>
+                    )}
                   </div>
                 </div>
 
@@ -1140,7 +1151,7 @@ export default function VoiceAgentsPage() {
                   <h3 className="mb-4 text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Text-to-Speech (TTS)</h3>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     <Field label="TTS Provider">
-                      <ProviderSelect value={runtimeDraft.tts_provider || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, tts_provider: v }); markDirty(); }} options={["cartesia", "elevenlabs", "deepgram", "sarvam", "polly", "inworld", "smallest", "rime"]} />
+                      <ProviderSelect value={runtimeDraft.tts_provider || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, tts_provider: v }); markDirty(); }} options={["cartesia", "elevenlabs", "deepgram", "sarvam", "polly", "inworld", "smallest", "rime", "vachana"]} />
                     </Field>
                     {(!runtimeDraft.tts_provider || runtimeDraft.tts_provider === "cartesia") && (
                       <>
@@ -1194,6 +1205,16 @@ export default function VoiceAgentsPage() {
                         </Field>
                         <Field label="Polly Engine">
                           <ProviderSelect value={(runtimeDraft.runtime_json?.tts_model as string) || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, runtime_json: { ...runtimeDraft.runtime_json, tts_model: v } }); markDirty(); }} options={["neural", "standard"]} />
+                        </Field>
+                      </>
+                    )}
+                    {runtimeDraft.tts_provider === "vachana" && (
+                      <>
+                        <Field label="Vachana Voice">
+                          <ProviderSelect value={(runtimeDraft.runtime_json?.tts_voice_id as string) || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, runtime_json: { ...runtimeDraft.runtime_json, tts_voice_id: v } }); markDirty(); }} options={["Karan", "Simran", "Nara", "Riya", "Viraj", "Raju"]} />
+                        </Field>
+                        <Field label="Vachana Model">
+                          <ProviderSelect value={(runtimeDraft.runtime_json?.tts_model as string) || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, runtime_json: { ...runtimeDraft.runtime_json, tts_model: v } }); markDirty(); }} options={["vachana-voice-v3"]} />
                         </Field>
                       </>
                     )}

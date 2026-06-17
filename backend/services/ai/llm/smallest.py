@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 
 
 class SmallestLLM(BaseLLM):
-    """Smallest AI — Electron LLM via OpenAI-compatible endpoint."""
 
     def __init__(self, system_prompt: str, api_key: str = None, model: str = None):
         super().__init__(system_prompt)
@@ -54,13 +53,17 @@ class SmallestLLM(BaseLLM):
                     "max_tokens": 2048,
                     "temperature": 0.7,
                     "stream": True,
+                    "stream_options": {"include_usage": True},
                 }
                 if tools:
                     kwargs["tools"] = tools
                 stream = await self.client.chat.completions.create(**kwargs)
 
+                _last_usage_raw = None
                 async for chunk in stream:
                     if not chunk.choices:
+                        if getattr(chunk, "usage", None):
+                            _last_usage_raw = chunk.usage
                         continue
                     delta = chunk.choices[0].delta
 
@@ -96,6 +99,10 @@ class SmallestLLM(BaseLLM):
                 if accumulated_text.strip():
                     yield {"type": "sentence", "content": accumulated_text.strip()}
 
+                self.last_usage = {
+                    "prompt_tokens": getattr(_last_usage_raw, "prompt_tokens", None),
+                    "completion_tokens": getattr(_last_usage_raw, "completion_tokens", None),
+                } if _last_usage_raw else {}
                 yield {
                     "type": "finished",
                     "full_reply": full_reply,
@@ -104,6 +111,7 @@ class SmallestLLM(BaseLLM):
                         if tool_calls_dict
                         else None
                     ),
+                    "usage": self.last_usage,
                 }
                 return
 

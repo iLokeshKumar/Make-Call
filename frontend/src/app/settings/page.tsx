@@ -46,6 +46,9 @@ const COMPANY_SETTING_KEYS = {
     // ASR / Transcript tuning and storage (per-company)
     asrStoreRawJson: ["ASR_STORE_RAW_JSON", "asr_store_raw_json"],
     asrOverlapThreshold: ["ASR_OVERLAP_THRESHOLD", "asr_overlap_threshold"],
+    ambientNoiseEnabled: ["AMBIENT_NOISE_ENABLED", "ambient_noise_enabled"],
+    ambientNoisePreset: ["AMBIENT_NOISE_PRESET", "ambient_noise_preset"],
+    ambientNoiseVolume: ["AMBIENT_NOISE_VOLUME", "ambient_noise_volume"],
 } as const;
 
 const INTEGRATION_KEY_ALIASES: Record<string, string> = {
@@ -112,6 +115,9 @@ export default function SettingsPage() {
     const [silenceThreshold, setSilenceThreshold] = useState("6");
     const [silenceCheckInterval, setSilenceCheckInterval] = useState("3");
     const [voicemailDetection, setVoicemailDetection] = useState("0");
+    const [ambientNoiseEnabled, setAmbientNoiseEnabled] = useState("0");
+    const [ambientNoisePreset, setAmbientNoisePreset] = useState("call-center");
+    const [ambientNoiseVolume, setAmbientNoiseVolume] = useState("15");
     const [agentName, setAgentName] = useState("Rio");
     const [callConnectMessage, setCallConnectMessage] = useState("");
     const [agentGreeting, setAgentGreeting] = useState("");
@@ -258,6 +264,9 @@ export default function SettingsPage() {
                     setSilenceThreshold(readSettingValue(data, COMPANY_SETTING_KEYS.silenceThreshold, "6"));
                     setSilenceCheckInterval(readSettingValue(data, COMPANY_SETTING_KEYS.silenceCheckInterval, "3"));
                     setVoicemailDetection(readSettingValue(data, COMPANY_SETTING_KEYS.voicemailDetection, "0"));
+                    setAmbientNoiseEnabled(readSettingValue(data, COMPANY_SETTING_KEYS.ambientNoiseEnabled, "0"));
+                    setAmbientNoisePreset(readSettingValue(data, COMPANY_SETTING_KEYS.ambientNoisePreset, "call-center"));
+                    setAmbientNoiseVolume(readSettingValue(data, COMPANY_SETTING_KEYS.ambientNoiseVolume, "15"));
                     setAgentName(readSettingValue(data, COMPANY_SETTING_KEYS.agentName, "Rio"));
                     setCallConnectMessage(readSettingValue(data, COMPANY_SETTING_KEYS.callConnectMessage, ""));
                     setAgentGreeting(readSettingValue(data, COMPANY_SETTING_KEYS.agentGreeting, ""));
@@ -309,6 +318,10 @@ export default function SettingsPage() {
                 if (keysRes.ok) {
                     const keysData = normalizeIntegrationValues(await keysRes.json() as Record<string, string>);
                     const defaultKeys = {
+                        TRUECALLER_KEY_ID: "",
+                        TRUECALLER_API_KEY: "",
+                        TRUECALLER_CLIENT_ACCOUNT_ID: "",
+                        API_LAYER_API_KEY: "",
                         DEEPGRAM_API_KEY: "",
                         ELEVENLABS_API_KEY: "",
                         CARTESIA_API_KEY: "",
@@ -389,6 +402,7 @@ export default function SettingsPage() {
                         INWORLD_STT_MODEL: "",
                         INWORLD_TTS_MODEL: "",
                         INWORLD_VOICE_ID: "",
+                        INWORLD_LLM_MODEL: "",
                         RIME_API_KEY: "",
                         RIME_TTS_MODEL: "",
                         AWS_ACCESS_KEY_ID: "",
@@ -412,7 +426,11 @@ export default function SettingsPage() {
                         AIRLLM_COMPRESSION: "",
                         AIRLLM_MAX_NEW_TOKENS: "",
                         KITTEN_TTS_MODEL: "",
-                        KITTEN_TTS_VOICE: ""
+                        KITTEN_TTS_VOICE: "",
+                        VACHANA_API_KEY: "",
+                        VACHANA_STT_MODEL: "",
+                        VACHANA_TTS_MODEL: "",
+                        VACHANA_VOICE_ID: "",
                     };
                     setApiKeys({ ...defaultKeys, ...keysData });
                 }
@@ -607,6 +625,9 @@ export default function SettingsPage() {
                     { key: "SILENCE_THRESHOLD_S", value: silenceThreshold, is_secret: false },
                     { key: "SILENCE_CHECK_INTERVAL_S", value: silenceCheckInterval, is_secret: false },
                     { key: "VOICEMAIL_DETECTION_ENABLED", value: voicemailDetection, is_secret: false },
+                    { key: "AMBIENT_NOISE_ENABLED", value: ambientNoiseEnabled, is_secret: false },
+                    { key: "AMBIENT_NOISE_PRESET", value: ambientNoisePreset, is_secret: false },
+                    { key: "AMBIENT_NOISE_VOLUME", value: ambientNoiseVolume, is_secret: false },
                     { key: "AGENT_NAME", value: agentName, is_secret: false },
                     { key: "CALL_CONNECT_MESSAGE", value: callConnectMessage, is_secret: false },
                     { key: "AGENT_GREETING", value: agentGreeting, is_secret: false },
@@ -1377,6 +1398,51 @@ export default function SettingsPage() {
                                 </div>
                             </label>
                         </div>
+
+                        {/* ── Ambient Noise ── */}
+                        <div className="mt-4 pt-4 border-t border-slate-100 dark:border-slate-800">
+                            <div className="flex items-center justify-between mb-3">
+                                <div>
+                                    <span className="text-sm font-semibold text-slate-700 dark:text-slate-200">Ambient background noise</span>
+                                    <p className="text-[10px] text-slate-400 mt-0.5">Mix background audio into all calls (Plivo/Vobiz only). Per-agent setting in Voice Agents overrides this.</p>
+                                </div>
+                                <label className="flex items-center gap-2 cursor-pointer">
+                                    <input
+                                        type="checkbox"
+                                        checked={ambientNoiseEnabled === "1"}
+                                        onChange={(e) => setAmbientNoiseEnabled(e.target.checked ? "1" : "0")}
+                                        className="h-4 w-4 rounded border-slate-300"
+                                    />
+                                </label>
+                            </div>
+                            {ambientNoiseEnabled === "1" && (
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-3">
+                                    <div>
+                                        <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Preset</label>
+                                        <select
+                                            value={ambientNoisePreset}
+                                            onChange={(e) => setAmbientNoisePreset(e.target.value)}
+                                            className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400 cursor-pointer"
+                                        >
+                                            <option value="call-center">Call Center</option>
+                                            <option value="office-ambience">Office Ambience</option>
+                                            <option value="coffee-shop">Coffee Shop</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-xs font-semibold text-slate-600 dark:text-slate-300 block mb-1.5">Volume ({ambientNoiseVolume}%)</label>
+                                        <input
+                                            type="range"
+                                            min={1}
+                                            max={50}
+                                            value={ambientNoiseVolume}
+                                            onChange={(e) => setAmbientNoiseVolume(e.target.value)}
+                                            className="w-full accent-violet-600 cursor-pointer"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     </div>
                 )}
 
@@ -1574,6 +1640,7 @@ export default function SettingsPage() {
                                         <option value="ringg_ai">Ringg.ai</option>
                                         <option value="inworld">Inworld</option>
                                         <option value="azure">Azure</option>
+                                        <option value="vachana">Vachana</option>
                                     </select>
                                 </div>
 
@@ -1597,6 +1664,7 @@ export default function SettingsPage() {
                                         <option value="azure">Azure</option>
                                         <option value="smallest">Smallest</option>
                                         <option value="airllm">AirLLM</option>
+                                        <option value="inworld">Inworld</option>
                                     </select>
                                 </div>
 
@@ -1621,6 +1689,7 @@ export default function SettingsPage() {
                                         <option value="polly">Polly</option>
                                         <option value="azure">Azure</option>
                                         <option value="kitten">Kitten (Local)</option>
+                                        <option value="vachana">Vachana</option>
                                     </select>
                                 </div>
                             </div>
@@ -2231,12 +2300,14 @@ export default function SettingsPage() {
                                 "Plivo (Telephony)": ["PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_PHONE_NUMBER"],
                                 "Vobiz (Telephony)": ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_PHONE_NUMBER"],
                                 "Warm Transfer": ["WARM_TRANSFER_NUMBER", "WARM_TRANSFER_NAME"],
-                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID", "GROQ_STT_MODEL", "GROQ_VOICE", "GLADIA_API_KEY", "ASSEMBLYAI_API_KEY", "RINGG_AI_API_KEY", "GLADIA_STT_MODEL", "ASSEMBLYAI_STT_MODEL", "RINGG_AI_STT_MODEL", "INWORLD_API_KEY", "INWORLD_STT_MODEL", "AZURE_SPEECH_API_KEY", "AZURE_SPEECH_API_VERSION", "AZURE_SPEECH_REGION", "AZURE_STT_MODEL", "AZURE_SPEECH_ENDPOINT"],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL", "INWORLD_TTS_MODEL", "INWORLD_VOICE_ID", "RIME_API_KEY", "RIME_TTS_MODEL", "RIME_VOICE_ID", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "POLLY_TTS_MODEL", "POLLY_VOICE_ID", "AZURE_TTS_MODEL", "AZURE_VOICE_ID", "KITTEN_TTS_MODEL", "KITTEN_TTS_VOICE",],
-                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "SMALLEST_API_KEY", "SMALLEST_LLM_MODEL", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL", "AZURE_LLM_API_KEY", "AZURE_LLM_MODEL", "AZURE_LLM_ENDPOINT", "AZURE_LLM_API_VERSION", "AZURE_LLM_REGION", "AIRLLM_MODEL", "AIRLLM_COMPRESSION", "AIRLLM_MAX_NEW_TOKENS"],
+                                "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID", "GROQ_STT_MODEL", "GROQ_VOICE", "GLADIA_API_KEY", "ASSEMBLYAI_API_KEY", "RINGG_AI_API_KEY", "GLADIA_STT_MODEL", "ASSEMBLYAI_STT_MODEL", "RINGG_AI_STT_MODEL", "INWORLD_API_KEY", "INWORLD_STT_MODEL", "AZURE_SPEECH_API_KEY", "AZURE_SPEECH_API_VERSION", "AZURE_SPEECH_REGION", "AZURE_STT_MODEL", "AZURE_SPEECH_ENDPOINT", "VACHANA_API_KEY", "VACHANA_STT_MODEL",],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL", "INWORLD_TTS_MODEL", "INWORLD_VOICE_ID", "RIME_API_KEY", "RIME_TTS_MODEL", "RIME_VOICE_ID", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "POLLY_TTS_MODEL", "POLLY_VOICE_ID", "AZURE_TTS_MODEL", "AZURE_VOICE_ID", "KITTEN_TTS_MODEL", "KITTEN_TTS_VOICE", "VACHANA_TTS_MODEL", "VACHANA_VOICE_ID"],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "SMALLEST_API_KEY", "SMALLEST_LLM_MODEL", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL", "AZURE_LLM_API_KEY", "AZURE_LLM_MODEL", "AZURE_LLM_ENDPOINT", "AZURE_LLM_API_VERSION", "AZURE_LLM_REGION", "AIRLLM_MODEL", "AIRLLM_COMPRESSION", "AIRLLM_MAX_NEW_TOKENS", "INWORLD_LLM_MODEL",],
                                 "Email (SMTP — Outbound)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Email (IMAP — Inbound)": ["IMAP_SERVER", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD"],
-                                "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"]
+                                "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"],
+                                "Forex (Currency Conversion)": ["API_LAYER_API_KEY"],
+                                "Truecaller Business": ["TRUECALLER_KEY_ID", "TRUECALLER_API_KEY", "TRUECALLER_CLIENT_ACCOUNT_ID"]
                             }).map(([groupName, keys]) => (
                                 <div key={groupName} className="space-y-4 p-4 rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40">
                                     <h4 className="font-bold text-slate-700 dark:text-slate-300">{groupName}</h4>

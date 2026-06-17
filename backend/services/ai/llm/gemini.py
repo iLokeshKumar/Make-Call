@@ -23,10 +23,10 @@ class GeminiLLM(BaseLLM):
 
     def _convert_tools(self, mistral_tools: List[Dict]) -> List:
         """Convert OpenAI-style tools to Gemini format for the new SDK."""
-        # The new SDK takes a list of types.Tool objects or function declaration dicts
+
         gemini_tools = []
         for t in mistral_tools:
-            # Ensure we have a dict
+
             if hasattr(t, "to_dict"):
                 tool_dict = t.to_dict()
             elif isinstance(t, dict):
@@ -41,7 +41,7 @@ class GeminiLLM(BaseLLM):
                     "description": f["description"],
                     "parameters": f["parameters"]
                 })
-        # Note: New SDK client.aio.models.generate_content_stream expects tools as a list of types.Tool
+        
         return [types.Tool(function_declarations=gemini_tools)] if gemini_tools else None
 
     async def stream(self, tools: Optional[List] = None) -> AsyncGenerator[Dict[str, Any], None]:
@@ -50,15 +50,12 @@ class GeminiLLM(BaseLLM):
             accumulated_text = ""
             full_reply = ""
             
-            # Convert messages to Gemini format (user -> "user", model -> "model")
-            # Note: system instruction is passed in config
             contents = []
             for msg in self.messages:
                 if msg["role"] == "system": continue
                 role = "user" if msg["role"] == "user" else "model"
                 contents.append(types.Content(role=role, parts=[types.Part(text=msg["content"])]))
 
-            # New SDK uses client.aio for async
             config = types.GenerateContentConfig(
                 system_instruction=self.system_prompt,
                 tools=gemini_tools
@@ -71,7 +68,10 @@ class GeminiLLM(BaseLLM):
             )
 
             tool_calls = []
+            _last_usage_meta = None
             async for chunk in response:
+                if getattr(chunk, "usage_metadata", None):
+                    _last_usage_meta = chunk.usage_metadata
                 if chunk.candidates[0].content and chunk.candidates[0].content.parts:
                     for part in chunk.candidates[0].content.parts:
                         if part.text:
@@ -80,7 +80,6 @@ class GeminiLLM(BaseLLM):
                             full_reply += content
                             yield {"type": "token", "content": content}
 
-                            # Sentence splitting
                             parts = SENTENCE_SPLIT_REGEX.split(accumulated_text)
                             if len(parts) > 1:
                                 sentence = parts[0] + parts[1]
@@ -89,8 +88,7 @@ class GeminiLLM(BaseLLM):
                                     yield {"type": "sentence", "content": sentence.strip()}
                         
                         if part.call:
-                            # Handling tool calls in the new SDK
-                            # New SDK uses 'call' instead of 'function_call'
+
                             tool_calls.append(type('tc', (), {
                                 'id': f"call_{int(asyncio.get_event_loop().time()*1000)}",
                                 'function': type('fn', (), {
@@ -99,14 +97,19 @@ class GeminiLLM(BaseLLM):
                                 })
                             }))
 
-            # Final sentence
+
             if accumulated_text.strip():
                 yield {"type": "sentence", "content": accumulated_text.strip()}
 
+            self.last_usage = {
+                "prompt_tokens": getattr(_last_usage_meta, "prompt_token_count", None),
+                "completion_tokens": getattr(_last_usage_meta, "candidates_token_count", None),
+            } if _last_usage_meta else {}
             yield {
                 "type": "finished",
                 "full_reply": full_reply,
-                "tool_calls": tool_calls if tool_calls else None
+                "tool_calls": tool_calls if tool_calls else None,
+                "usage": self.last_usage,
             }
 
         except Exception as e:

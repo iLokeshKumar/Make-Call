@@ -33,10 +33,16 @@ class PlivoCommunicator(TelephonyCommunicator):
                 logger.error(f"❌ [Plivo] Error sending media: {e}")
 
     async def clear_audio_buffer(self):
-        logger.info("🚫 [Plivo] Clearing audio buffer")
         try:
-            await self.websocket.send_json({
-                "event": "clear"
-            })
+            # Robust check for open websocket
+            if self.websocket.client_state.name == "CONNECTED":
+                logger.info("🚫 [Plivo] Clearing audio buffer")
+                await self.websocket.send_json({
+                    "event": "clear"
+                })
         except Exception as e:
-            logger.error(f"❌ [Plivo] Error clearing buffer: {e}")
+            # Silently catch closed socket/ASGI errors as normal hangups
+            if any(x in str(e).lower() for x in ("closed", "close message", "websocket.close", "already completed")):
+                logger.info("ℹ️ [Plivo] Clear buffer failed (Websocket already closed)")
+            else:
+                logger.error(f"❌ [Plivo] Error clearing buffer: {e}")

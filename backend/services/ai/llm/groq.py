@@ -32,39 +32,59 @@ class GroqLLM(BaseLLM):
             raise ValueError("Groq Client is not initialized due to missing API key")
 
         max_retries = 3
-        current_tools = tools
+        current_tools = tools if tools else None
+        history_limit = 10
         for attempt in range(max_retries):
             try:
                 accumulated_text = ""
                 full_reply = ""
                 tool_calls_dict: Dict[int, Any] = {}
 
-                # Clean up any unfulfilled tool calls from previous (interrupted) turns
+
                 self.clean_interrupted_tool_calls()
+
+
+                messages_to_send = self.get_safe_history(limit=history_limit)
+
+                sanitized_messages = []
+                for msg in messages_to_send:
+                    content = msg.get("content")
+                    if content and len(content) > 10000:
+                        logger.warning(
+                            "[GroqLLM] Truncating large message content (role=%s, len=%s) to prevent 413.",
+                            msg.get("role"), len(content)
+                        )
+                        content = content[:8000] + "\n\n[... TRUNCATED TO PREVENT LARGE PAYLOAD ...] \n\n" + content[-2000:]
+                    
+                    new_msg = {k: v for k, v in msg.items() if k != "content"}
+                    new_msg["content"] = content
+                    sanitized_messages.append(new_msg)
 
                 stream = await self.client.chat.completions.create(
                     model=self.model,
-                    messages=self.messages,
+                    messages=sanitized_messages,
                     tools=current_tools,
                     max_completion_tokens=2048,
                     temperature=0.7,
                     stream=True,
+                    stream_options={"include_usage": True},
                 )
 
+                _last_usage_raw = None
                 async for chunk in stream:
                     if not chunk.choices:
+                        if getattr(chunk, "usage", None):
+                            _last_usage_raw = chunk.usage
                         continue
 
                     delta = chunk.choices[0].delta
 
-                    # Content
                     content = getattr(delta, "content", None)
                     if content:
                         accumulated_text += content
                         full_reply += content
                         yield {"type": "token", "content": content}
 
-                        # Sentence boundary detection
                         parts = SENTENCE_SPLIT_REGEX.split(accumulated_text)
                         if len(parts) > 1:
                             sentence = parts[0] + parts[1]
@@ -72,7 +92,7 @@ class GroqLLM(BaseLLM):
                             if sentence.strip():
                                 yield {"type": "sentence", "content": sentence.strip()}
 
-                    # Tool calls — key by index (Groq streaming deltas only carry id/name on the first chunk; subsequent chunks carry argument fragments and share the same index).
+
                     tc_list = getattr(delta, "tool_calls", None)
                     if tc_list:
                         for tc in tc_list:
@@ -90,17 +110,21 @@ class GroqLLM(BaseLLM):
                                     if new_args:
                                         existing_fn.arguments = (existing_fn.arguments or "") + new_args
 
-                # Final remaining chunk
+
                 if accumulated_text.strip():
                     yield {"type": "sentence", "content": accumulated_text.strip()}
 
-                # End of stream metadata
+                self.last_usage = {
+                    "prompt_tokens": getattr(_last_usage_raw, "prompt_tokens", None),
+                    "completion_tokens": getattr(_last_usage_raw, "completion_tokens", None),
+                } if _last_usage_raw else {}
                 yield {
                     "type": "finished",
                     "full_reply": full_reply,
                     "tool_calls": [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())] if tool_calls_dict else None,
+                    "usage": self.last_usage,
                 }
-                # Clean up any no-tools-mode injection added during a failed attempt.
+
                 _no_tools_msg = "Do NOT use any function or tool call syntax. Respond only in plain conversational text."
                 self.messages = [m for m in self.messages if not (m.get("role") == "system" and m.get("content") == _no_tools_msg)]
                 return
@@ -109,8 +133,6 @@ class GroqLLM(BaseLLM):
                 logger.error("❌ [GroqLLM] Stream Error: %s", exc)
                 err_str = str(exc)
 
-                # Groq rejects tool calls where the model embeds args in the name field,
-                # e.g. name='get_product_info {"product_name": "..."}'. Parse and recover.
                 tc_match = _re.search(
                     r"attempted to call tool '(\w+)\s*(\{.*?\})'\s+which was not in request\.tools",
                     err_str, _re.DOTALL,
@@ -141,14 +163,35 @@ class GroqLLM(BaseLLM):
                     except Exception as parse_exc:
                         logger.error("[GroqLLM] Tool call recovery failed: %s", parse_exc)
 
-                # Model generated invalid function call format — strip tools and retry plain.
+                if ("tool calling" in err_str.lower() and "not supported" in err_str.lower()) and current_tools is not None and attempt < max_retries - 1:
+                    logger.warning(
+                        "[GroqLLM] Tool calling not supported by model '%s' — retrying without tools (attempt %s)",
+                        self.model,
+                        attempt + 1,
+                    )
+                    current_tools = None
+                    self.messages.append({
+                        "role": "system",
+                        "content": "Do NOT use any function or tool call syntax. Respond only in plain conversational text.",
+                    })
+                    await asyncio.sleep(0.5)
+                    continue
+
+                if ("entity too large" in err_str.lower() or "413" in err_str.lower()) and attempt < max_retries - 1:
+                    logger.warning(
+                        "[GroqLLM] Request Entity Too Large — retrying with shorter history limit (attempt %s)",
+                        attempt + 1,
+                    )
+                    history_limit = max(2, history_limit - 4)
+                    await asyncio.sleep(0.5)
+                    continue
+
                 if "Failed to call a function" in err_str and attempt < max_retries - 1:
                     logger.warning(
                         "[GroqLLM] Function call format failure — retrying without tools (attempt %s)",
                         attempt + 1,
                     )
                     current_tools = None
-                    # Inject instruction so model doesn't hallucinate function call syntax.
                     self.messages.append({
                         "role": "system",
                         "content": "Do NOT use any function or tool call syntax. Respond only in plain conversational text.",

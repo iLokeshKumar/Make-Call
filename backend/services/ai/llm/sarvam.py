@@ -66,6 +66,7 @@ class SarvamLLM(BaseLLM):
             "model": self.model,
             "messages": final_history,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": 0.7,
             "max_tokens": 2048,
         }
@@ -96,6 +97,7 @@ class SarvamLLM(BaseLLM):
                 error_occurred = False
                 _json_depth = 0
                 _kv_window = ""
+                _last_usage_raw = None
 
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.post(_API_URL, headers=headers, json=payload) as resp:
@@ -140,6 +142,8 @@ class SarvamLLM(BaseLLM):
 
                             choices = chunk.get("choices", [])
                             if not choices:
+                                if chunk.get("usage"):
+                                    _last_usage_raw = chunk["usage"]
                                 continue
 
                             delta = choices[0].get("delta", {})
@@ -212,22 +216,19 @@ class SarvamLLM(BaseLLM):
                         continue
                     return
 
-                # Flush remaining accumulated text as final sentence
                 if accumulated_text.strip():
                     yield {"type": "sentence", "content": accumulated_text.strip()}
 
-                # Build tool call objects — validate arguments JSON before use.
-                # Streaming can produce duplicate/concatenated chunks → "Extra data".
                 formatted_tool_calls = []
                 for i in sorted(tool_calls_dict.keys()):
                     tc = tool_calls_dict[i]
                     raw_args = tc["function"].get("arguments") or "{}"
-                    # Ensure arguments is a valid JSON string
+
                     try:
                         json.loads(raw_args)
                         clean_args = raw_args
                     except json.JSONDecodeError:
-                        # Extract first valid {...} object if chunks were duplicated
+
                         m = re.search(r'\{.*?\}', raw_args, re.DOTALL)
                         try:
                             clean_args = json.dumps(json.loads(m.group(0))) if m else "{}"
@@ -248,10 +249,15 @@ class SarvamLLM(BaseLLM):
                         )
                     )
 
+                self.last_usage = {
+                    "prompt_tokens": _last_usage_raw.get("prompt_tokens") if _last_usage_raw else None,
+                    "completion_tokens": _last_usage_raw.get("completion_tokens") if _last_usage_raw else None,
+                }
                 yield {
                     "type": "finished",
                     "full_reply": full_reply,
                     "tool_calls": formatted_tool_calls or None,
+                    "usage": self.last_usage,
                 }
                 return
 

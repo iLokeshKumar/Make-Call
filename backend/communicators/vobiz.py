@@ -42,11 +42,17 @@ class VobizCommunicator(TelephonyCommunicator):
 
     async def clear_audio_buffer(self):
         if self.stream_sid:
-            logger.info(f"🚫 [Vobiz] Clearing audio buffer for StreamSid: {self.stream_sid}")
             try:
-                await self.websocket.send_json({
-                    "event": "clearAudio",
-                    "streamId": self.stream_sid
-                })
+                # Robust check for open websocket
+                if self.websocket.client_state.name == "CONNECTED":
+                    logger.info(f"🚫 [Vobiz] Clearing audio buffer for StreamSid: {self.stream_sid}")
+                    await self.websocket.send_json({
+                        "event": "clearAudio",
+                        "streamId": self.stream_sid
+                    })
             except Exception as e:
-                logger.error(f"❌ [Vobiz] Error clearing buffer: {e}")
+                # Silently catch closed socket/ASGI errors as normal hangups
+                if any(x in str(e).lower() for x in ("closed", "close message", "websocket.close", "already completed")):
+                    logger.info("ℹ️ [Vobiz] Clear buffer failed (Websocket already closed)")
+                else:
+                    logger.error(f"❌ [Vobiz] Error clearing buffer: {e}")

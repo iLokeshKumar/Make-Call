@@ -9,14 +9,12 @@ from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 logger = logging.getLogger(__name__)
 
-# Free / experimental OpenRouter models often break streaming tool calls (502 mid-stream).
 _UNRELIABLE_TOOL_MODEL_MARKERS = (":free", "gpt-oss")
 _TOOL_FALLBACK_MODEL = os.getenv("OPENROUTER_TOOL_FALLBACK_MODEL", "openai/gpt-4o-mini")
 _DEBUG_LOG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "..", "debug-c56e15.log")
 
 
 def _agent_debug_log(location: str, message: str, data: dict | None = None, hypothesis_id: str = "", run_id: str = "pre-fix"):
-    # #region agent log
     try:
         entry = {
             "sessionId": "c56e15",
@@ -31,7 +29,7 @@ def _agent_debug_log(location: str, message: str, data: dict | None = None, hypo
             f.write(json.dumps(entry) + "\n")
     except Exception:
         pass
-    # #endregion
+
 
 
 def _is_unreliable_for_tools(model: str) -> bool:
@@ -61,7 +59,6 @@ class OpenRouterLLM(BaseLLM):
             "X-Title": "Rio Voice Agent"
         }
         
-        # Deep-sanitize messages to ensure JSON serialization
         def sanitize_obj(obj):
             if isinstance(obj, list):
                 return [sanitize_obj(i) for i in obj]
@@ -93,12 +90,11 @@ class OpenRouterLLM(BaseLLM):
             "model": effective_model,
             "messages": sanitized_messages,
             "stream": True,
+            "stream_options": {"include_usage": True},
             "temperature": 0.7,
             "max_tokens": 2048
         }
         
-        # Only enable reasoning for specific models known to support it via this field
-        # Most models will throw a 500 if they don't recognize the 'reasoning' block
         if any(m in self.model.lower() for m in ["trinity", "deepseek-r1"]):
             payload["reasoning"] = {"enabled": True}
         
@@ -127,6 +123,7 @@ class OpenRouterLLM(BaseLLM):
             full_reply = ""
             tool_calls_dict = {}
             reasoning_details = ""
+            _last_usage_raw = None
 
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(url, headers=headers, json=payload) as resp:
@@ -159,11 +156,13 @@ class OpenRouterLLM(BaseLLM):
 
                                 choices = chunk.get('choices', [])
                                 if not choices:
+                                    if chunk.get('usage'):
+                                        _last_usage_raw = chunk['usage']
                                     continue
 
                                 delta = choices[0].get('delta', {})
                                 
-                                # 1. Reasoning Tokens (Do not speak these, just accumulate)
+                                
                                 if 'reasoning_details' in delta and delta['reasoning_details']:
                                     rd = delta['reasoning_details']
                                     if isinstance(rd, list):
@@ -174,20 +173,20 @@ class OpenRouterLLM(BaseLLM):
                                                 reasoning_details += item
                                     elif isinstance(rd, str):
                                         reasoning_details += rd
-                                    continue # Skip yielding to speech engine
+                                    continue
                                     
                                 if 'reasoning' in delta and delta['reasoning']:
-                                    # Fallback if the API uses 'reasoning' delta stream instead of reasoning_details string
+                                    
                                     r = delta['reasoning']
                                     if isinstance(r, str):
                                         reasoning_details += r
                                     continue
 
-                                # 2. Spoken Content
+                                
                                 if 'content' in delta and delta['content']:
                                     content = delta['content']
                                     
-                                    # Suppress JSON / tool-call syntax leaking into spoken tokens
+                                    
                                     _speech_leak_markers = (
                                         '"arguments":', '{"name":', '"name":', '"id":', '": "',
                                         "to=functions.", "to=tool_calls.", "[Assistant calls",
@@ -209,7 +208,7 @@ class OpenRouterLLM(BaseLLM):
                                     full_reply += content
                                     yield {"type": "token", "content": content}
 
-                                    # Sentence boundary detection
+                                    
                                     parts = SENTENCE_SPLIT_REGEX.split(accumulated_text)
                                     if len(parts) > 1:
                                         sentence = parts[0] + parts[1]
@@ -217,7 +216,7 @@ class OpenRouterLLM(BaseLLM):
                                         if sentence.strip():
                                             yield {"type": "sentence", "content": sentence.strip()}
 
-                                # 3. Tool Calls
+                                
                                 if 'tool_calls' in delta:
                                     for tc in delta['tool_calls']:
                                         idx = tc.get('index', 0)
@@ -253,10 +252,15 @@ class OpenRouterLLM(BaseLLM):
                     )
                     formatted_tool_calls.append(obj)
 
+            self.last_usage = {
+                "prompt_tokens": _last_usage_raw.get("prompt_tokens") if _last_usage_raw else None,
+                "completion_tokens": _last_usage_raw.get("completion_tokens") if _last_usage_raw else None,
+            }
             finish_obj = {
-                "type": "finished", 
-                "full_reply": full_reply, 
-                "tool_calls": formatted_tool_calls if formatted_tool_calls else None
+                "type": "finished",
+                "full_reply": full_reply,
+                "tool_calls": formatted_tool_calls if formatted_tool_calls else None,
+                "usage": self.last_usage,
             }
             
             if reasoning_details:

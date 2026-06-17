@@ -92,6 +92,7 @@ ALL_TENANT_TABLES: list[str] = [
     "campaign_schedules",
     "sip_trunks",
     "compliance_applications",
+    "provider_rates",
 ]
 
 POLICY_NAME = "tenant_isolation"

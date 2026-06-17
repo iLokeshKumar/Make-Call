@@ -481,7 +481,22 @@ class VoicePipeline:
             logger.info("[Pipeline] Filler/backchanneling enabled")
 
         # ── Phase 2: Ambient Noise ──
-        noise_config = self.runtime_json.get("ambient_noise", {})
+        noise_config = (
+            self.runtime_json.get("ambient_noise")
+            or (self.runtime_json.get("call_features") or {}).get("ambient_noise")
+            or None
+        )
+        if not noise_config:
+            # Fall back to company-wide settings
+            _an_enabled = all_settings.get("AMBIENT_NOISE_ENABLED") or all_settings.get("ambient_noise_enabled")
+            if _an_enabled == "1":
+                noise_config = {
+                    "enabled": True,
+                    "preset": all_settings.get("AMBIENT_NOISE_PRESET") or all_settings.get("ambient_noise_preset") or "call-center",
+                    "volume": float(all_settings.get("AMBIENT_NOISE_VOLUME") or all_settings.get("ambient_noise_volume") or "0.15") / 100,
+                }
+            else:
+                noise_config = {}
         _provider_ok = isinstance(self.communicator, (PlivoCommunicator, VobizCommunicator))
         if noise_config.get("enabled") and not _provider_ok:
             logger.info(
@@ -612,6 +627,11 @@ class VoicePipeline:
                 if ack and self.sentence_queue.empty() and not self.is_rio_speaking:
                     await self.sentence_queue.put((ack, True))
                     await asyncio.sleep(0.05)
+                # Silently refill LLM pool if running low
+                asyncio.create_task(
+                    self.filler_service._maybe_refill(self.llm_service),
+                    name="filler_pool_refill",
+                )
             except Exception:  # noqa: BLE001
                 pass
 
@@ -1017,6 +1037,12 @@ class VoicePipeline:
         # Mirror into the pipeline's accumulator for backward compatibility
         self.transcript_accumulator.append(f"Rio: {greeting}")
         self.save_transcript()
+
+        # Pre-generate LLM filler pool while greeting plays (non-blocking)
+        asyncio.create_task(
+            self.filler_service.populate_llm_pool(self.llm_service),
+            name="filler_pool_init",
+        )
 
         # Register pipeline for event injection
         try:
@@ -1716,11 +1742,15 @@ class VoicePipeline:
                         self.current_tts_task = asyncio.create_task(
                             self.tts_service.speak(**_speak_kw)
                         )
+                        _tts_cancelled = False
                         try:
                             await self._await_tts_with_retry(self.current_tts_task, _speak_kw)
                         except asyncio.CancelledError:
+                            _tts_cancelled = True
                             logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
                         finally:
+                            if not _tts_cancelled:
+                                self._record_tts_usage(tts_text)
                             self.is_rio_speaking = False
                             self.last_rio_speech_end_time = time.time()
                             self.sentence_queue.task_done()
@@ -1746,15 +1776,19 @@ class VoicePipeline:
                         self.current_tts_task = asyncio.create_task(
                             self.tts_service.speak(**_speak_kw)
                         )
+                        _tts_cancelled = False
                         try:
                             await self._await_tts_with_retry(self.current_tts_task, _speak_kw)
                         except asyncio.CancelledError:
+                            _tts_cancelled = True
                             logger.info("TTS Task Cancelled (Barge-in / Interrupted).")
                         finally:
+                            if not _tts_cancelled:
+                                self._record_tts_usage(tts_text)
                             self.is_rio_speaking = False
                             self.last_rio_speech_end_time = time.time()
                             self.sentence_queue.task_done()
-            
+
             finally:
                 # Cleanup WS health monitor
                 _ws_health_task.cancel()
@@ -1821,6 +1855,53 @@ class VoicePipeline:
             self.turn_index += 1
         except Exception as exc:
             logger.debug("Trace annotation skipped: %s", exc)
+
+    def _record_tts_usage(self, text: str) -> None:
+        try:
+            if not text:
+                return
+            try:
+                iid = int(self.interaction_id)
+            except (ValueError, TypeError):
+                iid = None
+            from services.observability.usage_tracker import record_usage
+            record_usage(
+                self.session,
+                service_type="tts",
+                provider=getattr(self.tts_service, "provider", "unknown"),
+                model=getattr(self.tts_service, "model", None),
+                characters=len(text),
+                company_id=self.company_id,
+                user_id=self.user_id,
+                interaction_id=iid,
+                context="voice_turn",
+            )
+        except Exception as exc:
+            logger.debug("_record_tts_usage skipped: %s", exc)
+
+    def _record_llm_usage(self, usage: dict) -> None:
+        try:
+            if not usage or not any(usage.values()):
+                return
+            try:
+                iid = int(self.interaction_id)
+            except (ValueError, TypeError):
+                iid = None
+            from services.observability.usage_tracker import record_usage
+            record_usage(
+                self.session,
+                service_type="llm",
+                provider=getattr(self.llm_service, "provider", "unknown"),
+                model=getattr(self.llm_service, "model", None),
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                company_id=self.company_id,
+                user_id=self.user_id,
+                interaction_id=iid,
+                context="voice_turn",
+            )
+        except Exception as exc:
+            logger.debug("_record_llm_usage skipped: %s", exc)
 
     def save_latency(self, engine_name, stt, llm, tts, stt_p=None, stt_m=None, llm_p=None, llm_m=None, tts_p=None, tts_m=None):
         """Saves turn-level latency metrics to DB."""
@@ -2018,6 +2099,8 @@ class VoicePipeline:
                             stt_provider=self.stt_provider,
                             llm_provider=self.llm_provider,
                             tts_provider=self.tts_provider,
+                            session=self.session,
+                            company_id=self.company_id,
                         )
                         _save_cost(
                             self.session, self.company_id or 0,
@@ -2176,6 +2259,7 @@ class VoicePipeline:
                 self.llm_error_count = 0
                 full_reply = chunk["full_reply"]
                 tool_calls = chunk["tool_calls"]
+                self._record_llm_usage(chunk.get("usage") or {})
 
                 reasoning_details = chunk.get("reasoning_details")
                 llm_end_time = time.time()

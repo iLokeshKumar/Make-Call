@@ -6,11 +6,9 @@ from mistralai.client import Mistral
 from typing import Optional, List, Dict, Any, AsyncGenerator
 from .base import BaseLLM, SENTENCE_SPLIT_REGEX
 
-# Provider-agnostic counters live in services.observability so /health and
-# tests can read them without dragging the full LLM SDK chain.
 from services.observability import (
     record_rate_limit_hit as _record_rate_limit_hit,
-    get_rate_limit_hits_last_15min,  # noqa: F401  (re-exported for back-compat)
+    get_rate_limit_hits_last_15min,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,9 +27,6 @@ class MistralLLM(BaseLLM):
 
     async def stream(self, tools: Optional[List[Dict[str, Any]]] = None) -> AsyncGenerator[Dict[str, Any], None]:
         max_retries = 4
-        # Exponential backoff ladder: 2s, 8s, 30s. Free tier = 1 req/sec, so a
-        # short retry hits the same limited window. Long ladder = better odds
-        # the bucket refilled by the time we retry.
         backoff_seconds = [0, 2, 8, 30]
         for attempt in range(max_retries):
             try:
@@ -42,7 +37,6 @@ class MistralLLM(BaseLLM):
                 if not self.client:
                     raise ValueError("Mistral Client is not initialized due to missing API key")
 
-                # Clean up any unfulfilled tool calls from previous (interrupted) turns
                 self.clean_interrupted_tool_calls()
                 final_history = self.get_safe_history(limit=10)
 
@@ -54,17 +48,19 @@ class MistralLLM(BaseLLM):
                     temperature=0.7
                 )
 
+                _last_chunk = None
                 async for chunk in stream:
+                    _last_chunk = chunk
                     delta = chunk.data.choices[0].delta
                 
-                    # 1. Content
+
                     if delta.content:
                         content = delta.content
                         accumulated_text += content
                         full_reply += content
                         yield {"type": "token", "content": content}
 
-                        # Sentence boundary detection
+
                         parts = SENTENCE_SPLIT_REGEX.split(accumulated_text)
                         if len(parts) > 1:
                             sentence = parts[0] + parts[1]
@@ -72,7 +68,6 @@ class MistralLLM(BaseLLM):
                             if sentence.strip():
                                 yield {"type": "sentence", "content": sentence.strip()}
 
-                    # 2. Tool Calls
                     if delta.tool_calls:
                         for tc in delta.tool_calls:
                             idx = tc.index
@@ -81,17 +76,21 @@ class MistralLLM(BaseLLM):
                             else:
                                 tool_calls_dict[idx].function.arguments += tc.function.arguments
 
-                # Final remaining chunk
                 if accumulated_text.strip():
                     yield {"type": "sentence", "content": accumulated_text.strip()}
 
-                    # End of stream metadata
+                _u = getattr(getattr(_last_chunk, "data", None), "usage", None) if _last_chunk else None
+                self.last_usage = {
+                    "prompt_tokens": getattr(_u, "prompt_tokens", None),
+                    "completion_tokens": getattr(_u, "completion_tokens", None),
+                } if _u else {}
                 yield {
-                    "type": "finished", 
-                    "full_reply": full_reply, 
-                    "tool_calls": [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())] if tool_calls_dict else None
+                    "type": "finished",
+                    "full_reply": full_reply,
+                    "tool_calls": [tool_calls_dict[i] for i in sorted(tool_calls_dict.keys())] if tool_calls_dict else None,
+                    "usage": self.last_usage,
                 }
-                return # Success, exit loop
+                return
 
             except Exception as e:
                 is_rate_limit = "429" in str(e)

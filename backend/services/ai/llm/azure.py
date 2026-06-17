@@ -70,10 +70,14 @@ class AzureLLM(BaseLLM):
                     max_tokens=2048,
                     temperature=0.7,
                     stream=True,
+                    stream_options={"include_usage": True},
                 )
 
+                _last_usage_raw = None
                 async for chunk in stream:
                     if not chunk.choices:
+                        if getattr(chunk, "usage", None):
+                            _last_usage_raw = chunk.usage
                         continue
 
                     delta = chunk.choices[0].delta
@@ -110,10 +114,15 @@ class AzureLLM(BaseLLM):
                 if accumulated_text.strip():
                     yield {"type": "sentence", "content": accumulated_text.strip()}
 
+                self.last_usage = {
+                    "prompt_tokens": getattr(_last_usage_raw, "prompt_tokens", None),
+                    "completion_tokens": getattr(_last_usage_raw, "completion_tokens", None),
+                } if _last_usage_raw else {}
                 yield {
                     "type": "finished",
                     "full_reply": full_reply,
                     "tool_calls": [tool_calls_dict[i] for i in sorted(tool_calls_dict)] if tool_calls_dict else None,
+                    "usage": self.last_usage,
                 }
                 return
 
