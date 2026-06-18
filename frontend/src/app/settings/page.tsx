@@ -1,11 +1,16 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
+import { useSearchParams, useRouter } from "next/navigation";
 import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw, Calendar, Link2, Link2Off, Gauge, Webhook, Server, Database, ShieldCheck, Layers, Plus, Trash2, Play, RotateCcw, Clock, CheckCircle, XCircle, ExternalLink, Copy, Sparkles } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
+import SettingsHome from "@/components/settings/SettingsHome";
+import SectionHeader from "@/components/settings/SectionHeader";
+import { SECTION_DEFS } from "@/components/settings/sectionDefs";
 import SubAccountsTab from "@/components/settings/SubAccountsTab";
 import ComplianceTab from "@/components/settings/ComplianceTab";
 import DispositionsTab from "@/components/settings/DispositionsTab";
@@ -95,6 +100,8 @@ type RoleOption = {
 export default function SettingsPage() {
     const { theme, setTheme } = useTheme();
     const { user, sessionTimeout } = useAuth();
+    const searchParams = useSearchParams();
+    const router = useRouter();
     const [systemInstruction, setSystemInstruction] = useState("");
     const [sttProvider, setSttProvider] = useState("deepgram");
     const [llmProvider, setLlmProvider] = useState("mistral");
@@ -142,7 +149,7 @@ export default function SettingsPage() {
     const [apiKeys, setApiKeys] = useState<Record<string, string>>({});
     
     // UI State
-    const [activeTab, setActiveTab] = useState("general");
+    const [activeSection, setActiveSection] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
     const [saving, setSaving] = useState(false);
     const [saveSuccess, setSaveSuccess] = useState(false);
@@ -155,6 +162,12 @@ export default function SettingsPage() {
     const [inviteMessage, setInviteMessage] = useState<string | null>(null);
     const [isInviting, setIsInviting] = useState(false);
     const hasAdminAccess = user?.role === "company_admin" || user?.role === "company_owner";
+
+    const [pinnedIds, setPinnedIds] = useState<string[]>(() => {
+        if (typeof window === "undefined") return [];
+        try { return JSON.parse(localStorage.getItem("rio_settings_pinned") ?? "[]"); } catch { return []; }
+    });
+    const { items: recentSections, track: trackSection, clear: clearRecent } = useRecentlyViewed("rio_settings_recent");
 
     // Competitor tab state
     const [competitorNames, setCompetitorNames] = useState("");
@@ -474,10 +487,10 @@ export default function SettingsPage() {
         return () => controller.abort();
     }, [user, hasAdminAccess, inviteRoleId]);
 
-    // Load tab-specific data lazily
+    // Load section-specific data lazily
     useEffect(() => {
         if (!user || !hasAdminAccess) return;
-        if (activeTab === "webhooks") {
+        if (activeSection === "webhooks") {
             Promise.all([
                 apiFetch(`${CRM_BASE}/webhooks`).then(r => r.ok ? r.json() : []).catch(() => []),
                 apiFetch(`${CRM_BASE}/webhooks/delivery-logs`).then(r => r.ok ? r.json() : []).catch(() => []),
@@ -488,13 +501,13 @@ export default function SettingsPage() {
                 setAvailableEvents(evts as any[]);
             });
         }
-        if (activeTab === "telephony") {
+        if (activeSection === "sip_trunks") {
             apiFetch(`${CRM_BASE}/sip-trunks`).then(r => r.ok ? r.json() : []).then(d => setSipTrunks(d as SipTrunk[])).catch(() => {});
         }
-        if (activeTab === "credentials") {
+        if (activeSection === "credentials") {
             apiFetch(`${CRM_BASE}/provider-credentials`).then(r => r.ok ? r.json() : []).then(d => setProviderCreds(d as ProviderCred[])).catch(() => {});
         }
-        if (activeTab === "persona") {
+        if (activeSection === "voice_ai") {
             apiFetch(`${CRM_BASE}/company-prompts`).then(r => r.ok ? r.json() : []).then((d: CompanyPromptVersion[]) => {
                 setCompanyPrompts(d);
                 const active = d.find(p => p.is_active);
@@ -502,7 +515,7 @@ export default function SettingsPage() {
             }).catch(() => {});
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeTab, user, hasAdminAccess]);
+    }, [activeSection, user, hasAdminAccess]);
 
     // Webhook CRUD helpers
     const openWebhookModal = (w: WebhookConfig | "new") => {
@@ -892,6 +905,64 @@ export default function SettingsPage() {
         }
     };
 
+    const navigateToSection = useCallback((id: string) => {
+        const sec = SECTION_DEFS.find(s => s.id === id);
+        if (sec) trackSection({ id, label: sec.label });
+        setActiveSection(id);
+        router.replace(`/settings?section=${id}`, { scroll: false });
+    }, [trackSection, router]);
+
+    const handleBack = useCallback(() => {
+        setActiveSection(null);
+        router.replace("/settings", { scroll: false });
+    }, [router]);
+
+    const togglePin = (id: string) => {
+        setPinnedIds(prev => {
+            const next = prev.includes(id) ? prev.filter(p => p !== id) : [...prev, id];
+            localStorage.setItem("rio_settings_pinned", JSON.stringify(next));
+            return next;
+        });
+    };
+
+    // Sync URL → state on mount
+    useEffect(() => {
+        const sec = searchParams.get("section");
+        if (sec && SECTION_DEFS.find(s => s.id === sec)) {
+            setActiveSection(sec);
+        }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+
+    // Keyboard: Esc → home, ⌘S → save current section
+    useEffect(() => {
+        const handler = (e: KeyboardEvent) => {
+            if (e.key === "Escape" && activeSection !== null) {
+                handleBack();
+            }
+            if ((e.metaKey || e.ctrlKey) && e.key === "s" && activeSection !== null) {
+                e.preventDefault();
+                const save = getSectionSave();
+                if (!save.hideSave && save.onSave) save.onSave();
+            }
+        };
+        window.addEventListener("keydown", handler);
+        return () => window.removeEventListener("keydown", handler);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [activeSection, handleBack]);
+
+    const saveMyEmailSection = async () => {
+        await Promise.all([saveMyEmailSettings(), saveMyWarmTransferSettings()]);
+    };
+
+    const getSectionSave = () => {
+        if (!activeSection) return { hideSave: true as const };
+        if (activeSection === "profile") return { onSave: saveMyAiSettings, saving: savingMyAi, saveSuccess: myAiSaved, saveError: null as string | null, hideSave: false as const };
+        if (activeSection === "my_email") return { onSave: saveMyEmailSection, saving: savingMyEmail || savingMyWarmTransfer, saveSuccess: myEmailSaved, saveError: null as string | null, hideSave: false as const };
+        if (["voice_ai", "telephony_config", "api_keys", "usage"].includes(activeSection)) return { onSave: handleSave, saving, saveSuccess, saveError, hideSave: false as const };
+        return { hideSave: true as const };
+    };
+
     const handleCalendarDisconnect = async () => {
         setCalendarLoading(true);
         try {
@@ -908,7 +979,7 @@ export default function SettingsPage() {
         <>
             <div className="space-y-6 pb-8 text-slate-800 dark:text-slate-100">
             {/* Header */}
-            <div className="flex items-center justify-between">
+            {activeSection === null && (
                 <div>
                     <h1 className="text-4xl font-bold tracking-tight">
                         <span className="gradient-text">Settings</span>
@@ -917,159 +988,62 @@ export default function SettingsPage() {
                         Configure your CRM preferences and AI behavior
                     </p>
                 </div>
-                {saveSuccess && (
-                    <div className="flex items-center space-x-2 text-emerald-600 dark:text-emerald-400 font-bold animate-in fade-in slide-in-from-right-4">
-                        <CheckCircle2 className="h-5 w-5" />
-                        <span>Settings Saved!</span>
-                    </div>
-                )}
-            </div>
-
-            {hasAdminAccess && (
-                <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-4 animate-in fade-in duration-300">
-                    <div className="flex items-center justify-between">
-                        <div>
-                            <h2 className="text-lg font-bold text-slate-900 dark:text-white">Invite a teammate</h2>
-                            <p className="text-sm text-slate-500 dark:text-slate-400">
-                                Send an invitation link that expires in a few days.
-                            </p>
-                        </div>
-                        <span className="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">
-                            Owner Only
-                        </span>
-                    </div>
-                    <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr_1fr] items-end">
-                        <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Email</label>
-                            <input
-                                type="email"
-                                value={inviteEmail}
-                                onChange={(e) => setInviteEmail(e.target.value)}
-                                placeholder="jane@company.com"
-                                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                            />
-                        </div>
-                        <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Role</label>
-                            <select
-                                value={inviteRoleId ?? ""}
-                                onChange={(e) => setInviteRoleId(Number(e.target.value))}
-                                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                            >
-                                {roles.length === 0 && <option value="">Loading roles...</option>}
-                                {roles.map((role) => (
-                                    <option key={role.id} value={role.id}>
-                                        {role.name.replace(/_/g, " ")}
-                                    </option>
-                                ))}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Expires (hours)</label>
-                            <input
-                                type="number"
-                                min={1}
-                                max={168}
-                                value={inviteExpiresHours}
-                                onChange={(e) => setInviteExpiresHours(Number(e.target.value))}
-                                className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
-                            />
-                        </div>
-                        <button
-                            type="button"
-                            onClick={handleSendInvite}
-                            disabled={isInviting}
-                            className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold py-2 text-sm uppercase tracking-wide shadow-lg shadow-emerald-500/30 hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed"
-                        >
-                            {isInviting ? "Sending..." : "Send Invite"}
-                        </button>
-                    </div>
-                    {inviteMessage && (
-                        <p className={`text-xs ${inviteMessage.includes("sent") ? "text-emerald-500" : "text-red-500"}`}>
-                            {inviteMessage}
-                        </p>
-                    )}
-                </div>
             )}
 
-            {/* Tabs */}
-            <div className="flex space-x-2 border-b border-slate-200 dark:border-slate-800 pb-2 overflow-x-auto scrollbar-none">
-                {[
-                    { id: "general", label: "General & Appearance", icon: Settings },
-                    { id: "myemail", label: "My Email", icon: Mail },
-                    ...(hasAdminAccess ? [
-                        { id: "sub_accounts", label: "Sub Accounts", icon: Layers },
-                        { id: "compliance", label: "Compliance & DLT", icon: ShieldCheck },
-                        { id: "dispositions", label: "Outcome Dispositions", icon: CheckCircle2 },
-                        { id: "agent_templates", label: "Agent Templates", icon: Sparkles },
-                        { id: "integrations", label: "No-Code Integrations", icon: Zap },
-                        { id: "cost", label: "Cost & Billing", icon: Gauge },
-                        { id: "feature_flags", label: "Feature Flags & Worker", icon: KeyRound },
-                        { id: "webhooks", label: "Webhooks", icon: Webhook },
-                        { id: "persona", label: "Voice & AI Engine", icon: Brain },
-                        { id: "keys", label: "Integration Keys", icon: KeyRound },
-                        { id: "credentials", label: "Provider Credentials", icon: Database },
-                        { id: "telephony", label: "SIP Trunks", icon: Server },
-                        { id: "usage", label: "Usage Limits", icon: Gauge },
-                        { id: "competitors", label: "Competitors", icon: Zap },
-                    ] : []),
-                ].map((tab) => {
-                    const Icon = tab.icon;
-                    return (
-                        <button
-                            key={tab.id}
-                            onClick={() => setActiveTab(tab.id)}
-                            className={`flex items-center space-x-2 px-4 py-2 rounded-xl font-bold transition-all ${
-                                activeTab === tab.id 
-                                ? "bg-violet-600 text-white shadow-md" 
-                                : "text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
-                            }`}
-                        >
-                            <Icon className="h-4 w-4" />
-                            <span>{tab.label}</span>
-                        </button>
-                    )
-                })}
-            </div>
+            {/* Command Center — Home */}
+            {activeSection === null ? (
+                <SettingsHome
+                    sections={SECTION_DEFS}
+                    recentItems={recentSections}
+                    pinnedIds={pinnedIds}
+                    hasAdminAccess={hasAdminAccess}
+                    onNavigate={navigateToSection}
+                    onTogglePin={togglePin}
+                    onClearRecent={clearRecent}
+                />
+            ) : (
+            <>
+            {/* SectionHeader */}
+            {(() => { const _sec = SECTION_DEFS.find(s => s.id === activeSection); if (!_sec) return null; return <SectionHeader section={_sec} onBack={handleBack} {...getSectionSave()} />; })()}
 
             <div className="space-y-6">
                 {/* Sub Accounts Tab */}
-                {activeTab === "sub_accounts" && hasAdminAccess && (
+                {activeSection === "sub_accounts" && hasAdminAccess && (
                     <SubAccountsTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Compliance Tab */}
-                {activeTab === "compliance" && hasAdminAccess && (
+                {activeSection === "compliance" && hasAdminAccess && (
                     <ComplianceTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Dispositions Tab */}
-                {activeTab === "dispositions" && hasAdminAccess && (
+                {activeSection === "dispositions" && hasAdminAccess && (
                     <DispositionsTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Agent Templates Tab */}
-                {activeTab === "agent_templates" && hasAdminAccess && (
+                {activeSection === "agent_templates" && hasAdminAccess && (
                     <AgentTemplatesTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Integrations Tab */}
-                {activeTab === "integrations" && hasAdminAccess && (
+                {activeSection === "integrations" && hasAdminAccess && (
                     <IntegrationsTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Cost Tab */}
-                {activeTab === "cost" && hasAdminAccess && (
+                {activeSection === "cost" && hasAdminAccess && (
                     <CostTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Feature Flags Tab */}
-                {activeTab === "feature_flags" && hasAdminAccess && (
+                {activeSection === "feature_flags" && hasAdminAccess && (
                     <FeatureFlagsTab sessionTimeout={sessionTimeout} />
                 )}
 
-                {/* General Tab */}
-                {activeTab === "general" && (
+                {/* Profile Section */}
+                {activeSection === "profile" && (
                     <div className="space-y-6">
                         {/* Theme Settings */}
                 <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
@@ -1137,21 +1111,6 @@ export default function SettingsPage() {
                                 </p>
                             </div>
                         </div>
-                        <div className="flex items-center space-x-2">
-                            {myAiSaved && (
-                                <span className="flex items-center space-x-1 text-emerald-600 text-sm font-bold">
-                                    <CheckCircle2 className="h-4 w-4" /><span>Saved</span>
-                                </span>
-                            )}
-                            <button
-                                onClick={saveMyAiSettings}
-                                disabled={savingMyAi}
-                                className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 disabled:opacity-50 transition-all text-sm"
-                            >
-                                {savingMyAi ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                                <span>Save</span>
-                            </button>
-                        </div>
                     </div>
 
                     <div className="space-y-4">
@@ -1183,6 +1142,45 @@ export default function SettingsPage() {
                     </div>
                 </div>
 
+                {/* Invite Teammate — profile section, admin only */}
+                {hasAdminAccess && (
+                    <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-4 animate-in fade-in duration-300">
+                        <div className="flex items-center justify-between">
+                            <div>
+                                <h2 className="text-lg font-bold text-slate-900 dark:text-white">Invite a teammate</h2>
+                                <p className="text-sm text-slate-500 dark:text-slate-400">Send an invitation link that expires in a few days.</p>
+                            </div>
+                            <span className="text-xs uppercase tracking-[0.2em] text-slate-400 dark:text-slate-500">Owner Only</span>
+                        </div>
+                        <div className="grid gap-3 md:grid-cols-[2fr_1fr_1fr_1fr] items-end">
+                            <div>
+                                <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Email</label>
+                                <input type="email" value={inviteEmail} onChange={(e) => setInviteEmail(e.target.value)} placeholder="jane@company.com" className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Role</label>
+                                <select value={inviteRoleId ?? ""} onChange={(e) => setInviteRoleId(Number(e.target.value))} className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900/40 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500">
+                                    {roles.length === 0 && <option value="">Loading roles...</option>}
+                                    {roles.map((role) => <option key={role.id} value={role.id}>{role.name.replace(/_/g, " ")}</option>)}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-xs font-semibold uppercase text-slate-500 dark:text-slate-400">Expires (hours)</label>
+                                <input type="number" min={1} max={168} value={inviteExpiresHours} onChange={(e) => setInviteExpiresHours(Number(e.target.value))} className="w-full rounded-xl border border-slate-200 dark:border-slate-800 bg-slate-50 dark:bg-slate-900/40 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                            </div>
+                            <button type="button" onClick={handleSendInvite} disabled={isInviting} className="w-full rounded-xl bg-gradient-to-r from-emerald-500 to-teal-500 text-white font-semibold py-2 text-sm uppercase tracking-wide shadow-lg shadow-emerald-500/30 hover:opacity-90 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+                                {isInviting ? "Sending..." : "Send Invite"}
+                            </button>
+                        </div>
+                        {inviteMessage && <p className={`text-xs ${inviteMessage.includes("sent") ? "text-emerald-500" : "text-red-500"}`}>{inviteMessage}</p>}
+                    </div>
+                )}
+                    </div>
+                )}
+
+                {/* Telephony Config Section */}
+                {activeSection === "telephony_config" && hasAdminAccess && (
+                    <div className="space-y-6">
                 {/* Telephony Configuration */}
                 {hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
@@ -1606,7 +1604,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* AI Configuration Tab */}
-                {activeTab === "persona" && hasAdminAccess && (
+                {activeSection === "voice_ai" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-pink-500">
@@ -1663,7 +1661,7 @@ export default function SettingsPage() {
                                         <option value="mimo">Mimo</option>
                                         <option value="azure">Azure</option>
                                         <option value="smallest">Smallest</option>
-                                        <option value="airllm">AirLLM</option>
+                                        {/* <option value="airllm">AirLLM</option> */}
                                         <option value="inworld">Inworld</option>
                                     </select>
                                 </div>
@@ -1787,7 +1785,7 @@ export default function SettingsPage() {
 
 
                 {/* Company Prompts — versioned prompt history */}
-                {activeTab === "persona" && hasAdminAccess && (
+                {activeSection === "voice_ai" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5 mt-6">
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-purple-500 to-indigo-600">
@@ -1850,7 +1848,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* Provider Credentials Tab */}
-                {activeTab === "credentials" && hasAdminAccess && (
+                {activeSection === "credentials" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">
                         <div className="flex items-center gap-3">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-teal-500 to-emerald-600">
@@ -1918,7 +1916,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* Webhooks Tab */}
-                {activeTab === "webhooks" && hasAdminAccess && (
+                {activeSection === "webhooks" && hasAdminAccess && (
                     <div className="space-y-6">
                         <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
                             <div className="flex items-center justify-between">
@@ -2014,7 +2012,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* SIP Trunks Tab */}
-                {activeTab === "telephony" && hasAdminAccess && (
+                {activeSection === "sip_trunks" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center gap-3">
@@ -2071,7 +2069,7 @@ export default function SettingsPage() {
 
                 {/* Integrations Keys Tab */}
                 {/* My Email Tab — visible to all roles */}
-                {activeTab === "myemail" && (
+                {activeSection === "my_email" && (
                     <div className="space-y-6">
                         <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                             <div className="flex items-center justify-between mb-6">
@@ -2085,22 +2083,6 @@ export default function SettingsPage() {
                                             Personal credentials — override company defaults for emails sent by you
                                         </p>
                                     </div>
-                                </div>
-                                <div className="flex items-center space-x-2">
-                                    {myEmailSaved && (
-                                        <span className="flex items-center space-x-1 text-emerald-600 text-sm font-bold">
-                                            <CheckCircle2 className="h-4 w-4" />
-                                            <span>Saved</span>
-                                        </span>
-                                    )}
-                                    <button
-                                        onClick={saveMyEmailSettings}
-                                        disabled={savingMyEmail}
-                                        className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 disabled:opacity-50 transition-all"
-                                    >
-                                        {savingMyEmail ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                                        <span>Save</span>
-                                    </button>
                                 </div>
                             </div>
 
@@ -2236,22 +2218,6 @@ export default function SettingsPage() {
                                         </p>
                                     </div>
                                 </div>
-                                <div className="flex items-center space-x-2">
-                                    {myWarmTransferSaved && (
-                                        <span className="flex items-center space-x-1 text-emerald-600 text-sm font-bold">
-                                            <CheckCircle2 className="h-4 w-4" />
-                                            <span>Saved</span>
-                                        </span>
-                                    )}
-                                    <button
-                                        onClick={saveMyWarmTransferSettings}
-                                        disabled={savingMyWarmTransfer}
-                                        className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-violet-600 text-white font-bold hover:bg-violet-700 disabled:opacity-50 transition-all"
-                                    >
-                                        {savingMyWarmTransfer ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
-                                        <span>Save</span>
-                                    </button>
-                                </div>
                             </div>
 
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -2280,7 +2246,7 @@ export default function SettingsPage() {
                     </div>
                 )}
 
-                {activeTab === "keys" && hasAdminAccess && (
+                {activeSection === "api_keys" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10">
                         <div className="flex items-center space-x-3 mb-6">
                             <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-green-400 to-emerald-600">
@@ -2301,8 +2267,8 @@ export default function SettingsPage() {
                                 "Vobiz (Telephony)": ["VOBIZ_AUTH_ID", "VOBIZ_AUTH_TOKEN", "VOBIZ_PHONE_NUMBER"],
                                 "Warm Transfer": ["WARM_TRANSFER_NUMBER", "WARM_TRANSFER_NAME"],
                                 "Speech-to-Text (STT)": ["DEEPGRAM_API_KEY", "SARVAM_API_KEY", "DEEPGRAM_STT_MODEL", "CARTESIA_STT_MODEL", "SARVAM_STT_MODEL", "ELEVENLABS_STT_MODEL", "DEEPGRAM_VOICE", "SMALLEST_STT_MODEL", "SMALLEST_VOICE_ID", "GROQ_STT_MODEL", "GROQ_VOICE", "GLADIA_API_KEY", "ASSEMBLYAI_API_KEY", "RINGG_AI_API_KEY", "GLADIA_STT_MODEL", "ASSEMBLYAI_STT_MODEL", "RINGG_AI_STT_MODEL", "INWORLD_API_KEY", "INWORLD_STT_MODEL", "AZURE_SPEECH_API_KEY", "AZURE_SPEECH_API_VERSION", "AZURE_SPEECH_REGION", "AZURE_STT_MODEL", "AZURE_SPEECH_ENDPOINT", "VACHANA_API_KEY", "VACHANA_STT_MODEL",],
-                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL", "INWORLD_TTS_MODEL", "INWORLD_VOICE_ID", "RIME_API_KEY", "RIME_TTS_MODEL", "RIME_VOICE_ID", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "POLLY_TTS_MODEL", "POLLY_VOICE_ID", "AZURE_TTS_MODEL", "AZURE_VOICE_ID", "KITTEN_TTS_MODEL", "KITTEN_TTS_VOICE", "VACHANA_TTS_MODEL", "VACHANA_VOICE_ID"],
-                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "SMALLEST_API_KEY", "SMALLEST_LLM_MODEL", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL", "AZURE_LLM_API_KEY", "AZURE_LLM_MODEL", "AZURE_LLM_ENDPOINT", "AZURE_LLM_API_VERSION", "AZURE_LLM_REGION", "AIRLLM_MODEL", "AIRLLM_COMPRESSION", "AIRLLM_MAX_NEW_TOKENS", "INWORLD_LLM_MODEL",],
+                                "Text-to-Speech (TTS)": ["CARTESIA_API_KEY", "ELEVENLABS_API_KEY", "MIMO_API_KEY", "CARTESIA_VOICE_ID", "ELEVENLABS_VOICE_ID", "MIMO_VOICE_ID", "SARVAM_VOICE_ID", "DEEPGRAM_TTS_MODEL", "ELEVENLABS_TTS_MODEL", "MIMO_TTS_MODEL", "SARVAM_TTS_MODEL", "CARTESIA_TTS_MODEL", "MISTRAL_TTS_MODEL", "SMALLEST_TTS_MODEL", "MISTRAL_VOICE_ID", "GROQ_TTS_MODEL", "INWORLD_TTS_MODEL", "INWORLD_VOICE_ID", "RIME_API_KEY", "RIME_TTS_MODEL", "RIME_VOICE_ID", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_DEFAULT_REGION", "POLLY_TTS_MODEL", "POLLY_VOICE_ID", "AZURE_TTS_MODEL", "AZURE_VOICE_ID", "KITTEN_TTS_MODEL", "KITTEN_TTS_VOICE", "VACHANA_TTS_MODEL", "VACHANA_VOICE_ID",],
+                                "Intelligence (LLM)": ["OPENAI_API_KEY", "MISTRAL_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "PERPLEXITY_API_KEY", "CEREBRAS_API_KEY", "OPENROUTER_API_KEY", "MIMO_API_KEY", "SMALLEST_API_KEY", "SMALLEST_LLM_MODEL", "MISTRAL_MODEL", "OPENAI_MODEL", "GEMINI_MODEL", "ANTHROPIC_MODEL", "PERPLEXITY_MODEL", "OPENROUTER_MODEL", "CEREBRAS_MODEL", "MIMO_MODEL", "SARVAM_MODEL", "GROQ_API_KEY", "GROQ_MODEL", "AZURE_LLM_API_KEY", "AZURE_LLM_MODEL", "AZURE_LLM_ENDPOINT", "AZURE_LLM_API_VERSION", "AZURE_LLM_REGION", "INWORLD_LLM_MODEL", "AIRLLM_MODEL", "AIRLLM_COMPRESSION", "AIRLLM_MAX_NEW_TOKENS",],
                                 "Email (SMTP — Outbound)": ["SMTP_SERVER", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM_EMAIL"],
                                 "Email (IMAP — Inbound)": ["IMAP_SERVER", "IMAP_PORT", "IMAP_USERNAME", "IMAP_PASSWORD"],
                                 "Enrichment": ["APOLLO_API_KEY", "LUSHA_API_KEY", "ZOOMINFO_CLIENT_ID", "ZOOMINFO_API_KEY"],
@@ -2346,7 +2312,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* Usage Limits Tab */}
-                {activeTab === "usage" && hasAdminAccess && (
+                {activeSection === "usage" && hasAdminAccess && (
                     <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-6">
                         <div className="flex items-center gap-3">
                             <Gauge className="h-6 w-6 text-violet-500" />
@@ -2401,7 +2367,7 @@ export default function SettingsPage() {
                 )}
 
                 {/* Competitors Tab */}
-                {activeTab === "competitors" && hasAdminAccess && (() => {
+                {activeSection === "competitors" && hasAdminAccess && (() => {
                     // Unified row list: union of tracked names (COMPETITOR_NAMES setting) and DB rows (competitorSummary). This means:
                     // Adding a name shows it immediately as a row before any call detects it. Competitors detected on calls also appear even if not in the tracked list
                     const parsedNames = competitorNames.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
@@ -2547,28 +2513,9 @@ export default function SettingsPage() {
                     );
                 })()}
 
-                {/* Save Button */}
-                {hasAdminAccess && (
-                    <div className="flex flex-col items-end gap-3 pt-12">
-                        {saveError && (
-                            <p className="max-w-xl rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900/50 dark:bg-red-950/40 dark:text-red-300">
-                                {saveError}
-                            </p>
-                        )}
-                        <button
-                            onClick={handleSave}
-                            disabled={saving}
-                            className={`group relative overflow-hidden rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-8 py-3 font-semibold text-white shadow-lg shadow-violet-500/50 hover:shadow-xl hover:scale-105 transition-all duration-300 disabled:opacity-50 disabled:scale-100`}
-                        >
-                            <div className="absolute inset-0 bg-white/20 transform scale-x-0 group-hover:scale-x-100 transition-transform origin-left duration-300" />
-                            <div className="relative flex items-center space-x-2">
-                                {saving ? <Loader2 className="h-5 w-5 animate-spin" /> : <Save className="h-5 w-5" />}
-                                <span>{saving ? 'Saving...' : 'Save Changes'}</span>
-                            </div>
-                        </button>
-                    </div>
-                )}
             </div>
+            </>
+            )}
         </div>
 
         {/* Webhook modal */}

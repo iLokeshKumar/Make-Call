@@ -12,7 +12,7 @@ import {
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
 import { maskEmail, maskPhone } from "@/utils/security";
-
+import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import { apiFetch } from "@/utils/apiFetch";
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
@@ -91,6 +91,14 @@ export default function Sidebar() {
 
   // Timer State
   const REVEAL_DURATION = 120; // 2 minutes in seconds
+
+  const { items: recentPages, track: trackPage } = useRecentlyViewed("rio_pages_recent", 5);
+
+  useEffect(() => {
+    const navItem = navItems.find(n => n.href === pathname);
+    if (navItem) trackPage({ id: navItem.href, label: navItem.name, href: navItem.href });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pathname]);
 
   const filteredItems = navItems.filter(
     (item) => !item.adminOnly || ["admin", "company_admin", "company_owner"].includes(user?.role || "")
@@ -234,6 +242,45 @@ export default function Sidebar() {
               </Link>
             );
           })}
+
+          {/* Recently Viewed */}
+          {recentPages.length > 0 && (
+            <div className="mt-4 pt-4 border-t border-slate-200 dark:border-white/10">
+              {!isCollapsed && (
+                <p className="flex items-center gap-1.5 px-2 mb-2 text-[10px] font-bold uppercase tracking-widest text-slate-400 dark:text-slate-500">
+                  <Clock size={10} /> Recent
+                </p>
+              )}
+              {recentPages.map((item) => {
+                const navItem = navItems.find(n => n.href === item.id);
+                if (!navItem) return null;
+                const Icon = navItem.icon;
+                const isActive = pathname === item.id;
+                return (
+                  <Link
+                    key={item.id}
+                    href={item.id}
+                    className={clsx(
+                      "group flex items-center rounded-xl px-4 py-2.5 text-sm font-medium transition-all duration-200 relative overflow-hidden mb-1",
+                      isActive
+                        ? "bg-gradient-to-r from-violet-600 to-blue-600 text-white shadow-md shadow-violet-500/30"
+                        : "text-slate-500 dark:text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800/60 hover:text-slate-700 dark:hover:text-slate-300",
+                      isCollapsed ? "justify-center" : "space-x-2.5"
+                    )}
+                    title={isCollapsed ? item.label : undefined}
+                  >
+                    <Icon className={clsx(
+                      "h-4 w-4 flex-shrink-0",
+                      isActive ? "text-white" : "text-slate-400 dark:text-slate-600 group-hover:text-violet-500"
+                    )} />
+                    {!isCollapsed && (
+                      <span className="truncate text-xs">{item.label}</span>
+                    )}
+                  </Link>
+                );
+              })}
+            </div>
+          )}
         </nav>
 
         {/* User Section */}
