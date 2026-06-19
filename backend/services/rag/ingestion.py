@@ -1,5 +1,5 @@
 """
-Document ingestion — chunking, dedup, and ChromaDB upsert.
+Document ingestion — chunking, TurboVec upsert (primary), ChromaDB upsert (fallback).
 
 Chunking strategies:
   - Heading-based  : markdown split on H2/H3 (products, objections, playbooks, …)
@@ -11,11 +11,11 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
-from datetime import datetime, timezone
 from typing import Optional
 
 from .collections import COLLECTIONS, get_collection
 from .embeddings import embed_batch
+from .turbovec_store import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -69,10 +69,8 @@ def chunk_document(content: str, collection: str) -> list[str]:
     return _chunk_sliding_window(content)
 
 
-# ChromaDB upsert / delete
-
 def _doc_id(company_id: int, collection: str, title: str, chunk_index: int) -> str:
-    """Deterministic, stable ChromaDB document ID."""
+    """Deterministic, stable document ID."""
     key = f"{company_id}::{collection}::{title}::{chunk_index}"
     return hashlib.sha256(key.encode()).hexdigest()[:32]
 
@@ -86,9 +84,9 @@ def index_document(
     extra_metadata: Optional[dict] = None,
 ) -> list[str]:
     """
-    Chunk a document and upsert all chunks into ChromaDB.
+    Chunk a document and write to TurboVec (primary) + ChromaDB (fallback).
 
-    Returns the list of ChromaDB doc IDs that were written.
+    Returns the list of doc IDs written.
     """
     if collection not in COLLECTIONS:
         raise ValueError(f"Unknown collection '{collection}'")
@@ -98,7 +96,8 @@ def index_document(
         logger.warning("[RAG] No chunks produced for '%s' in %s", title, collection)
         return []
 
-    chroma_col = get_collection(company_id, collection)
+    # Remove stale chunks before re-indexing
+    delete_document(company_id, collection, title)
 
     ids = [_doc_id(company_id, collection, title, i) for i in range(len(chunks))]
     embeddings = embed_batch(chunks)
@@ -114,15 +113,41 @@ def index_document(
         for i in range(len(chunks))
     ]
 
-    chroma_col.upsert(
-        ids=ids,
-        documents=chunks,
-        embeddings=embeddings,
-        metadatas=metadatas,
-    )
+    tv_ok = False
+    chroma_ok = False
+
+    # --- Primary: TurboVec ---
+    try:
+        get_store().add_chunks(
+            company_id=company_id,
+            collection=collection,
+            contents=chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+            doc_ids=ids,
+        )
+        tv_ok = True
+    except Exception as exc:
+        logger.warning("[RAG:TURBOVEC] write failed for '%s': %s", title, exc)
+
+    # --- Fallback: ChromaDB (always kept in sync) ---
+    try:
+        chroma_col = get_collection(company_id, collection)
+        chroma_col.upsert(
+            ids=ids,
+            documents=chunks,
+            embeddings=embeddings,
+            metadatas=metadatas,
+        )
+        chroma_ok = True
+    except Exception as exc:
+        logger.warning("[RAG:CHROMADB] write failed for '%s': %s", title, exc)
+
     logger.info(
-        "[RAG] Indexed %d chunk(s) for '%s' → %s (company %d)",
+        "[RAG] Indexed %d chunk(s) for '%s' → %s (company %d) | turbovec=%s chromadb=%s",
         len(chunks), title, collection, company_id,
+        "OK" if tv_ok else "FAIL",
+        "OK" if chroma_ok else "FAIL",
     )
     return ids
 
@@ -133,12 +158,26 @@ def delete_document(
     title: str,
     max_chunks: int = 200,
 ) -> None:
-    """Remove all ChromaDB chunks for the given document title."""
-    chroma_col = get_collection(company_id, collection)
+    """Remove chunks from TurboVec and ChromaDB."""
     ids = [_doc_id(company_id, collection, title, i) for i in range(max_chunks)]
-    # ChromaDB delete ignores IDs that don't exist — safe to call speculatively
+
+    tv_del = chroma_del = False
     try:
-        chroma_col.delete(ids=ids)
-        logger.info("[RAG] Deleted chunks for '%s' from %s (company %d)", title, collection, company_id)
+        get_store().remove_by_doc_ids(company_id, collection, ids)
+        tv_del = True
     except Exception as exc:
-        logger.warning("[RAG] Delete failed for '%s': %s", title, exc)
+        logger.warning("[RAG:TURBOVEC] delete failed for '%s': %s", title, exc)
+
+    try:
+        chroma_col = get_collection(company_id, collection)
+        chroma_col.delete(ids=ids)
+        chroma_del = True
+    except Exception as exc:
+        logger.warning("[RAG:CHROMADB] delete failed for '%s': %s", title, exc)
+
+    logger.info(
+        "[RAG] Deleted '%s' from %s (company %d) | turbovec=%s chromadb=%s",
+        title, collection, company_id,
+        "OK" if tv_del else "FAIL",
+        "OK" if chroma_del else "FAIL",
+    )

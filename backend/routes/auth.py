@@ -20,6 +20,7 @@ import requests
 from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
     PermissionChecker,
+    check_pwned_password,
     clear_auth_cookie,
     clear_csrf_cookie,
     create_access_token,
@@ -32,9 +33,11 @@ from auth import (
     get_password_hash,
     set_auth_cookie,
     set_csrf_cookie,
+    validate_password_rules,
     verify_mfa_token,
     verify_password,
 )
+from email_validators import validate_email_domain
 from credentials_service import get_company_credential
 from utils.encryption import encrypt_value
 from utils import settings_cache as _sc
@@ -466,6 +469,29 @@ async def register_company(
     ).first()
     if existing_username:
         raise HTTPException(status_code=400, detail="Username already taken")
+
+    domain_error = await validate_email_domain(email)
+    if domain_error:
+        raise HTTPException(status_code=400, detail=domain_error)
+
+    pw_error = validate_password_rules(
+        data.password,
+        username=data.username,
+        first_name=data.first_name,
+        last_name=data.last_name,
+        phone_number=getattr(data, "phone_number", None),
+    )
+    if pw_error:
+        raise HTTPException(status_code=400, detail=pw_error)
+
+    if await check_pwned_password(data.password):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This password has been found in a data breach. "
+                "Please choose a different, unique password."
+            ),
+        )
 
     user = User(
         company_id=company.id,

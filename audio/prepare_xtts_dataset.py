@@ -1,7 +1,3 @@
-"""
-Split long call recordings into short XTTS-friendly segments.
-Output: dataset/wavs/*.wav and dataset/metadata.csv
-"""
 import os
 import csv
 import re

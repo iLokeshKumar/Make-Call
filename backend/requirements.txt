@@ -43,3 +43,5 @@ rank-bm25>=0.2.2
 pyotp
 qrcode
 jinja2>=3.1.0
+httpx>=0.27.0
+MailChecker>=6.0.0

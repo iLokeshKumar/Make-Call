@@ -1,10 +1,12 @@
 import base64
+import hashlib
 import os
 from datetime import datetime, timedelta, timezone
 from io import BytesIO
 from typing import Optional
 
 import bcrypt
+import httpx
 import jwt
 import pyotp
 import qrcode
@@ -47,6 +49,7 @@ __all__ = [
     "oauth2_scheme",
     "set_auth_cookie",
     "set_csrf_cookie",
+    "check_pwned_password",
     "validate_password_rules",
     "verify_csrf_invariants",
     "verify_mfa_token",
@@ -172,6 +175,25 @@ def validate_password_rules(
         return "Password cannot contain the phone number"
 
     return None
+
+
+async def check_pwned_password(password: str) -> bool:
+    """True if password appears in HIBP breach database. Uses k-anonymity — only SHA-1 prefix sent."""
+    sha1 = hashlib.sha1(password.encode()).hexdigest().upper()
+    prefix, suffix = sha1[:5], sha1[5:]
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(
+                f"https://api.pwnedpasswords.com/range/{prefix}",
+                headers={"Add-Padding": "true"},
+            )
+        for line in resp.text.splitlines():
+            h, _ = line.split(":")
+            if h == suffix:
+                return True
+    except (httpx.TimeoutException, httpx.RequestError):
+        pass
+    return False
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:

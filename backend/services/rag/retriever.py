@@ -2,7 +2,7 @@
 Hybrid retriever: vector search + BM25 keyword search + cross-encoder reranking.
 
 Pipeline per query:
-  1. Dense retrieval  — ChromaDB cosine similarity, top-20
+  1. Dense retrieval  — TurboVec cosine similarity, top-20
   2. Sparse retrieval — BM25 over the same collection corpus, top-20
   3. Fusion          — Reciprocal Rank Fusion (RRF) to merge both ranked lists
   4. Rerank          — cross-encoder scores the top-10 and returns top-N
@@ -18,6 +18,7 @@ from typing import Optional
 
 from .collections import COLLECTIONS, get_collection
 from .embeddings import embed
+from .turbovec_store import get_store
 
 logger = logging.getLogger(__name__)
 
@@ -49,45 +50,108 @@ def _get_reranker():
 # Vector search
 
 def _vector_search(
-    collection,
+    company_id: int,
+    collection: str,
     query_embedding: list[float],
     n: int = 20,
 ) -> list[dict]:
-    """Return top-N docs from ChromaDB cosine search."""
+    """TurboVec primary, ChromaDB fallback."""
+    tv_count = get_store().count(company_id, collection)
+
+    # --- Primary: TurboVec ---
+    if tv_count > 0:
+        try:
+            results = get_store().search(company_id, collection, query_embedding, k=n)
+            logger.info(
+                "[RAG:TURBOVEC] vector search company=%d col=%s → %d results (index has %d chunks)",
+                company_id, collection, len(results), tv_count,
+            )
+            return results
+        except Exception as exc:
+            logger.warning(
+                "[RAG:TURBOVEC] search error company=%d col=%s — falling back to ChromaDB: %s",
+                company_id, collection, exc,
+            )
+    else:
+        logger.info(
+            "[RAG:TURBOVEC] index empty company=%d col=%s — falling back to ChromaDB",
+            company_id, collection,
+        )
+
+    # --- Fallback: ChromaDB ---
     try:
-        results = collection.query(
+        col = get_collection(company_id, collection)
+        count = col.count()
+        if count == 0:
+            logger.info(
+                "[RAG:CHROMADB] also empty company=%d col=%s — no results",
+                company_id, collection,
+            )
+            return []
+        results = col.query(
             query_embeddings=[query_embedding],
-            n_results=min(n, collection.count() or 1),
+            n_results=min(n, count),
             include=["documents", "metadatas", "distances"],
         )
-        docs = []
-        for i, doc in enumerate(results["documents"][0]):
-            docs.append({
+        docs = [
+            {
                 "content": doc,
                 "metadata": results["metadatas"][0][i],
-                "score": 1 - results["distances"][0][i],  # cosine similarity
+                "score": 1 - results["distances"][0][i],
                 "source": "vector",
-            })
+            }
+            for i, doc in enumerate(results["documents"][0])
+        ]
+        logger.info(
+            "[RAG:CHROMADB] vector search company=%d col=%s → %d results (index has %d chunks)",
+            company_id, collection, len(docs), count,
+        )
         return docs
     except Exception as exc:
-        logger.warning("[RAG] Vector search failed: %s", exc)
+        logger.warning(
+            "[RAG:CHROMADB] vector search also failed company=%d col=%s: %s",
+            company_id, collection, exc,
+        )
         return []
 
 
 # BM25 keyword search
 
 def _bm25_search(
-    collection,
+    company_id: int,
+    collection: str,
     query: str,
     n: int = 20,
 ) -> list[dict]:
-    """Return top-N docs from BM25 over the full collection corpus."""
+    """BM25 over corpus — TurboVec chunks primary, ChromaDB fallback."""
     if not _BM25_AVAILABLE:
         return []
     try:
-        all_docs = collection.get(include=["documents", "metadatas"])
-        documents = all_docs["documents"]
-        metadatas = all_docs["metadatas"]
+        # --- Primary: TurboVec chunk store ---
+        all_chunks = get_store().get_all_chunks(company_id, collection)
+        documents = [c["content"] for c in all_chunks]
+        metadatas = [c["metadata"] for c in all_chunks]
+
+        if documents:
+            logger.info(
+                "[RAG:TURBOVEC] BM25 corpus company=%d col=%s — %d docs",
+                company_id, collection, len(documents),
+            )
+        else:
+            # --- Fallback: ChromaDB ---
+            logger.info(
+                "[RAG:TURBOVEC] BM25 corpus empty company=%d col=%s — falling back to ChromaDB",
+                company_id, collection,
+            )
+            col = get_collection(company_id, collection)
+            raw = col.get(include=["documents", "metadatas"])
+            documents = raw["documents"]
+            metadatas = raw["metadatas"]
+            logger.info(
+                "[RAG:CHROMADB] BM25 corpus company=%d col=%s — %d docs",
+                company_id, collection, len(documents),
+            )
+
         if not documents:
             return []
 
@@ -95,7 +159,6 @@ def _bm25_search(
         bm25 = _BM25Okapi(tokenized_corpus)
         scores = bm25.get_scores(query.lower().split())
 
-        # Pair and sort
         ranked = sorted(
             enumerate(scores), key=lambda x: x[1], reverse=True
         )[:n]
@@ -169,15 +232,20 @@ def search_collection(
     n_results: int = 5,
 ) -> list[dict]:
     """Full hybrid search over a single company collection."""
-    col = get_collection(company_id, collection)
-    if col.count() == 0:
+    tv_count = get_store().count(company_id, collection)
+    chroma_count = 0
+    try:
+        chroma_count = get_collection(company_id, collection).count()
+    except Exception:
+        pass
+    if tv_count == 0 and chroma_count == 0:
         return []
 
     query_embedding = embed(query)
 
     # 1. Dense + sparse retrieval
-    vector_results = _vector_search(col, query_embedding, n=20)
-    bm25_results = _bm25_search(col, query, n=20)
+    vector_results = _vector_search(company_id, collection, query_embedding, n=20)
+    bm25_results = _bm25_search(company_id, collection, query, n=20)
 
     # 2. Merge with RRF
     merged = _rrf(vector_results, bm25_results)

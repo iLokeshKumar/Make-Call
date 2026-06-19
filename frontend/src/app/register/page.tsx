@@ -19,6 +19,27 @@ export default function RegisterPage() {
     const [error, setError] = useState("");
     const [showPassword, setShowPassword] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
+    const [passwordFocused, setPasswordFocused] = useState(false);
+
+    const CONSUMER_DOMAINS = ["gmail.com","yahoo.com","hotmail.com","outlook.com","live.com",
+        "icloud.com","protonmail.com","proton.me","aol.com","msn.com","googlemail.com",
+        "ymail.com","rocketmail.com","hotmail.co.uk","hotmail.fr","me.com","mac.com",
+        "tutanota.com","fastmail.com","zoho.com","gmx.com","gmx.net","inbox.com",
+        "mail.com","hushmail.com"];
+    const emailDomain = email.split("@")[1]?.toLowerCase() ?? "";
+    const emailWarning = emailDomain && CONSUMER_DOMAINS.includes(emailDomain)
+        ? "Please use your company or work email, not a personal one."
+        : null;
+
+    const PASSWORD_RULES = [
+        { label: "6+ characters",      ok: password.length >= 6 },
+        { label: "Uppercase letter",   ok: /[A-Z]/.test(password) },
+        { label: "Lowercase letter",   ok: /[a-z]/.test(password) },
+        { label: "Number",             ok: /\d/.test(password) },
+        { label: "Special character",  ok: /[!@#$%^&*()\-_=+[\]{}|;:'",.<>/?`~]/.test(password) },
+    ];
+    const strength = PASSWORD_RULES.filter(r => r.ok).length;
+    const strengthColor = strength <= 1 ? "bg-red-500" : strength <= 2 ? "bg-orange-500" : strength <= 3 ? "bg-yellow-500" : strength <= 4 ? "bg-lime-500" : "bg-green-500";
     const router = useRouter();
 
     const derivedSlug = useMemo(() => {
@@ -159,7 +180,7 @@ export default function RegisterPage() {
 
                         {/* Email */}
                         <div className="space-y-1.5">
-                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">Email</label>
+                            <label className="block text-xs font-semibold uppercase tracking-widest text-slate-400">Work Email</label>
                             <div className="relative">
                                 <Mail className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-500" />
                                 <input
@@ -171,6 +192,11 @@ export default function RegisterPage() {
                                     className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-4 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
                                 />
                             </div>
+                            {emailWarning && (
+                                <p className="flex items-center gap-1.5 text-xs text-amber-400">
+                                    <span>⚠</span>{emailWarning}
+                                </p>
+                            )}
                         </div>
 
                         {/* Password */}
@@ -183,6 +209,8 @@ export default function RegisterPage() {
                                     required
                                     value={password}
                                     onChange={(e) => setPassword(e.target.value)}
+                                    onFocus={() => setPasswordFocused(true)}
+                                    onBlur={() => setPasswordFocused(false)}
                                     placeholder="••••••••"
                                     className="w-full rounded-xl border border-white/10 bg-white/5 py-2.5 pl-10 pr-10 text-white placeholder-slate-500 focus:border-violet-500 focus:outline-none focus:ring-1 focus:ring-violet-500 transition-all text-sm"
                                 />
@@ -194,7 +222,27 @@ export default function RegisterPage() {
                                     {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
                                 </button>
                             </div>
-                            <p className="text-xs text-slate-600">6+ chars · uppercase, lowercase, number, special character</p>
+                            {(passwordFocused || password.length > 0) && (
+                                <div className="space-y-2 pt-0.5">
+                                    {/* Strength bar */}
+                                    <div className="flex gap-1">
+                                        {[1,2,3,4,5].map(i => (
+                                            <div
+                                                key={i}
+                                                className={`h-1 flex-1 rounded-full transition-all duration-200 ${i <= strength ? strengthColor : "bg-white/10"}`}
+                                            />
+                                        ))}
+                                    </div>
+                                    {/* Rule checklist */}
+                                    <div className="flex flex-wrap gap-x-3 gap-y-1">
+                                        {PASSWORD_RULES.map(rule => (
+                                            <span key={rule.label} className={`flex items-center gap-1 text-xs transition-colors ${rule.ok ? "text-green-400" : "text-slate-500"}`}>
+                                                {rule.ok ? "✓" : "○"} {rule.label}
+                                            </span>
+                                        ))}
+                                    </div>
+                                </div>
+                            )}
                         </div>
 
                         <button
