@@ -7,9 +7,7 @@ if sys.platform.startswith("win"):
     try:
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     except Exception as _e:
-        # Logger isn't configured yet (this runs at import time), so print
-        # to stderr so we don't silently fall through to ProactorEventLoop
-        # on Windows, which breaks subprocess transports we rely on.
+
         import sys as _sys
         print(
             f"[startup] WARN: failed to set WindowsSelectorEventLoopPolicy: {_e!r}",
@@ -56,7 +54,6 @@ from routes import events as events_router
 from routes import mark_tracking as mark_tracking_router
 from routes import agent_templates as agent_templates_router
 from routes import provider_credentials as provider_credentials_router
-from routes import observability_metrics as observability_metrics_routes
 from routes import cost as cost_router
 from routes import integrations as integrations_router
 from routes import orders as orders_router

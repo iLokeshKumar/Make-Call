@@ -117,6 +117,7 @@ class VoicePipeline:
         self.user_id = user_id
         self.lead_id = lead_id
         self.company_id = user.company_id if user else None
+        self._call_sid: str | None = None
         self.lead_timezone = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
 
         company_id = user.company_id if user else None
@@ -224,6 +225,12 @@ class VoicePipeline:
                 ["AZURE_SPEECH_API_KEY", "AZURE_API_KEY", "TTS_API_KEY"],
                 "Azure Speech TTS key",
             )
+        elif self.tts_provider == "vachana":
+            tts_api_key = _resolve_setting(
+                all_settings,
+                ["VACHANA_API_KEY", "GNANI_API_KEY", "TTS_API_KEY"],
+                "Vachana/Gnani TTS API key",
+            )
         else:
             tts_api_key = _resolve_setting(
                 all_settings,
@@ -236,6 +243,12 @@ class VoicePipeline:
                 all_settings,
                 ["AZURE_SPEECH_API_KEY", "AZURE_API_KEY", "STT_API_KEY"],
                 "Azure Speech STT key",
+            )
+        elif self.stt_provider == "vachana":
+            stt_api_key = _resolve_setting(
+                all_settings,
+                ["VACHANA_API_KEY", "GNANI_API_KEY", "STT_API_KEY"],
+                "Vachana/Gnani STT API key",
             )
         else:
             stt_api_key = _resolve_setting(
@@ -540,6 +553,11 @@ class VoicePipeline:
         for lang_code, msg in self.final_call_message.items():
             if msg and msg.strip():
                 self.final_call_message_lang_map[lang_code] = msg.strip()
+
+        # ── DTMF in-call keypad routing ──
+        _dtmf_cfg = cf_config.get("dtmf") or {}
+        self.dtmf_enabled: bool = bool(_dtmf_cfg.get("enabled", False))
+        self.dtmf_menu: dict = _dtmf_cfg.get("menu", {}) or {}
 
         # ── Phase 3: Per-agent retry config ──
         self.retry_config: dict = self.runtime_json.get("retry", {}) or {}
@@ -960,7 +978,12 @@ class VoicePipeline:
 
         async def _ingest():
             async for data in self.communicator.receive():
-                await audio_queue.put(data)
+                if data.get("event") == "dtmf" and self.dtmf_enabled:
+                    digit = (data.get("dtmf") or {}).get("digit") or data.get("digit", "")
+                    if digit:
+                        asyncio.create_task(self._handle_dtmf(str(digit)))
+                else:
+                    await audio_queue.put(data)
             await audio_queue.put({"event": "stop"})
 
         ingest_task = asyncio.create_task(_ingest())
@@ -972,7 +995,10 @@ class VoicePipeline:
                 if data.get("event") == "start":
                     start_msg = data.get("start", {})
                     self.communicator.stream_sid = start_msg.get("streamSid") or start_msg.get("streamId")
-                    
+                    call_sid = start_msg.get("callSid")
+                    if call_sid:
+                        self._call_sid = call_sid
+
                     # Proactively check for lead_id/interaction_id in start parameters (Twilio specific)
                     params = start_msg.get("customParameters", {})
                     stream_lead_id = params.get("lead_id")
@@ -1051,6 +1077,20 @@ class VoicePipeline:
             register_pipeline(interaction_id_int, self)
         except (ValueError, TypeError):
             pass
+
+        # Persist callSid so warm_transfer_service can find the live call
+        if self._call_sid and self.interaction_id:
+            try:
+                from models.models import Interaction
+                row = self.session.get(Interaction, int(self.interaction_id))
+                if row:
+                    meta = dict(row.metadata_json or {})
+                    meta["call_sid"] = self._call_sid
+                    row.metadata_json = meta
+                    self.session.add(row)
+                    self.session.commit()
+            except Exception as _e:
+                logger.warning("[Pipeline] Failed to persist call_sid: %s", _e)
 
         async def _audio_gen_from_queue():
             while True:
@@ -2132,6 +2172,47 @@ class VoicePipeline:
                 # Vobiz sends recording URL via status-callback (no polling API available).
         except Exception as exc:
             logger.warning("[PostCall] Post-call actions failed (non-fatal): %s", exc)
+
+    async def _handle_dtmf(self, digit: str) -> None:
+        """Execute the DTMF menu action mapped to digit."""
+        option = self.dtmf_menu.get(digit)
+        if not option:
+            logger.debug("[DTMF] No menu entry for digit %r — ignored", digit)
+            return
+        action = option.get("action", "agent")
+        label = option.get("label", "")
+        value = option.get("value", "")
+        logger.info("[DTMF] digit=%r action=%r label=%r value=%r", digit, action, label, value)
+
+        if action == "hangup":
+            if label:
+                await self.sentence_queue.put((label, True))
+                await asyncio.sleep(1.5)
+            await self.sentence_queue.put(None)  # shutdown sentinel
+        elif action == "transfer":
+            if label:
+                await self.sentence_queue.put((label, True))
+                await asyncio.sleep(1.5)
+            if value and self.interaction_id:
+                try:
+                    from services.call.warm_transfer_service import execute_warm_transfer
+                    await asyncio.to_thread(
+                        execute_warm_transfer,
+                        self.session,
+                        self.company_id,
+                        self.user_id,
+                        int(self.interaction_id),
+                        value,
+                    )
+                    logger.info("[DTMF] Warm transfer initiated to %r", value)
+                except Exception as _te:
+                    logger.error("[DTMF] Transfer failed: %s", _te)
+            await self.sentence_queue.put(None)
+        elif action == "repeat_menu":
+            prompt = value or label
+            if prompt:
+                await self.sentence_queue.put((prompt, True))
+        # action == "agent" → do nothing, AI continues
 
     def _get_final_call_message(self) -> str | None:
         """Get the final call message in the current detected language.
