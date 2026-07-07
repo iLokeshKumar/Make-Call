@@ -1409,6 +1409,7 @@ class UsageEvent(SQLModel, table=True):
 class Token(SQLModel):
     access_token: str
     token_type: str = "bearer"
+    message: Optional[str] = None
 
 
 class CompanyRegister(SQLModel):

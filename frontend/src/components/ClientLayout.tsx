@@ -13,6 +13,8 @@ export default function ClientLayout({ children }: { children: React.ReactNode }
     const isAuthPage =
         pathname === "/login" ||
         pathname === "/register" ||
+        pathname === "/verify" ||
+        pathname === "/auth/verify-email" ||
         pathname === "/invite/accept" ||
         pathname.startsWith("/q/") ||         // public quote view
         pathname.startsWith("/quote/") ||     // legacy public quote view

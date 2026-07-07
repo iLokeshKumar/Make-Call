@@ -1,12 +1,23 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { Building2, Eye, EyeOff, Loader2, Lock, Mail, User } from "lucide-react";
+import { AlertCircle, Building2, CheckCircle2, Eye, EyeOff, Loader2, Lock, Mail, User } from "lucide-react";
 
 import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+
+type RegisterResponse = {
+    detail?: string | { message?: string };
+    message?: string;
+};
+
+function getResponseMessage(data: RegisterResponse, fallback: string) {
+    if (typeof data.message === "string" && data.message.trim()) return data.message;
+    if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
+    if (data.detail?.message?.trim()) return data.detail.message;
+    return fallback;
+}
 
 export default function RegisterPage() {
     const [companyName, setCompanyName] = useState("");
@@ -16,7 +27,9 @@ export default function RegisterPage() {
     const [password, setPassword] = useState("");
     const [firstName, setFirstName] = useState("");
     const [lastName, setLastName] = useState("");
-    const [error, setError] = useState("");
+    const [errorMessage, setErrorMessage] = useState("");
+    const [successMessage, setSuccessMessage] = useState("");
+    const [registeredEmail, setRegisteredEmail] = useState("");
     const [showPassword, setShowPassword] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [passwordFocused, setPasswordFocused] = useState(false);
@@ -40,7 +53,6 @@ export default function RegisterPage() {
     ];
     const strength = PASSWORD_RULES.filter(r => r.ok).length;
     const strengthColor = strength <= 1 ? "bg-red-500" : strength <= 2 ? "bg-orange-500" : strength <= 3 ? "bg-yellow-500" : strength <= 4 ? "bg-lime-500" : "bg-green-500";
-    const router = useRouter();
 
     const derivedSlug = useMemo(() => {
         if (companySlug.trim()) return companySlug.trim().toLowerCase().replace(/\s+/g, "-");
@@ -49,9 +61,11 @@ export default function RegisterPage() {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        setError("");
+        setErrorMessage("");
+        setSuccessMessage("");
         setIsLoading(true);
         try {
+            const targetEmail = email.trim();
             const res = await apiFetch(`${API_BASE}/companies/register`, {
                 method: "POST",
                 headers: { "Content-Type": "application/json" },
@@ -66,13 +80,14 @@ export default function RegisterPage() {
                     last_name: lastName,
                 }),
             });
+            const data = await res.json().catch(() => ({} as RegisterResponse));
             if (!res.ok) {
-                const errData = await res.json();
-                throw new Error(errData.detail || "Registration failed");
+                throw new Error(getResponseMessage(data, "Registration failed. Please check the details and try again."));
             }
-            router.push("/");
-        } catch (err: any) {
-            setError(err.message);
+            setRegisteredEmail(targetEmail);
+            setSuccessMessage(getResponseMessage(data, "Account created successfully. Verification link sent to your email."));
+        } catch (err: unknown) {
+            setErrorMessage(err instanceof Error ? err.message : "Registration failed. Please try again.");
         } finally {
             setIsLoading(false);
         }
@@ -98,9 +113,30 @@ export default function RegisterPage() {
 
                 {/* Card */}
                 <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
-                    {error && (
-                        <div className="mb-5 rounded-xl bg-red-500/10 border border-red-500/20 px-4 py-3 text-sm text-red-400">
-                            {error}
+                    {(successMessage || errorMessage) && (
+                        <div className={`mb-5 rounded-xl border px-4 py-4 text-sm ${
+                            successMessage
+                                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
+                                : "bg-red-500/10 border-red-500/20 text-red-300"
+                        }`}>
+                            <div className="flex items-start gap-3">
+                                {successMessage ? (
+                                    <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
+                                ) : (
+                                    <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
+                                )}
+                                <div>
+                                    <p className={`font-semibold ${successMessage ? "text-emerald-200" : "text-red-200"}`}>
+                                        {successMessage ? "Registration successful" : "Registration failed"}
+                                    </p>
+                                    <p className="mt-1 opacity-90">{successMessage || errorMessage}</p>
+                                    {successMessage && (
+                                        <p className="mt-1 opacity-80">
+                                            Check {registeredEmail || "your inbox"} and verify your email before signing in.
+                                        </p>
+                                    )}
+                                </div>
+                            </div>
                         </div>
                     )}
 

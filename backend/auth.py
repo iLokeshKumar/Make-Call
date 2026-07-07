@@ -35,10 +35,14 @@ __all__ = [
     "CSRF_HEADER_NAME",
     "PermissionChecker",
     "SECRET_KEY",
+    "REFRESH_COOKIE_NAME",
+    "REFRESH_TOKEN_EXPIRE_DAYS",
     "SESSION_COOKIE_NAME",
     "clear_auth_cookie",
     "clear_csrf_cookie",
+    "clear_refresh_cookie",
     "create_access_token",
+    "create_refresh_token",
     "generate_csrf_token",
     "generate_mfa_qr_base64",
     "generate_mfa_secret",
@@ -49,6 +53,7 @@ __all__ = [
     "oauth2_scheme",
     "set_auth_cookie",
     "set_csrf_cookie",
+    "set_refresh_cookie",
     "check_pwned_password",
     "validate_password_rules",
     "verify_csrf_invariants",
@@ -56,9 +61,17 @@ __all__ = [
     "verify_password",
 ]
 
-SECRET_KEY = os.getenv("SECRET_KEY", "change-me")
+_SECRET_KEY = os.getenv("SECRET_KEY")
+if not _SECRET_KEY:
+    if os.getenv("ENVIRONMENT", "development").lower() in {"prod", "production"}:
+        raise RuntimeError("SECRET_KEY must be set in production")
+    _SECRET_KEY = "dev-only-change-me"
+
+SECRET_KEY = _SECRET_KEY
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+REFRESH_TOKEN_EXPIRE_DAYS = 7
+REFRESH_COOKIE_NAME = "rio_refresh"
 
 # OAuth2 scheme stays for OpenAPI docs + bearer-token clients (mobile, scripts). `auto_error=False` makes the header optional so we can fall back to a cookie.
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/token", auto_error=False)
@@ -89,10 +102,38 @@ def set_auth_cookie(response: Response, token: str) -> None:
     )
 
 
+def set_refresh_cookie(response: Response, token: str) -> None:
+    """Store a long-lived refresh JWT as an httpOnly cookie."""
+    secure = os.getenv("COOKIE_SECURE", "1") == "1"
+    samesite = os.getenv("COOKIE_SAMESITE", "lax").lower()
+    if samesite not in ("lax", "strict", "none"):
+        samesite = "lax"
+    domain = os.getenv("COOKIE_DOMAIN") or None
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        max_age=REFRESH_TOKEN_EXPIRE_DAYS * 24 * 60 * 60,
+        httponly=True,
+        secure=secure,
+        samesite=samesite,
+        domain=domain,
+        path="/",
+    )
+
+
 def clear_auth_cookie(response: Response) -> None:
     """Remove the session cookie. Used on /auth/logout."""
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
+        path="/",
+        domain=os.getenv("COOKIE_DOMAIN") or None,
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    """Remove the refresh cookie. Used on logout and logout-all."""
+    response.delete_cookie(
+        key=REFRESH_COOKIE_NAME,
         path="/",
         domain=os.getenv("COOKIE_DOMAIN") or None,
     )
@@ -200,6 +241,14 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     payload = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
     payload["exp"] = expire
+    return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
+
+
+def create_refresh_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    payload = data.copy()
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS))
+    payload["exp"] = expire
+    payload["typ"] = "refresh"
     return jwt.encode(payload, SECRET_KEY, algorithm=ALGORITHM)
 
 

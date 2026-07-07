@@ -7,6 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from fastapi.responses import HTMLResponse
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy import or_
 from sqlalchemy.exc import IntegrityError
@@ -16,14 +17,18 @@ from typing import Optional
 import os
 import json
 import requests
+import html
 
 from auth import (
     ACCESS_TOKEN_EXPIRE_MINUTES,
+    REFRESH_TOKEN_EXPIRE_DAYS,
     PermissionChecker,
     check_pwned_password,
     clear_auth_cookie,
     clear_csrf_cookie,
+    clear_refresh_cookie,
     create_access_token,
+    create_refresh_token,
     generate_csrf_token,
     generate_mfa_qr_base64,
     generate_mfa_secret,
@@ -33,6 +38,7 @@ from auth import (
     get_password_hash,
     set_auth_cookie,
     set_csrf_cookie,
+    set_refresh_cookie,
     validate_password_rules,
     verify_mfa_token,
     verify_password,
@@ -79,12 +85,11 @@ def _generate_verification_token(session: Session, user: User) -> str:
 
 def _send_verification_email(user: User, token: str, company_name: str) -> None:
     domain = os.getenv("DOMAIN") or "localhost:3000"
-    verification_url = f"https://{domain}/auth/verify-email?token={token}"
-    # base_url = normalize_base_url(
-    #     os.getenv("FRONTEND_BASE_URL") or os.getenv("DOMAIN"),
-    #     "https://localhost:3000",
-    # )
-    # verification_url = f"{base_url}/auth/verify-email?token={token}"
+    base_url = normalize_base_url(
+        os.getenv("FRONTEND_BASE_URL") or os.getenv("DOMAIN"),
+        "https://localhost:3000",
+    )
+    verification_url = f"{base_url}/auth/verify-email?token={token}"
     subject = "Verify your Rio CRM account"
     body = (
         f"Hi {user.first_name or user.email},\n\n"
@@ -162,6 +167,29 @@ def _serialize_user(session: Session, user: User) -> dict:
         payload["company_slug"] = company.slug
         payload["company_domain"] = company.domain
     return payload
+
+
+def _auth_payload(user: User) -> dict:
+    return {
+        "user_id": user.id,
+        "company_id": user.company_id,
+        "token_version": user.token_version,
+    }
+
+
+def _issue_auth_cookies(response: Response, user: User) -> str:
+    access_token = create_access_token(
+        _auth_payload(user),
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
+    )
+    refresh_token = create_refresh_token(
+        _auth_payload(user),
+        expires_delta=timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS),
+    )
+    set_auth_cookie(response, access_token)
+    set_refresh_cookie(response, refresh_token)
+    set_csrf_cookie(response, generate_csrf_token())
+    return access_token
 
 
 def _load_google_client_config() -> dict:
@@ -529,7 +557,10 @@ async def register_company(
     )
     set_auth_cookie(response, token)
     set_csrf_cookie(response, generate_csrf_token())
-    return Token(access_token=token)
+    return Token(
+        access_token=token,
+        message="Account created successfully. Verification link sent to your email.",
+    )
 
 
 class EmailVerificationRequest(SQLModel):
@@ -571,14 +602,17 @@ class UserUpdateRequest(SQLModel):
 
 def _verify_email_token(session: Session, token_value: str) -> User:
     normalized_token = token_value.strip()
+    if not normalized_token:
+        raise HTTPException(status_code=400, detail="Verification link is missing a token")
+
     user = session.exec(
         select(User).where(User.email_verification_token == normalized_token)
     ).first()
     if not user:
-        raise HTTPException(status_code=404, detail="Invalid verification token")
+        raise HTTPException(status_code=404, detail="Invalid or already used verification link")
 
     if not user.email_verification_expires_at or user.email_verification_expires_at < datetime.now(timezone.utc):
-        raise HTTPException(status_code=400, detail="Verification token expired")
+        raise HTTPException(status_code=400, detail="Verification link expired")
 
     user.email_verified = True
     user.email_verification_token = None
@@ -588,13 +622,132 @@ def _verify_email_token(session: Session, token_value: str) -> User:
     return user
 
 
+def _verification_result_html(*, ok: bool, title: str, message: str) -> HTMLResponse:
+    base_url = normalize_base_url(
+        os.getenv("FRONTEND_BASE_URL") or os.getenv("DOMAIN"),
+        "https://localhost:3000",
+    )
+    login_url = f"{base_url}/login"
+    accent = "#10b981" if ok else "#ef4444"
+    soft_accent = "rgba(16, 185, 129, 0.14)" if ok else "rgba(239, 68, 68, 0.14)"
+    icon = "&#10003;" if ok else "!"
+    html_doc = f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>{html.escape(title)} | Rio CRM</title>
+  <style>
+    :root {{
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      padding: 24px;
+      background:
+        radial-gradient(circle at 20% 10%, rgba(124, 58, 237, 0.30), transparent 34%),
+        radial-gradient(circle at 85% 90%, rgba(37, 99, 235, 0.24), transparent 34%),
+        linear-gradient(135deg, #020617, #111827 55%, #020617);
+      color: #f8fafc;
+    }}
+    .card {{
+      width: min(100%, 440px);
+      padding: 36px;
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 24px;
+      background: rgba(15, 23, 42, 0.74);
+      box-shadow: 0 28px 80px rgba(0, 0, 0, 0.42);
+      backdrop-filter: blur(22px);
+      text-align: center;
+    }}
+    .brand {{
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 24px;
+      display: grid;
+      place-items: center;
+      border-radius: 18px;
+      background: linear-gradient(135deg, #7c3aed, #2563eb);
+      font-size: 26px;
+      font-weight: 900;
+    }}
+    .icon {{
+      width: 76px;
+      height: 76px;
+      margin: 0 auto 22px;
+      display: grid;
+      place-items: center;
+      border-radius: 999px;
+      background: {soft_accent};
+      color: {accent};
+      border: 1px solid {soft_accent};
+      font-size: 38px;
+      font-weight: 900;
+    }}
+    h1 {{
+      margin: 0;
+      font-size: clamp(28px, 6vw, 38px);
+      line-height: 1.05;
+      letter-spacing: -0.02em;
+    }}
+    p {{
+      margin: 14px 0 0;
+      color: #cbd5e1;
+      font-size: 16px;
+      line-height: 1.6;
+    }}
+    .actions {{
+      margin-top: 28px;
+      display: grid;
+      gap: 12px;
+    }}
+    a {{
+      display: inline-flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 48px;
+      border-radius: 14px;
+      text-decoration: none;
+      font-weight: 800;
+    }}
+    .primary {{
+      background: linear-gradient(135deg, #7c3aed, #2563eb);
+      color: white;
+      box-shadow: 0 14px 34px rgba(79, 70, 229, 0.34);
+    }}
+    .secondary {{
+      color: #c4b5fd;
+    }}
+  </style>
+</head>
+<body>
+  <main class="card" aria-live="polite">
+    <div class="brand">R</div>
+    <div class="icon">{icon}</div>
+    <h1>{html.escape(title)}</h1>
+    <p>{html.escape(message)}</p>
+    <div class="actions">
+      <a class="primary" href="{html.escape(login_url)}">Go to login</a>
+      <a class="secondary" href="{html.escape(base_url)}">Back to Rio CRM</a>
+    </div>
+  </main>
+</body>
+</html>"""
+    return HTMLResponse(content=html_doc, status_code=200 if ok else 400)
+
+
 @router.post("/verify-email")
 async def verify_email(
     data: EmailVerificationRequest,
     session: Session = Depends(get_session),
 ):
     _verify_email_token(session, data.token)
-    return {"status": "verified"}
+    return {"status": "verified", "message": "Email verified successfully. You can now sign in."}
 
 
 @router.post("/auth/verify-email")
@@ -610,8 +763,19 @@ async def verify_email_get(
     token: str,
     session: Session = Depends(get_session),
 ):
-    _verify_email_token(session, token)
-    return {"status": "verified"}
+    try:
+        _verify_email_token(session, token)
+        return _verification_result_html(
+            ok=True,
+            title="Email verified successfully",
+            message="Your account is ready. You can now sign in to Rio CRM.",
+        )
+    except HTTPException as exc:
+        return _verification_result_html(
+            ok=False,
+            title="Email verification failed",
+            message=str(exc.detail or "Please request a new verification link and try again."),
+        )
 
 
 @router.get("/auth/verify-email")
