@@ -62,6 +62,7 @@ from routes import payments as payments_router
 from routes import tickets as tickets_router
 from routes import installations as installations_router
 from routes import contacts as contacts_router
+from routes import tts as tts_router
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
@@ -889,6 +890,7 @@ app.include_router(payments_router.router, prefix="/crm")
 app.include_router(tickets_router.router, prefix="/crm")
 app.include_router(installations_router.router, prefix="/crm")
 app.include_router(contacts_router.router, prefix="/crm")
+app.include_router(tts_router.router)
 
 try:
     from mcp_server import get_mcp_asgi_app

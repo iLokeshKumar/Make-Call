@@ -2472,3 +2472,61 @@ explain what to do next. I've checked the transcript, corrected most of the thin
 › Find and fix a bug in @filename
 
   gpt-5.5 medium · E:\something_new
+
+Free Voice Cloning Options (No Payment)
+1. GPT-SoVITS ✅ BEST BET FOR YOU
+Type: Text-to-Speech voice cloning (type text → get voice)
+Why it wins: Has a one-click Windows integrated package with a WebUI. No Python commands needed. Just download, extract, run.
+┌────────────────────┬──────────────────────────────────────────┐
+│ Feature            │ Detail                                   │
+├────────────────────┼──────────────────────────────────────────┤
+│ Reference needed   │ Just 3-10 seconds of clean audio         │
+│ Works on CPU?      │ Yes (slow but works)                     │
+│ Works on free GPU? │ Yes, Colab/Kaggle                        │
+│ Languages          │ English, Hindi, Chinese, Japanese + more │
+│ Ease of use        │ Highest — WebUI with buttons and sliders │
+└────────────────────┴──────────────────────────────────────────┘
+Get it: github.com/RVC-Boss/GPT-SoVITS → Download the "Integrated Package" (Windows .7z file)
+2. RVC (Retrieval-based Voice Conversion)
+Type: Voice conversion (record yourself → convert to target voice)
+Why: Also has a one-click Windows package. But different workflow — you record yourself saying the demo text, then the tool converts your voice to sound like Ashwini's.
+┌──────────────────┬────────────────────────────────────────────────────┐
+│ Feature          │ Detail                                             │
+├──────────────────┼────────────────────────────────────────────────────┤
+│ Reference needed │ 1-2 minutes clean audio                            │
+│ Works on CPU?    │ Yes, lightweight                                   │
+│ Use case         │ If you can record yourself speaking the demo lines │
+└──────────────────┴────────────────────────────────────────────────────┘
+Get it: github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
+3. OpenVoice (MyShell)
+Type: TTS voice cloning — lightweight, zero-shot
+Why: MIT licensed, runs fast. But requires Python setup, no one-click installer.
+4. Hugging Face Spaces (Browser-only, no install)
+There might be free Spaces running GPT-SoVITS or F5-TTS inference in the browser. Let me check:
+Good news — there's an even simpler option that works entirely in your browser with zero setup:
+Hugging Face Spaces — Browser-Based, Free, No Install
+These run on free GPUs hosted by Hugging Face. You just open a URL in your browser, upload your WAV, type text, and download the result.
+🏆 Best Option: F5-TTS on Hugging Face
+ mrfakename/E2-F5-TTS  — This is a Hugging Face Space running F5-TTS in the browser.
+What you do:
+1. Open this URL: https://huggingface.co/spaces/mrfakename/E2-F5-TTS
+2. Upload your reference WAV (e.g.,  lk_expressive.wav )
+3. Type what's said in that WAV (reference text)
+4. Type what you want it to say (generation text)
+5. Click generate → download the WAV
+No Colab, no code, no API keys, no payment. Just a web page.
+Second Option: OpenVoice Space
+ myshell-ai/OpenVoice  — Official Space by MyShell, also zero-shot, no install.
+────────────────────────────────────────────────────────────────────────────────
+Quick Comparison
+┌───────────────────────────────┬────────────────────────────────────────────────┬──────────────────────┐
+│ Option                        │ What You Do                                    │ Time to First Output │
+├───────────────────────────────┼────────────────────────────────────────────────┼──────────────────────┤
+│ Hugging Face F5-TTS Space     │ Open URL → Upload WAV → Type → Download        │ 2 minutes            │
+│ Colab F5-TTS (I already made) │ Upload to Drive → Open notebook → Run          │ 10 minutes           │
+│ GPT-SoVITS WebUI (Windows)    │ Download 7z → Extract → Run bat file           │ 15 minutes           │
+│ RVC WebUI (Windows)           │ Download → Extract → Record yourself → Convert │ 15 minutes           │
+│ OpenVoice                     │ Python setup                                   │ 20+ minutes          │
+└───────────────────────────────┴────────────────────────────────────────────────┴──────────────────────┘
+For tomorrow morning's demo, the Hugging Face Space is your fastest path. Want me to verify the Space is actually working right now?
+Suggested followups:
