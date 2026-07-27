@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw, Calendar, Link2, Link2Off, Gauge, Webhook, Server, Database, ShieldCheck, Layers, Plus, Trash2, Play, RotateCcw, Clock, CheckCircle, XCircle, ExternalLink, Copy, Sparkles } from "lucide-react";
+import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw, Calendar, Link2, Link2Off, Gauge, Webhook, Server, Database, ShieldCheck, Layers, Plus, Trash2, Play, RotateCcw, Clock, CheckCircle, XCircle, ExternalLink, Copy, Sparkles, Network, Package } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
@@ -205,6 +205,23 @@ export default function SettingsPage() {
     const [credSaving, setCredSaving] = useState(false);
     const [credError, setCredError] = useState<string | null>(null);
     const [credSuccess, setCredSuccess] = useState(false);
+
+    // MCP Connections tab
+    type MCPServer = { id: number; name: string; provider: string; url: string; transport: string; auth_type: string; capabilities_json: string[]; enabled: boolean; priority: number; last_health_status: string | null; last_health_checked_at: string | null; created_at: string; updated_at: string };
+    const [mcpServers, setMcpServers] = useState<MCPServer[]>([]);
+    const [mcpModal, setMcpModal] = useState<MCPServer | "new" | null>(null);
+    const [mcpForm, setMcpForm] = useState({ name: "", provider: "apollo", url: "", transport: "http", auth_type: "oauth2", capabilities_json: [] as string[], enabled: true, priority: 100 });
+    const [mcpSaving, setMcpSaving] = useState(false);
+    const [mcpError, setMcpError] = useState<string | null>(null);
+    const [mcpDiscovering, setMcpDiscovering] = useState<number | null>(null);
+
+    // Inventory Sources tab
+    type InvSource = { id: number; name: string; source_type: string; priority: number; enabled: boolean; last_sync_at: string | null; created_at: string };
+    const [invSources, setInvSources] = useState<InvSource[]>([]);
+    const [invModal, setInvModal] = useState<InvSource | "new" | null>(null);
+    const [invForm, setInvForm] = useState({ name: "", source_type: "csv", priority: 80, config_json: "{}", enabled: true });
+    const [invSaving, setInvSaving] = useState(false);
+    const [invError, setInvError] = useState<string | null>(null);
 
     // Company Prompts (in persona tab)
     type CompanyPromptVersion = { id: number; version: number; prompt_text: string; is_active: boolean; change_reason?: string | null; created_at?: string };
@@ -506,6 +523,12 @@ export default function SettingsPage() {
         }
         if (activeSection === "credentials") {
             apiFetch(`${CRM_BASE}/provider-credentials`).then(r => r.ok ? r.json() : []).then(d => setProviderCreds(d as ProviderCred[])).catch(() => {});
+        }
+        if (activeSection === "mcp_connections") {
+            apiFetch(`${API_BASE}/mcp-connections/registry`).then(r => r.ok ? r.json() : []).then(d => setMcpServers(d as MCPServer[])).catch(() => {});
+        }
+        if (activeSection === "inventory_sources") {
+            apiFetch(`${CRM_BASE}/inventory-sources`).then(r => r.ok ? r.json() : []).then(d => setInvSources(d as InvSource[])).catch(() => {});
         }
         if (activeSection === "voice_ai") {
             apiFetch(`${CRM_BASE}/company-prompts`).then(r => r.ok ? r.json() : []).then((d: CompanyPromptVersion[]) => {
@@ -2513,10 +2536,179 @@ export default function SettingsPage() {
                     );
                 })()}
 
+                {/* MCP Connections Tab */}
+                {activeSection === "mcp_connections" && hasAdminAccess && (
+                    <div className="space-y-6">
+                        <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-600">
+                                        <Network className="h-5 w-5 text-white" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">MCP Connections</h3>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400">Connect Apollo, Zoho CRM, and custom MCP servers to your AI agents</p>
+                                    </div>
+                                </div>
+                                <button onClick={() => { setMcpError(null); setMcpForm({ name: "", provider: "apollo", url: "", transport: "http", auth_type: "oauth2", capabilities_json: [], enabled: true, priority: 100 }); setMcpModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors">
+                                    <Plus className="h-4 w-4" /> Add Server
+                                </button>
+                            </div>
+                            {mcpServers.length === 0 ? (
+                                <p className="text-sm text-slate-400 py-4 text-center">No MCP servers configured. Add Apollo or Zoho to get started.</p>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead><tr className="border-b border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 uppercase"><th className="text-left pb-2 pr-4">Name</th><th className="text-left pb-2 pr-4">Provider</th><th className="text-left pb-2 pr-4">URL</th><th className="text-left pb-2 pr-4">Health</th><th className="text-left pb-2">Actions</th></tr></thead>
+                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                            {mcpServers.map(s => (
+                                                <tr key={s.id}>
+                                                    <td className="py-3 pr-4 font-medium text-slate-900 dark:text-slate-100">{s.name}</td>
+                                                    <td className="py-3 pr-4"><span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300">{s.provider}</span></td>
+                                                    <td className="py-3 pr-4 font-mono text-xs text-slate-500 max-w-xs truncate">{s.url}</td>
+                                                    <td className="py-3 pr-4"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${s.last_health_status === "healthy" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : s.last_health_status === "unhealthy" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" : "bg-slate-100 text-slate-500 dark:bg-slate-700"}`}>{s.last_health_status ?? "unknown"}</span></td>
+                                                    <td className="py-3">
+                                                        <div className="flex items-center gap-1">
+                                                            <button title="Discover tools" disabled={mcpDiscovering === s.id} onClick={async () => { setMcpDiscovering(s.id); await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}/discover`, { method: "POST" }).catch(() => {}); setMcpDiscovering(null); apiFetch(`${API_BASE}/mcp-connections/registry`).then(r => r.ok ? r.json() : []).then(d => setMcpServers(d as MCPServer[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors disabled:opacity-50">{mcpDiscovering === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}</button>
+                                                            <button title="Ping health" onClick={async () => { await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}/health`, { method: "POST" }).catch(() => {}); apiFetch(`${API_BASE}/mcp-connections/registry`).then(r => r.ok ? r.json() : []).then(d => setMcpServers(d as MCPServer[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"><Play className="h-4 w-4" /></button>
+                                                            <button title="Edit" onClick={() => { setMcpError(null); setMcpForm({ name: s.name, provider: s.provider, url: s.url, transport: s.transport, auth_type: s.auth_type, capabilities_json: s.capabilities_json, enabled: s.enabled, priority: s.priority }); setMcpModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
+                                                            <button title="Delete" onClick={async () => { if (!confirm(`Delete "${s.name}"?`)) return; await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}`, { method: "DELETE" }); setMcpServers(p => p.filter(x => x.id !== s.id)); }} className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"><Trash2 className="h-4 w-4" /></button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                            <div className="pt-2 border-t border-slate-200 dark:border-slate-700 text-xs text-slate-400 space-y-1">
+                                <p>Apollo OAuth: <a href="/settings?section=profile" className="text-violet-500 underline">Connect Apollo</a> via Settings → Integration Keys → Apollo OAuth, then add it here.</p>
+                                <p>Zoho OAuth: visit <span className="font-mono">{API_BASE}/crm/zoho/auth-url</span> to start the Zoho CRM connection flow.</p>
+                            </div>
+                        </div>
+                    </div>
+                )}
+
+                {/* Inventory Sources Tab */}
+                {activeSection === "inventory_sources" && hasAdminAccess && (
+                    <div className="space-y-6">
+                        <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
+                            <div className="flex items-center justify-between">
+                                <div className="flex items-center gap-3">
+                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-green-500 to-teal-600">
+                                        <Package className="h-5 w-5 text-white" />
+                                    </div>
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Inventory Sources</h3>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400">The built-in Product catalog is always available. Add CSV or ERP sources to layer on top.</p>
+                                    </div>
+                                </div>
+                                <button onClick={() => { setInvError(null); setInvForm({ name: "", source_type: "csv", priority: 80, config_json: "{}", enabled: true }); setInvModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors">
+                                    <Plus className="h-4 w-4" /> Add Source
+                                </button>
+                            </div>
+                            <div className="rounded-xl border border-slate-200 dark:border-slate-700 p-4 bg-green-50/50 dark:bg-green-900/10">
+                                <div className="flex items-center gap-3">
+                                    <Database className="h-5 w-5 text-green-600" />
+                                    <div>
+                                        <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">Product Catalog (built-in)</p>
+                                        <p className="text-xs text-slate-500">Always enabled · priority 100 · queries your Products table</p>
+                                    </div>
+                                    <span className="ml-auto px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700 dark:bg-green-900/40 dark:text-green-400">active</span>
+                                </div>
+                            </div>
+                            {invSources.length === 0 ? (
+                                <p className="text-sm text-slate-400 py-2 text-center">No additional sources configured.</p>
+                            ) : (
+                                <div className="overflow-x-auto">
+                                    <table className="w-full text-sm">
+                                        <thead><tr className="border-b border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 uppercase"><th className="text-left pb-2 pr-4">Name</th><th className="text-left pb-2 pr-4">Type</th><th className="text-left pb-2 pr-4">Priority</th><th className="text-left pb-2 pr-4">Last Sync</th><th className="text-left pb-2">Actions</th></tr></thead>
+                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                                            {invSources.map(s => (
+                                                <tr key={s.id}>
+                                                    <td className="py-3 pr-4 font-medium text-slate-900 dark:text-slate-100">{s.name}</td>
+                                                    <td className="py-3 pr-4"><span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300">{s.source_type}</span></td>
+                                                    <td className="py-3 pr-4 text-slate-600 dark:text-slate-300">{s.priority}</td>
+                                                    <td className="py-3 pr-4 text-xs text-slate-400">{s.last_sync_at ? new Date(s.last_sync_at).toLocaleString() : "—"}</td>
+                                                    <td className="py-3">
+                                                        <div className="flex items-center gap-1">
+                                                            <button title="Sync now" onClick={async () => { await apiFetch(`${CRM_BASE}/inventory-sources/${s.id}/sync`, { method: "POST" }).catch(() => {}); apiFetch(`${CRM_BASE}/inventory-sources`).then(r => r.ok ? r.json() : []).then(d => setInvSources(d as InvSource[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"><RotateCcw className="h-4 w-4" /></button>
+                                                            <button title="Edit" onClick={() => { setInvError(null); setInvForm({ name: s.name, source_type: s.source_type, priority: s.priority, config_json: "{}", enabled: s.enabled }); setInvModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
+                                                            <button title="Delete" onClick={async () => { if (!confirm(`Delete "${s.name}"?`)) return; await apiFetch(`${CRM_BASE}/inventory-sources/${s.id}`, { method: "DELETE" }); setInvSources(p => p.filter(x => x.id !== s.id)); }} className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"><Trash2 className="h-4 w-4" /></button>
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
+
             </div>
             </>
             )}
         </div>
+
+        {/* MCP Server modal */}
+        {mcpModal !== null && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setMcpModal(null)}>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/10 max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/10">
+                        <h2 className="font-bold text-slate-900 dark:text-slate-100">{mcpModal === "new" ? "Add MCP Server" : "Edit MCP Server"}</h2>
+                        <button onClick={() => setMcpModal(null)} className="text-slate-400 hover:text-slate-600"><XCircle className="h-5 w-5" /></button>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        {mcpError && <div className="text-sm text-red-600 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">{mcpError}</div>}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Name</label><input value={mcpForm.name} onChange={e => setMcpForm(p => ({ ...p, name: e.target.value }))} placeholder="apollo_main" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Provider</label><select value={mcpForm.provider} onChange={e => setMcpForm(p => ({ ...p, provider: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="apollo">Apollo</option><option value="zoho">Zoho</option><option value="custom">Custom</option></select></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Transport</label><select value={mcpForm.transport} onChange={e => setMcpForm(p => ({ ...p, transport: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="http">HTTP</option><option value="sse">SSE</option><option value="stdio">stdio</option></select></div>
+                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">URL</label><input value={mcpForm.url} onChange={e => setMcpForm(p => ({ ...p, url: e.target.value }))} placeholder="https://mcp.apollo.io/mcp" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Auth Type</label><select value={mcpForm.auth_type} onChange={e => setMcpForm(p => ({ ...p, auth_type: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="oauth2">OAuth 2.0</option><option value="api_key">API Key</option><option value="none">None</option></select></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Priority</label><input type="number" value={mcpForm.priority} onChange={e => setMcpForm(p => ({ ...p, priority: Number(e.target.value) }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="mcp-enabled" checked={mcpForm.enabled} onChange={e => setMcpForm(p => ({ ...p, enabled: e.target.checked }))} className="w-4 h-4 accent-violet-600" /><label htmlFor="mcp-enabled" className="text-sm text-slate-700 dark:text-slate-300 cursor-pointer">Enabled</label></div>
+                        </div>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button onClick={() => setMcpModal(null)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors">Cancel</button>
+                            <button disabled={mcpSaving || !mcpForm.name.trim() || !mcpForm.url.trim()} onClick={async () => { setMcpSaving(true); setMcpError(null); try { const isNew = mcpModal === "new"; const url = isNew ? `${API_BASE}/mcp-connections/registry` : `${API_BASE}/mcp-connections/registry/${(mcpModal as MCPServer).id}`; const res = await apiFetch(url, { method: isNew ? "POST" : "PATCH", body: JSON.stringify(mcpForm) }); if (!res.ok) { setMcpError((await res.json()).detail ?? "Save failed"); } else { const updated = await res.json(); setMcpServers(p => isNew ? [...p, updated] : p.map(x => x.id === updated.id ? updated : x)); setMcpModal(null); } } catch { setMcpError("Network error"); } finally { setMcpSaving(false); } }} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 disabled:opacity-50 transition-colors">
+                                {mcpSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
+
+        {/* Inventory Source modal */}
+        {invModal !== null && (
+            <div className="fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4" onClick={() => setInvModal(null)}>
+                <div className="bg-white dark:bg-slate-900 rounded-2xl border border-slate-200 dark:border-white/10 max-w-lg w-full max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+                    <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 dark:border-white/10">
+                        <h2 className="font-bold text-slate-900 dark:text-slate-100">{invModal === "new" ? "Add Inventory Source" : "Edit Inventory Source"}</h2>
+                        <button onClick={() => setInvModal(null)} className="text-slate-400 hover:text-slate-600"><XCircle className="h-5 w-5" /></button>
+                    </div>
+                    <div className="p-6 space-y-4">
+                        {invError && <div className="text-sm text-red-600 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">{invError}</div>}
+                        <div className="grid grid-cols-2 gap-3">
+                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Name</label><input value={invForm.name} onChange={e => setInvForm(p => ({ ...p, name: e.target.value }))} placeholder="Warehouse CSV" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Type</label><select value={invForm.source_type} onChange={e => setInvForm(p => ({ ...p, source_type: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="csv">CSV File</option><option value="google_sheets">Google Sheets</option><option value="erp_api">ERP API</option><option value="manual">Manual</option></select></div>
+                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Priority</label><input type="number" value={invForm.priority} onChange={e => setInvForm(p => ({ ...p, priority: Number(e.target.value) }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
+                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Config (JSON)</label><textarea rows={4} value={invForm.config_json} onChange={e => setInvForm(p => ({ ...p, config_json: e.target.value }))} placeholder={'{"file_path": "/data/inventory.csv"}'} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none" /></div>
+                            <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="inv-enabled" checked={invForm.enabled} onChange={e => setInvForm(p => ({ ...p, enabled: e.target.checked }))} className="w-4 h-4 accent-violet-600" /><label htmlFor="inv-enabled" className="text-sm text-slate-700 dark:text-slate-300 cursor-pointer">Enabled</label></div>
+                        </div>
+                        <div className="flex justify-end gap-3 pt-2">
+                            <button onClick={() => setInvModal(null)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors">Cancel</button>
+                            <button disabled={invSaving || !invForm.name.trim()} onClick={async () => { setInvSaving(true); setInvError(null); try { let cfg: Record<string, unknown> = {}; try { cfg = JSON.parse(invForm.config_json); } catch { setInvError("Config must be valid JSON"); setInvSaving(false); return; } const isNew = invModal === "new"; const url = isNew ? `${CRM_BASE}/inventory-sources` : `${CRM_BASE}/inventory-sources/${(invModal as InvSource).id}`; const res = await apiFetch(url, { method: isNew ? "POST" : "PATCH", body: JSON.stringify({ ...invForm, config_json: cfg }) }); if (!res.ok) { setInvError((await res.json()).detail ?? "Save failed"); } else { const updated = await res.json(); setInvSources(p => isNew ? [...p, updated] : p.map(x => x.id === updated.id ? updated : x)); setInvModal(null); } } catch { setInvError("Network error"); } finally { setInvSaving(false); } }} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors">
+                                {invSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        )}
 
         {/* Webhook modal */}
         {webhookModal !== null && (

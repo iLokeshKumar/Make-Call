@@ -56,6 +56,10 @@ from routes import agent_templates as agent_templates_router
 from routes import provider_credentials as provider_credentials_router
 from routes import cost as cost_router
 from routes import integrations as integrations_router
+from routes import mcp_connections as mcp_connections_router
+from routes import apollo_oauth as apollo_oauth_router
+from routes import zoho_oauth as zoho_oauth_router
+from routes import inventory_sources as inventory_sources_router
 from routes import orders as orders_router
 from routes import invoices as invoices_router
 from routes import payments as payments_router
@@ -884,6 +888,10 @@ app.include_router(agent_templates_router.router)
 app.include_router(provider_credentials_router.router)
 app.include_router(cost_router.router)
 app.include_router(integrations_router.router)
+app.include_router(mcp_connections_router.router)
+app.include_router(apollo_oauth_router.router)
+app.include_router(zoho_oauth_router.router)
+app.include_router(inventory_sources_router.router, prefix="/crm")
 app.include_router(orders_router.router, prefix="/crm")
 app.include_router(invoices_router.router, prefix="/crm")
 app.include_router(payments_router.router, prefix="/crm")

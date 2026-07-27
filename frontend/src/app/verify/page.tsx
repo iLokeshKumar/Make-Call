@@ -16,7 +16,7 @@ type VerificationResponse = {
 function getResponseMessage(data: VerificationResponse, fallback: string) {
     if (typeof data.message === "string" && data.message.trim()) return data.message;
     if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
-    if (data.detail?.message?.trim()) return data.detail.message;
+    if (typeof data.detail === "object" && data.detail.message?.trim()) return data.detail.message;
     return fallback;
 }
 

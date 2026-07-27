@@ -1,9 +1,11 @@
 "use client";
 
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { AlertCircle, Building2, CheckCircle2, Eye, EyeOff, Loader2, Lock, Mail, User } from "lucide-react";
+import { AlertCircle, Building2, CheckCircle2, Eye, EyeOff, Loader2, Lock, Mail, User, Volume2 } from "lucide-react";
 
+import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import { isVoiceboxAvailable, speakWithVoicebox } from "@/lib/voicebox";
 import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
 
@@ -15,7 +17,7 @@ type RegisterResponse = {
 function getResponseMessage(data: RegisterResponse, fallback: string) {
     if (typeof data.message === "string" && data.message.trim()) return data.message;
     if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
-    if (data.detail?.message?.trim()) return data.detail.message;
+    if (typeof data.detail === "object" && data.detail.message?.trim()) return data.detail.message;
     return fallback;
 }
 
@@ -33,6 +35,18 @@ export default function RegisterPage() {
     const [showPassword, setShowPassword] = useState(false);
     const [isLoading, setIsLoading] = useState(false);
     const [passwordFocused, setPasswordFocused] = useState(false);
+    const [voiceboxAvailable, setVoiceboxAvailable] = useState(false);
+    const [isSpeaking, setIsSpeaking] = useState(false);
+
+    useEffect(() => {
+        let cancelled = false;
+        void isVoiceboxAvailable().then((available) => {
+            if (!cancelled) setVoiceboxAvailable(available);
+        });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
 
     const CONSUMER_DOMAINS = ["gmail.com","yahoo.com","hotmail.com","outlook.com","live.com",
         "icloud.com","protonmail.com","proton.me","aol.com","msn.com","googlemail.com",
@@ -93,6 +107,20 @@ export default function RegisterPage() {
         }
     };
 
+    const handleSpeakSuccess = async () => {
+        if (isSpeaking) return;
+        setIsSpeaking(true);
+        try {
+            await speakWithVoicebox({
+                text: "Registration successful. Account created successfully. A verification link was sent to your email.",
+            });
+        } catch {
+            setVoiceboxAvailable(false);
+        } finally {
+            setIsSpeaking(false);
+        }
+    };
+
     return (
         <div className="min-h-screen w-full flex items-center justify-center bg-gradient-to-br from-slate-900 via-violet-950 to-slate-900 p-4 overflow-y-auto">
             {/* Decorative blobs */}
@@ -113,28 +141,17 @@ export default function RegisterPage() {
 
                 {/* Card */}
                 <div className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-xl p-8 shadow-2xl">
-                    {(successMessage || errorMessage) && (
+                    {errorMessage && (
                         <div className={`mb-5 rounded-xl border px-4 py-4 text-sm ${
-                            successMessage
-                                ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-300"
-                                : "bg-red-500/10 border-red-500/20 text-red-300"
+                            "bg-red-500/10 border-red-500/20 text-red-300"
                         }`}>
                             <div className="flex items-start gap-3">
-                                {successMessage ? (
-                                    <CheckCircle2 className="mt-0.5 h-5 w-5 shrink-0 text-emerald-400" />
-                                ) : (
-                                    <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
-                                )}
+                                <AlertCircle className="mt-0.5 h-5 w-5 shrink-0 text-red-400" />
                                 <div>
-                                    <p className={`font-semibold ${successMessage ? "text-emerald-200" : "text-red-200"}`}>
-                                        {successMessage ? "Registration successful" : "Registration failed"}
+                                    <p className="font-semibold text-red-200">
+                                        Registration failed
                                     </p>
-                                    <p className="mt-1 opacity-90">{successMessage || errorMessage}</p>
-                                    {successMessage && (
-                                        <p className="mt-1 opacity-80">
-                                            Check {registeredEmail || "your inbox"} and verify your email before signing in.
-                                        </p>
-                                    )}
+                                    <p className="mt-1 opacity-90">{errorMessage}</p>
                                 </div>
                             </div>
                         </div>
@@ -299,6 +316,45 @@ export default function RegisterPage() {
                     </p>
                 </div>
             </div>
+
+            <Dialog open={Boolean(successMessage)} onOpenChange={(open) => {
+                if (!open) setSuccessMessage("");
+            }}>
+                <DialogContent className="border-emerald-500/20 bg-slate-950 text-white sm:max-w-md">
+                    <DialogHeader>
+                        <div className="mb-2 flex h-11 w-11 items-center justify-center rounded-full bg-emerald-500/15 text-emerald-300">
+                            <CheckCircle2 className="h-6 w-6" />
+                        </div>
+                        <DialogTitle className="text-xl text-white">Registration successful</DialogTitle>
+                        <DialogDescription className="text-slate-300">
+                            {successMessage || "Account created successfully. Verification link sent to your email."}
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="rounded-lg border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-300">
+                        Check <span className="font-semibold text-white">{registeredEmail || "your inbox"}</span> and verify your email before signing in.
+                    </div>
+                    <DialogFooter className="border-white/10 bg-white/[0.03]">
+                        {voiceboxAvailable && (
+                            <button
+                                type="button"
+                                onClick={handleSpeakSuccess}
+                                disabled={isSpeaking}
+                                title={isSpeaking ? "Voicebox is speaking" : "Read message aloud with Voicebox"}
+                                aria-label={isSpeaking ? "Voicebox is speaking" : "Read message aloud with Voicebox"}
+                                className="inline-flex h-10 w-10 items-center justify-center rounded-md border border-white/15 text-slate-200 transition-colors hover:bg-white/10 disabled:opacity-50"
+                            >
+                                {isSpeaking ? <Loader2 className="h-4 w-4 animate-spin" /> : <Volume2 className="h-4 w-4" />}
+                            </button>
+                        )}
+                        <Link
+                            href="/login"
+                            className="inline-flex h-10 w-full items-center justify-center rounded-md bg-emerald-500 px-4 text-sm font-semibold text-slate-950 transition-colors hover:bg-emerald-400 sm:w-auto"
+                        >
+                            Go to sign in
+                        </Link>
+                    </DialogFooter>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

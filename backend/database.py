@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session as _SASession
 from sqlmodel import SQLModel, Session, create_engine, select
 
 from models.models import Permission, Role, RolePermission
+from models.mcp_server import MCPServer, MCPToolCache  # noqa: F401 — register tables with SQLModel metadata
+from models.inventory_source import InventorySource    # noqa: F401 — register tables with SQLModel metadata
 
 logger = logging.getLogger(__name__)
 

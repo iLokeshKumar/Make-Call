@@ -485,6 +485,28 @@ async def _execute_with_session(
             logger.exception("[warm_transfer] Failed", exc_info=True)
             return {"error": "Warm transfer failed — please try again.", "tool": "warm_transfer"}
 
+    # Route named business capabilities through the capability router
+    from services.mcp.capability_router import CAPABILITY_MAP, route_capability
+    if tool_name in CAPABILITY_MAP:
+        return await route_capability(
+            session=session,
+            company_id=company_id,
+            capability=tool_name,
+            arguments=arguments,
+            user_id=user_id,
+        )
+
+    # Route "<server>__<tool>" calls to the external MCP client
+    if "__" in tool_name:
+        prefix, ext_tool = tool_name.split("__", 1)
+        from services.platform.mcp_client import call_external_tool, EXTERNAL_MCP_SERVERS
+        if prefix in EXTERNAL_MCP_SERVERS:
+            return await call_external_tool(
+                prefix=prefix,
+                tool_name=ext_tool,
+                arguments=arguments,
+            )
+
     return {
         "error": "Unknown tool",
         "tool": tool_name,

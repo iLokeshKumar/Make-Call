@@ -1,7 +1,7 @@
 import {
   Sun, Mail, Brain, Zap, KeyRound, Database, Webhook, Layers,
   ShieldCheck, CheckCircle2, Sparkles, Gauge, Server, Users2,
-  PhoneForwarded, Settings2, Calendar, BarChart3,
+  PhoneForwarded, Settings2, Calendar, BarChart3, Network, Package,
 } from "lucide-react";
 import type { SectionDef } from "./SettingsCard";
 
@@ -88,6 +88,24 @@ export const SECTION_DEFS: SectionDef[] = [
     icon: Webhook,
     group: "integrations",
     iconGradient: "from-blue-500 to-indigo-600",
+    adminOnly: true,
+  },
+  {
+    id: "mcp_connections",
+    label: "MCP Connections",
+    description: "Connect Apollo, Zoho, and custom MCP servers",
+    icon: Network,
+    group: "integrations",
+    iconGradient: "from-violet-500 to-fuchsia-600",
+    adminOnly: true,
+  },
+  {
+    id: "inventory_sources",
+    label: "Inventory Sources",
+    description: "Pluggable product inventory: catalog, CSV, ERP API",
+    icon: Package,
+    group: "integrations",
+    iconGradient: "from-green-500 to-teal-600",
     adminOnly: true,
   },
 
