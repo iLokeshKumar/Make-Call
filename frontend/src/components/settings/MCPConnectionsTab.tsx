@@ -7,6 +7,8 @@ import {
   Plus, RefreshCw, Trash2, Play, Network, ChevronDown, ChevronUp, 
 } from "lucide-react";
 import { apiFetch } from "@/utils/apiFetch";
+import { useMCPServers, useCreateMCPServer, useDeleteMCPServer, useDiscoverMCPTools, usePingMCPHealth } from "@/hooks/useMCPServers";
+import type { MCPServerRecord } from "@/lib/api";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -38,18 +40,7 @@ type ConnectorDef = {
   envVarsRequired: string[];
 };
 
-type MCPServer = {
-  id: number;
-  name: string;
-  provider: string;
-  url: string;
-  transport: string;
-  auth_type: string;
-  capabilities_json: string[];
-  enabled: boolean;
-  priority: number;
-  last_health_status: string | null;
-};
+type MCPServer = MCPServerRecord;
 
 // ─── connector definitions ────────────────────────────────────────────────────
 
@@ -597,49 +588,31 @@ function ComingSoonCard({ name, tagline, icon, iconBg }: { name: string; tagline
 
 // ─── CustomServersSection ──────────────────────────────────────────────────────
 
-function CustomServersSection({ sessionTimeout }: { sessionTimeout?: SessionTimeout }) {
-  const [servers, setServers] = useState<MCPServer[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [discovering, setDiscovering] = useState<number | null>(null);
+function CustomServersSection({ sessionTimeout: _sessionTimeout }: { sessionTimeout?: SessionTimeout }) {
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState({
     name: "", provider: "custom", url: "", transport: "http",
     auth_type: "oauth2", capabilities_json: [] as string[], enabled: true, priority: 100,
   });
-  const [saving, setSaving] = useState(false);
 
-  const loadServers = useCallback(async () => {
-    try {
-      const res = await apiFetch(`${API_BASE}/mcp-connections/registry`);
-      if (res.status === 401) { sessionTimeout?.(); return; }
-      if (res.ok) setServers(await res.json());
-    } catch { /* ignore */ } finally {
-      setLoading(false);
-    }
-  }, [sessionTimeout]);
-
-  useEffect(() => { loadServers(); }, [loadServers]);
+  const { data: servers = [], isLoading: loading } = useMCPServers();
+  const createServer = useCreateMCPServer();
+  const deleteServer = useDeleteMCPServer();
+  const discoverTools = useDiscoverMCPTools();
+  const pingHealth = usePingMCPHealth();
 
   const save = async () => {
-    setSaving(true);
-    try {
-      const res = await apiFetch(`${API_BASE}/mcp-connections/registry`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(form),
-      });
-      if (res.status === 401) { sessionTimeout?.(); return; }
-      if (res.ok) { await loadServers(); setShowForm(false); }
-    } catch { /* ignore */ } finally {
-      setSaving(false);
-    }
+    await createServer.mutateAsync(form);
+    setShowForm(false);
+    setForm({ name: "", provider: "custom", url: "", transport: "http", auth_type: "oauth2", capabilities_json: [], enabled: true, priority: 100 });
   };
 
   const remove = async (id: number, name: string) => {
     if (!confirm(`Delete "${name}"?`)) return;
-    await apiFetch(`${API_BASE}/mcp-connections/registry/${id}`, { method: "DELETE" });
-    setServers(p => p.filter(s => s.id !== id));
+    deleteServer.mutate(id);
   };
+
+  const saving = createServer.isPending;
 
   return (
     <div className="rounded-2xl border border-slate-200 dark:border-slate-700/60 bg-white dark:bg-slate-900 overflow-hidden">
@@ -745,23 +718,18 @@ function CustomServersSection({ sessionTimeout }: { sessionTimeout?: SessionTime
               <div className="flex items-center gap-1">
                 <button
                   title="Discover tools"
-                  disabled={discovering === s.id}
-                  onClick={async () => {
-                    setDiscovering(s.id);
-                    await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}/discover`, { method: "POST" }).catch(() => {});
-                    await loadServers();
-                    setDiscovering(null);
-                  }}
+                  disabled={discoverTools.isPending && discoverTools.variables === s.id}
+                  onClick={() => discoverTools.mutate(s.id)}
                   className="p-1.5 rounded-lg text-slate-400 hover:text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors disabled:opacity-50"
                 >
-                  {discovering === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}
+                  {discoverTools.isPending && discoverTools.variables === s.id
+                    ? <Loader2 className="h-4 w-4 animate-spin" />
+                    : <RefreshCw className="h-4 w-4" />}
                 </button>
                 <button
                   title="Ping health"
-                  onClick={async () => {
-                    await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}/health`, { method: "POST" }).catch(() => {});
-                    await loadServers();
-                  }}
+                  disabled={pingHealth.isPending && pingHealth.variables === s.id}
+                  onClick={() => pingHealth.mutate(s.id)}
                   className="p-1.5 rounded-lg text-slate-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"
                 >
                   <Play className="h-4 w-4" />

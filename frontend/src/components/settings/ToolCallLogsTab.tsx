@@ -1,36 +1,9 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useState } from "react";
 import { Loader2, CheckCircle, XCircle, Clock, RefreshCw, Filter } from "lucide-react";
-import { apiFetch } from "@/utils/apiFetch";
-
-const API_BASE =
-  process.env.NEXT_PUBLIC_API_BASE_URL ||
-  (typeof window !== "undefined"
-    ? window.location.hostname.includes("ngrok-free.dev")
-      ? `${window.location.protocol}//${window.location.host}`
-      : `${window.location.protocol}//127.0.0.1:6060`
-    : "http://127.0.0.1:6060");
-
-type LogRow = {
-  id: number;
-  tool_name: string;
-  status: "success" | "error" | "timeout";
-  duration_ms: number;
-  error_message: string | null;
-  user_id: number | null;
-  interaction_id: number | null;
-  created_at: string;
-};
-
-type SummaryRow = {
-  tool_name: string;
-  total: number;
-  success: number;
-  error: number;
-  timeout: number;
-  avg_ms: number;
-};
+import { useToolLogs, useToolLogsSummary } from "@/hooks/useToolLogs";
+import type { ToolLogRow as LogRow, ToolLogSummaryRow as SummaryRow } from "@/lib/api";
 
 const STATUS_STYLE: Record<string, string> = {
   success: "text-emerald-600 dark:text-emerald-400",
@@ -44,38 +17,28 @@ const STATUS_ICON = {
   timeout: <Clock className="w-3.5 h-3.5 inline mr-1" />,
 };
 
-export default function ToolCallLogsTab({ sessionTimeout }: { sessionTimeout: () => void }) {
-  const [logs, setLogs] = useState<LogRow[]>([]);
-  const [summary, setSummary] = useState<SummaryRow[]>([]);
-  const [loading, setLoading] = useState(true);
+export default function ToolCallLogsTab({ sessionTimeout: _sessionTimeout }: { sessionTimeout: () => void }) {
   const [filterTool, setFilterTool] = useState("");
   const [filterStatus, setFilterStatus] = useState("");
   const [lookbackDays, setLookbackDays] = useState(7);
   const [view, setView] = useState<"logs" | "summary">("summary");
 
-  const fetchLogs = useCallback(async () => {
-    setLoading(true);
-    try {
-      const params = new URLSearchParams({ limit: "100" });
-      if (filterTool) params.set("tool_name", filterTool);
-      if (filterStatus) params.set("status", filterStatus);
+  const logsQuery = useToolLogs({
+    tool_name: filterTool || undefined,
+    status: filterStatus || undefined,
+  });
+  const summaryQuery = useToolLogsSummary(lookbackDays);
 
-      const [logsRes, summaryRes] = await Promise.all([
-        apiFetch(`${API_BASE}/crm/tool-logs?${params}`, { sessionTimeout }),
-        apiFetch(`${API_BASE}/crm/tool-logs/summary?lookback_days=${lookbackDays}`, { sessionTimeout }),
-      ]);
-      setLogs(logsRes.logs ?? []);
-      setSummary(summaryRes.summary ?? []);
-    } catch {
-      // handled by apiFetch
-    } finally {
-      setLoading(false);
-    }
-  }, [filterTool, filterStatus, lookbackDays, sessionTimeout]);
-
-  useEffect(() => { fetchLogs(); }, [fetchLogs]);
+  const logs: LogRow[] = logsQuery.data ?? [];
+  const summary: SummaryRow[] = summaryQuery.data ?? [];
+  const loading = logsQuery.isFetching || summaryQuery.isFetching;
 
   const uniqueTools = Array.from(new Set(logs.map((l) => l.tool_name))).sort();
+
+  function refetch() {
+    logsQuery.refetch();
+    summaryQuery.refetch();
+  }
 
   return (
     <div className="space-y-6">
@@ -114,7 +77,7 @@ export default function ToolCallLogsTab({ sessionTimeout }: { sessionTimeout: ()
             ))}
           </select>
           <button
-            onClick={fetchLogs}
+            onClick={refetch}
             disabled={loading}
             className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-slate-800 text-slate-500 dark:text-slate-400 transition-colors disabled:opacity-40"
           >
