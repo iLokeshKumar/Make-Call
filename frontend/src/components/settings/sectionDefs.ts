@@ -1,7 +1,7 @@
 import {
   Sun, Mail, Brain, Zap, KeyRound, Database, Webhook, Layers,
   ShieldCheck, CheckCircle2, Sparkles, Gauge, Server, Users2,
-  PhoneForwarded, Settings2, Calendar, BarChart3, Network, Package,
+  PhoneForwarded, Settings2, Calendar, BarChart3, Network, Package, Activity,
 } from "lucide-react";
 import type { SectionDef } from "./SettingsCard";
 
@@ -92,8 +92,8 @@ export const SECTION_DEFS: SectionDef[] = [
   },
   {
     id: "mcp_connections",
-    label: "MCP Connections",
-    description: "Connect Apollo, Zoho, and custom MCP servers",
+    label: "Connectors",
+    description: "Connect Zoho, Apollo, HubSpot, and custom MCP servers",
     icon: Network,
     group: "integrations",
     iconGradient: "from-violet-500 to-fuchsia-600",
@@ -180,6 +180,15 @@ export const SECTION_DEFS: SectionDef[] = [
     icon: Users2,
     group: "operations",
     iconGradient: "from-rose-400 to-red-500",
+    adminOnly: true,
+  },
+  {
+    id: "tool_logs",
+    label: "Tool Call Logs",
+    description: "Per-tool success rate, latency, and error history",
+    icon: Activity,
+    group: "operations",
+    iconGradient: "from-violet-500 to-purple-600",
     adminOnly: true,
   },
 ];

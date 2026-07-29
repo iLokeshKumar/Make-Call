@@ -3,7 +3,7 @@ Finance Agent — Auto invoices, payment links, reminders, dispute handling.
 
 Actions:
   generate_invoice  — Create Invoice from an Order; flags approval if amount > 500000
-  send_payment_link — Attach placeholder payment link and log WhatsApp interaction
+  send_payment_link — Generate payment link via PAYMENT_GATEWAY_URL and log WhatsApp interaction
   send_reminder     — Create email reminder Interactions for overdue invoices
   handle_dispute    — Create AgentApproval and mark invoice as disputed
   write_off         — Write off invoice if task carries approved=True
@@ -12,6 +12,7 @@ Actions:
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timezone
 
 from sqlmodel import Session, select
@@ -131,7 +132,13 @@ def _handle_send_payment_link(session: Session, task: AgentTask) -> dict:
             "invoice_id": invoice_id,
         }
 
-    payment_link = f"https://pay.example.com/{invoice.invoice_number}"
+    base_url = os.getenv("PAYMENT_GATEWAY_URL", "").rstrip("/")
+    if not base_url:
+        return {
+            "error": "PAYMENT_GATEWAY_URL env var not set — cannot generate payment link",
+            "invoice_id": invoice_id,
+        }
+    payment_link = f"{base_url}/{invoice.invoice_number}"
     invoice.payment_link = payment_link
     session.add(invoice)
 

@@ -20,7 +20,17 @@ router = APIRouter(prefix="/crm/calendar", tags=["Calendar"])
 _CALENDAR_PKCE_CACHE: dict[int, str] = {}
 
 CALENDAR_SCOPES = [
+    # Calendar + Meet
     "https://www.googleapis.com/auth/calendar",
+    # Gmail
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.readonly",
+    # Drive + Sheets + Docs
+    "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/documents",
+    # Identity
     "https://www.googleapis.com/auth/userinfo.email",
     "openid",
 ]
@@ -158,7 +168,7 @@ def calendar_oauth_callback(
     # Redirect to frontend settings page after auth
     frontend_base = os.getenv("FRONTEND_URL", "http://localhost:3006")
     from fastapi.responses import RedirectResponse
-    return RedirectResponse(url=f"{frontend_base}/settings?calendar=connected")
+    return RedirectResponse(url=f"{frontend_base}/settings?google=connected")
 
 
 @router.get("/status")

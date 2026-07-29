@@ -78,7 +78,7 @@ from services.agent.agent_tool_service import (
 logger = logging.getLogger(__name__)
 
 
-def get_mistral_tools() -> list[dict[str, Any]]:
+def get_mistral_tools(company_id: int | None = None) -> list[dict[str, Any]]:
     return [
         {
             "type": "function",
@@ -292,6 +292,17 @@ def get_mistral_tools() -> list[dict[str, Any]]:
         },
     ]
 
+    if company_id is None:
+        return _all_tools
+
+    # Filter to only tools the company has enabled
+    try:
+        from mcp_tools.tool_catalog import tool_names_for_company
+        enabled = tool_names_for_company(company_id)
+        return [t for t in _all_tools if t["function"]["name"] in enabled]
+    except Exception:
+        return _all_tools
+
 
 async def _execute_with_session(
     session: Session,
@@ -318,6 +329,23 @@ async def _execute_with_session(
 
     user = get_user_or_404(session, user_id)
     company_id = user.company_id
+
+    # ── Dispatcher fast-path: delegate to registry if tool is registered ──────
+    try:
+        from mcp_tools.dispatcher import ToolDispatcher
+        dispatcher = ToolDispatcher.get()
+        if tool_name in dispatcher.registry.list_all():
+            int_id = int(interaction_id) if interaction_id and str(interaction_id).isdigit() else None
+            return await dispatcher.dispatch(
+                tool_name,
+                arguments,
+                company_id=company_id,
+                user_id=user_id,
+                interaction_id=int_id,
+            )
+    except Exception as _disp_exc:
+        logger.warning("[tool_adapter] dispatcher check failed, falling through: %s", _disp_exc)
+    # ─────────────────────────────────────────────────────────────────────────
 
     if tool_name == "get_product_info":
         return get_product_info(
@@ -522,6 +550,7 @@ async def execute_mcp_tool(
     user=None,
     session: Session | None = None,
 ) -> dict[str, Any]:
+    import time
     logger.info(
         "[execute_mcp_tool] tool=%s interaction_id=%s user_id=%s args=%s",
         tool_name,
@@ -530,21 +559,60 @@ async def execute_mcp_tool(
         arguments,
     )
 
+    _start = time.monotonic()
+    _status = "success"
+    _error: str | None = None
+
     try:
         async with asyncio.timeout(30):
             if session is not None:
                 effective_user_id = user_id or getattr(user, "id", None)
-                return await _execute_with_session(session, tool_name, arguments, effective_user_id, interaction_id=interaction_id)
-
-            with Session(engine) as owned_session:
-                effective_user_id = user_id or getattr(user, "id", None)
-                return await _execute_with_session(owned_session, tool_name, arguments, effective_user_id, interaction_id=interaction_id)
+                result = await _execute_with_session(session, tool_name, arguments, effective_user_id, interaction_id=interaction_id)
+            else:
+                with Session(engine) as owned_session:
+                    effective_user_id = user_id or getattr(user, "id", None)
+                    result = await _execute_with_session(owned_session, tool_name, arguments, effective_user_id, interaction_id=interaction_id)
+            if result.get("error"):
+                _status = "error"
+                _error = str(result["error"])[:500]
+            return result
     except asyncio.TimeoutError:
+        _status = "timeout"
+        _error = f"timed out after 30s"
         logger.error("[execute_mcp_tool] Tool '%s' timed out after 30s", tool_name)
         return {"error": f"Tool '{tool_name}' timed out — please try again.", "tool": tool_name}
     except Exception as exc:
+        _status = "error"
+        _error = str(exc)[:500]
         logger.error("[execute_mcp_tool] Tool execution failed for %s: %s", tool_name, exc, exc_info=True)
         return {
             "error": f"Tool execution failed: {exc}",
             "tool": tool_name,
         }
+    finally:
+        _dur_ms = int((time.monotonic() - _start) * 1000)
+        try:
+            _eid = effective_user_id if "effective_user_id" in dir() else None
+            _cid: int | None = None
+            if _eid:
+                try:
+                    with Session(engine) as _s:
+                        from models.models import User as _U
+                        from sqlmodel import select as _sel
+                        _u = _s.exec(_sel(_U).where(_U.id == _eid)).first()
+                        _cid = _u.company_id if _u else None
+                except Exception:
+                    pass
+            if _cid:
+                from services.observability.tool_call_tracer import trace_tool_call as _trace
+                asyncio.create_task(_trace(
+                    tool_name=tool_name,
+                    company_id=_cid,
+                    status=_status,
+                    duration_ms=_dur_ms,
+                    user_id=_eid,
+                    interaction_id=int(interaction_id) if interaction_id and str(interaction_id).isdigit() else None,
+                    error_message=_error,
+                ))
+        except Exception:
+            pass

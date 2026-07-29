@@ -75,14 +75,22 @@ _AGENT_MODULES: dict[str, str] = {
     "closer":           "agents.closer",
     "reply_classifier": "agents.reply_classifier",
     # ── C. Phase 7 workflow/policy agents (procedural, no LLM calls) ────────
-    "gsm":          "agents.gsm",
-    "gsm_manager":  "agents.gsm_manager",
-    "purchase":     "agents.purchase",
-    "scm":          "agents.scm",
-    "service":      "agents.service_agent",
-    "installation": "agents.installation",
-    "finance":      "agents.finance",
-    "ism_manager":  "agents.ism_manager",
+    "gsm":            "agents.gsm",
+    "gsm_manager":    "agents.gsm_manager",
+    "purchase":       "agents.purchase",
+    "scm":            "agents.scm",
+    "service":        "agents.service_agent",
+    "installation":   "agents.installation",
+    "finance":        "agents.finance",
+    "ism_manager":    "agents.ism_manager",
+    # ── D. Yexis enterprise agents (action-ledger backed) ───────────────────
+    "f1_collections":   "agents.f1_collections",
+    "f2_scheme_claims": "agents.f2_scheme_claims",
+    "f3_books_sync":    "agents.f3_books_sync",
+    # ── E. Purchase suite ────────────────────────────────────────────────────
+    "p1_indent":        "agents.p1_indent",
+    "p2_po":            "agents.p2_po",
+    "p3_grn":           "agents.p3_grn",
 }
 
 

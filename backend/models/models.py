@@ -2969,3 +2969,600 @@ class EscalationRuleCreate(SQLModel):
     trigger_after_hours: int = 24
     escalate_to_user_ids: list = []
     action_types: list = []
+
+
+class ToolCallLog(SQLModel, table=True):
+    __tablename__ = "tool_call_logs"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    interaction_id: Optional[int] = Field(default=None, foreign_key="interactions.id", index=True)
+    tool_name: str = Field(max_length=100, index=True)
+    status: str = Field(default="success", max_length=20)  # success | error | timeout
+    duration_ms: int = Field(default=0)
+    error_message: Optional[str] = Field(default=None, max_length=500)
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Agent Infrastructure — Action Ledger, Object Lock, Serial Registry,
+# Tally Staging, KPI Events
+# ---------------------------------------------------------------------------
+
+class ActionLedger(SQLModel, table=True):
+    """Permanent immutable log of every atomic action any agent ever takes.
+
+    Written once per agent action — whether proposed, approved, rejected,
+    executed, or failed. Never updated after creation; status transitions
+    produce new rows so the full history is always preserved.
+
+    Autonomy tiers:
+      A1 — propose only: row created with status="proposed", waits for approval
+      A2 — supervised: row created with status="proposed", executed on approval
+      A3 — bounded-autonomous: row created with status="auto_executed" directly
+
+    This table is the single source of truth for the monthly agent-assurance
+    review and the basis for promoting agents from A1 → A2 → A3.
+    """
+    __tablename__ = "action_ledger"
+    __table_args__ = (
+        Index("ix_action_ledger_company_agent_created", "company_id", "agent_name", "created_at"),
+        Index("ix_action_ledger_company_status", "company_id", "status"),
+        Index("ix_action_ledger_entity", "company_id", "entity_type", "entity_id"),
+        Index("ix_action_ledger_task", "agent_task_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+
+    # What ran
+    agent_name: str = Field(max_length=80, index=True)   # "f1_collections" | "p1_purchase" …
+    action_type: str = Field(max_length=120)              # "send_dunning_whatsapp" | "create_po" …
+    autonomy_level: str = Field(max_length=5)             # "A1" | "A2" | "A3"
+
+    # Status lifecycle (immutable per row — new row per transition)
+    # proposed → approved → executed
+    # proposed → rejected
+    # auto_executed (A3, no approval required)
+    # failed (execution error after approval)
+    status: str = Field(default="proposed", max_length=30)
+
+    # What the agent saw and produced
+    input_snapshot: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    output_snapshot: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    rationale: str = Field(default="")  # why the agent took this action
+
+    # Links
+    agent_task_id: Optional[int] = Field(default=None, foreign_key="agent_tasks.id", index=True)
+    entity_type: Optional[str] = Field(default=None, max_length=80)   # "invoice" | "dealer" | "po"
+    entity_id: Optional[int] = Field(default=None, index=True)         # DB id of the touched record
+
+    # Approval
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    approved_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    reviewer_note: Optional[str] = None
+
+    # Execution outcome
+    executed_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    error: Optional[str] = None
+
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AgentObjectLock(SQLModel, table=True):
+    """Distributed record-level lock preventing two agents from writing the same
+    entity concurrently.
+
+    An agent acquires the lock before touching a record, releases it after.
+    Locks have a hard TTL (expires_at) so a crashed agent never starves others.
+    The orchestrator checks this table before dispatching any A2/A3 action.
+    """
+    __tablename__ = "agent_object_locks"
+    __table_args__ = (
+        UniqueConstraint("company_id", "entity_type", "entity_id", name="uq_agent_object_locks_entity"),
+        Index("ix_agent_object_locks_expires", "expires_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    entity_type: str = Field(max_length=80)   # "invoice" | "dealer" | "purchase_order" …
+    entity_id: int                             # the DB id of the locked record
+    locked_by_agent: str = Field(max_length=80)
+    locked_by_task_id: Optional[int] = Field(default=None, foreign_key="agent_tasks.id", index=True)
+    acquired_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    expires_at: datetime = Field(
+        sa_column=Column(DateTime(timezone=True), nullable=False, index=True),
+    )
+
+
+class SerialRegistry(SQLModel, table=True):
+    """Serial-level inventory tracking for serialized products.
+
+    Every unit Yexis receives is registered here at GRN time.
+    Supports perpetual, serial-accurate inventory and full chain-of-custody
+    from goods-in through dispatch / demo / RMA / write-off.
+    """
+    __tablename__ = "serial_registry"
+    __table_args__ = (
+        UniqueConstraint("company_id", "serial_number", name="uq_serial_registry_company_serial"),
+        Index("ix_serial_registry_company_status", "company_id", "status"),
+        Index("ix_serial_registry_product", "company_id", "product_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    serial_number: str = Field(max_length=100, index=True)
+    product_id: Optional[int] = Field(default=None, foreign_key="products.id", index=True)
+    sku_snapshot: Optional[str] = Field(default=None, max_length=100)  # frozen at GRN time
+    model_snapshot: Optional[str] = Field(default=None, max_length=200)
+
+    # Provenance
+    po_number: Optional[str] = Field(default=None, max_length=100)
+    grn_date: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    vendor_name: Optional[str] = Field(default=None, max_length=200)
+
+    # Current state
+    # in_stock | allocated | dispatched | demo | sold | rma | written_off
+    status: str = Field(default="in_stock", max_length=30, index=True)
+    location: Optional[str] = Field(default=None, max_length=200)  # "godown_chennai" | "site_xyz"
+
+    # Allocation / dispatch
+    allocated_to_lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    dispatched_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    sold_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+
+    notes: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class TallyStagingVoucher(SQLModel, table=True):
+    """Staging area for Zoho Books transactions pending sync to Tally Prime.
+
+    The F3 Books-Sync agent writes rows here after pulling the Zoho Books
+    day-book. A human (accountant) reviews and approves in bulk via the
+    Cowork approval console. The Tally Gateway then posts approved rows and
+    writes back tally_voucher_id on success.
+
+    This decouples Zoho Books from Tally and gives full auditability over
+    what was posted, when, and by whom — critical for statutory compliance.
+    """
+    __tablename__ = "tally_staging_vouchers"
+    __table_args__ = (
+        UniqueConstraint("company_id", "zoho_books_ref", name="uq_tally_staging_zoho_ref"),
+        Index("ix_tally_staging_company_status", "company_id", "status"),
+        Index("ix_tally_staging_voucher_date", "company_id", "voucher_date"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+
+    # Source
+    zoho_books_ref: str = Field(max_length=100, index=True)  # Zoho Books txn ID or number
+    # sales_invoice | purchase_invoice | payment | receipt | journal | contra | credit_note | debit_note
+    voucher_type: str = Field(max_length=50)
+    voucher_date: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    party_name: Optional[str] = Field(default=None, max_length=200)  # Tally ledger name
+    narration: Optional[str] = Field(default=None, max_length=500)
+    amount: Optional[str] = Field(default=None, max_length=30)  # stored as string to preserve exact decimal
+
+    # Tally mapping
+    mapped_ledger: Optional[str] = Field(default=None, max_length=200)
+    voucher_data_json: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))  # full Tally XML payload
+
+    # Lifecycle
+    # staged | pending_approval | approved | posting | posted | failed | rejected | skipped
+    status: str = Field(default="staged", max_length=30)
+
+    # Approval
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    approved_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    rejection_reason: Optional[str] = None
+
+    # Tally post result
+    tally_voucher_id: Optional[str] = Field(default=None, max_length=100)  # returned by Tally on success
+    posted_at: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    error: Optional[str] = None
+    retry_count: int = Field(default=0)
+
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class AgentKpiEvent(SQLModel, table=True):
+    """One measurable outcome produced by an agent, recorded at execution time.
+
+    Aggregated by the D1 Dashboard agent into KPI snapshots.
+    Also used to track agent performance for the monthly assurance review
+    and to gate autonomy promotion (e.g., F2 must hit 97% claim accuracy
+    before being promoted from A1 to A2).
+    """
+    __tablename__ = "agent_kpi_events"
+    __table_args__ = (
+        Index("ix_agent_kpi_events_company_agent_metric", "company_id", "agent_name", "metric_name"),
+        Index("ix_agent_kpi_events_period", "company_id", "period_date"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    agent_name: str = Field(max_length=80, index=True)
+    # e.g. "dso_days" | "collection_hit_rate" | "po_cycle_time_hours"
+    #      "scheme_claim_accuracy" | "grn_serial_capture_accuracy" | "tally_sync_drift_inr"
+    metric_name: str = Field(max_length=120, index=True)
+    metric_value: Optional[str] = Field(default=None, max_length=50)  # stored as string; parse as Decimal/float downstream
+    period_date: Optional[datetime] = Field(default=None, sa_column=Column(DateTime(timezone=True), nullable=True))
+    entity_type: Optional[str] = Field(default=None, max_length=80)   # "dealer" | "branch" | "sku"
+    entity_id: Optional[int] = Field(default=None, index=True)
+    action_ledger_id: Optional[int] = Field(default=None, foreign_key="action_ledger.id", index=True)
+    metadata_json: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    created_at: datetime = Field(
+        default_factory=utc_now,
+        sa_column=Column(DateTime(timezone=True), nullable=False),
+    )
+
+
+class VendorScheme(SQLModel, table=True):
+    """Scheme definition entered by the finance team from a vendor's scheme PDF.
+
+    Vendors run promotional incentive schemes every month/quarter:
+      volume_incentive   — sell N+ units, earn rate_per_unit on all qualifying units
+      model_incentive    — sell specific SKUs, earn flat rate per unit
+      display_incentive  — maintain display units at dealers, flat monthly amount
+      mdf                — market development fund, flat amount for territory promotions
+
+    incentive_rules JSON shape (interpreted by f2_scheme_claims agent):
+      volume_incentive : [{"min_qty": 0, "max_qty": 49, "rate_per_unit": 300},
+                          {"min_qty": 50, "max_qty": null, "rate_per_unit": 500}]
+      model_incentive  : {"rate_per_unit": 800}
+      display_incentive: {"flat_amount": 25000}
+      mdf              : {"flat_amount": 50000}
+    """
+    __tablename__ = "vendor_schemes"
+    __table_args__ = (
+        UniqueConstraint("company_id", "scheme_code", "period_start",
+                         name="uq_vendor_scheme_code_period"),
+        Index("ix_vendor_schemes_company_status", "company_id", "status"),
+        Index("ix_vendor_schemes_period", "company_id", "period_start", "period_end"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    scheme_code: str = Field(max_length=100, index=True)
+    scheme_name: str = Field(max_length=300)
+    # volume_incentive | model_incentive | display_incentive | mdf
+    scheme_type: str = Field(max_length=50)
+    period_start: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    period_end: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    submission_deadline: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    eligible_brands: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    eligible_categories: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    eligible_skus: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    min_quantity: int = Field(default=0)
+    incentive_rules: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    status: str = Field(default="active", max_length=30)
+    source_document_path: Optional[str] = Field(default=None, max_length=500)
+    notes: Optional[str] = None
+    created_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class SchemeClaim(SQLModel, table=True):
+    """A drafted or submitted incentive claim against one SamsungScheme.
+
+    Status lifecycle:
+      draft → proposed → approved → submitted → acknowledged → settled | rejected | disputed
+    """
+    __tablename__ = "scheme_claims"
+    __table_args__ = (
+        UniqueConstraint("company_id", "scheme_id", "claim_period_start",
+                         name="uq_scheme_claim_scheme_period"),
+        Index("ix_scheme_claims_company_status", "company_id", "status"),
+        Index("ix_scheme_claims_scheme", "scheme_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    scheme_id: int = Field(foreign_key="vendor_schemes.id", index=True)
+    claim_period_start: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    claim_period_end: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    total_qualifying_units: int = Field(default=0)
+    total_claimed_inr: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+    settled_amount_inr: Optional[Decimal] = Field(
+        default=None, sa_column=Column(Numeric(14, 2), nullable=True)
+    )
+    variance_inr: Optional[Decimal] = Field(
+        default=None, sa_column=Column(Numeric(14, 2), nullable=True)
+    )
+    # abs(settled - claimed) / claimed * 100; drives scheme_claim_accuracy KPI
+    accuracy_pct: Optional[Decimal] = Field(
+        default=None, sa_column=Column(Numeric(6, 2), nullable=True)
+    )
+    status: str = Field(default="draft", max_length=30)
+    action_ledger_id: Optional[int] = Field(default=None, foreign_key="action_ledger.id", index=True)
+    agent_task_id: Optional[int] = Field(default=None, foreign_key="agent_tasks.id", index=True)
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    approved_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    reviewer_note: Optional[str] = None
+    submission_ref: Optional[str] = Field(default=None, max_length=200)
+    submitted_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    settled_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    rejection_reason: Optional[str] = None
+    claim_workings: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class SchemeClaimLine(SQLModel, table=True):
+    """One qualifying invoice×product line in a SchemeClaim.
+
+    Finance Manager inspects these to verify agent workings before approving.
+    """
+    __tablename__ = "scheme_claim_lines"
+    __table_args__ = (
+        Index("ix_scheme_claim_lines_claim", "claim_id"),
+        Index("ix_scheme_claim_lines_invoice", "invoice_id"),
+        Index("ix_scheme_claim_lines_product", "product_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    claim_id: int = Field(foreign_key="scheme_claims.id", index=True)
+    invoice_id: int = Field(foreign_key="invoices.id", index=True)
+    product_id: Optional[int] = Field(default=None, foreign_key="products.id", index=True)
+    lead_id: int = Field(foreign_key="leads.id", index=True)
+    sku_snapshot: Optional[str] = Field(default=None, max_length=100)
+    product_name_snapshot: Optional[str] = Field(default=None, max_length=200)
+    invoice_number: str = Field(max_length=50)
+    invoice_date: datetime = Field(sa_column=Column(DateTime(timezone=True), nullable=False))
+    quantity: int = Field(default=0)
+    rate_per_unit: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(10, 2), nullable=False)
+    )
+    line_amount: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False)
+    )
+    serial_numbers: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+# ---------------------------------------------------------------------------
+# Purchase Suite — P1 Indent / P2 PO / P3 GRN
+# ---------------------------------------------------------------------------
+
+class PurchaseIndent(SQLModel, table=True):
+    """Demand signal generated by P1; becomes a PO once approved.
+
+    Status: draft → proposed → approved → po_raised → cancelled
+    """
+    __tablename__ = "purchase_indents"
+    __table_args__ = (
+        UniqueConstraint("company_id", "indent_number", name="uq_purchase_indent_number"),
+        Index("ix_purchase_indents_company_status", "company_id", "status"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    indent_number: str = Field(max_length=50, index=True)
+    status: str = Field(default="draft", max_length=30)
+    total_value_inr: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+    autonomy_level: str = Field(default="A2", max_length=5)
+    action_ledger_id: Optional[int] = Field(default=None, foreign_key="action_ledger.id", index=True)
+    agent_task_id: Optional[int] = Field(default=None, foreign_key="agent_tasks.id", index=True)
+    approved_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    approved_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    notes: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class PurchaseIndentLine(SQLModel, table=True):
+    """One product line in a PurchaseIndent."""
+    __tablename__ = "purchase_indent_lines"
+    __table_args__ = (
+        Index("ix_purchase_indent_lines_indent", "indent_id"),
+        Index("ix_purchase_indent_lines_product", "product_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    indent_id: int = Field(foreign_key="purchase_indents.id", index=True)
+    product_id: int = Field(foreign_key="products.id", index=True)
+    sku_snapshot: Optional[str] = Field(default=None, max_length=100)
+    product_name_snapshot: str = Field(max_length=200)
+    current_stock: int = Field(default=0)
+    reorder_level: int = Field(default=0)
+    quantity_to_order: int = Field(default=0)
+    unit_cost: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False)
+    )
+    line_total: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+    required_by: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+
+
+class PurchaseOrder(SQLModel, table=True):
+    """Formal PO raised to a vendor after indent is approved.
+
+    Status: draft → sent → acknowledged → partial_delivery → delivered | cancelled
+    """
+    __tablename__ = "purchase_orders"
+    __table_args__ = (
+        UniqueConstraint("company_id", "po_number", name="uq_purchase_order_number"),
+        Index("ix_purchase_orders_company_status", "company_id", "status"),
+        Index("ix_purchase_orders_indent", "indent_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    po_number: str = Field(max_length=50, index=True)
+    indent_id: Optional[int] = Field(default=None, foreign_key="purchase_indents.id", index=True)
+    vendor_name: str = Field(default="", max_length=200)
+    vendor_contact_email: Optional[str] = Field(default=None, max_length=200)
+    status: str = Field(default="draft", max_length=30)
+    total_value_inr: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+    expected_delivery_date: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    sent_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    acknowledged_at: Optional[datetime] = Field(
+        default=None, sa_column=Column(DateTime(timezone=True), nullable=True)
+    )
+    zoho_po_id: Optional[str] = Field(default=None, max_length=100)
+    action_ledger_id: Optional[int] = Field(default=None, foreign_key="action_ledger.id", index=True)
+    agent_task_id: Optional[int] = Field(default=None, foreign_key="agent_tasks.id", index=True)
+    notes: Optional[str] = None
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class PurchaseOrderLine(SQLModel, table=True):
+    """One SKU line in a PurchaseOrder."""
+    __tablename__ = "purchase_order_lines"
+    __table_args__ = (
+        Index("ix_po_lines_po", "po_id"),
+        Index("ix_po_lines_product", "product_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    po_id: int = Field(foreign_key="purchase_orders.id", index=True)
+    product_id: Optional[int] = Field(default=None, foreign_key="products.id", index=True)
+    sku_snapshot: Optional[str] = Field(default=None, max_length=100)
+    product_name_snapshot: str = Field(max_length=200)
+    quantity_ordered: int = Field(default=0)
+    quantity_received: int = Field(default=0)
+    unit_cost: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False)
+    )
+    line_total: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(14, 2), nullable=False)
+    )
+
+
+class GoodsReceiptNote(SQLModel, table=True):
+    """GRN header — records one physical delivery against a PO.
+
+    Status: draft → verified → posted | discrepancy_flagged
+    """
+    __tablename__ = "goods_receipt_notes"
+    __table_args__ = (
+        UniqueConstraint("company_id", "grn_number", name="uq_grn_number"),
+        Index("ix_grn_company_status", "company_id", "status"),
+        Index("ix_grn_po", "po_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    grn_number: str = Field(max_length=50, index=True)
+    po_id: int = Field(foreign_key="purchase_orders.id", index=True)
+    received_by_user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    status: str = Field(default="draft", max_length=30)
+    has_discrepancy: bool = Field(default=False)
+    discrepancy_notes: Optional[str] = None
+    action_ledger_id: Optional[int] = Field(default=None, foreign_key="action_ledger.id", index=True)
+    agent_task_id: Optional[int] = Field(default=None, foreign_key="agent_tasks.id", index=True)
+    vehicle_number: Optional[str] = Field(default=None, max_length=30)
+    delivery_challan_number: Optional[str] = Field(default=None, max_length=100)
+    received_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+    updated_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )
+
+
+class GRNLine(SQLModel, table=True):
+    """One product line in a GRN — includes serial numbers and discrepancy detail."""
+    __tablename__ = "grn_lines"
+    __table_args__ = (
+        Index("ix_grn_lines_grn", "grn_id"),
+        Index("ix_grn_lines_product", "product_id"),
+        Index("ix_grn_lines_po_line", "po_line_id"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    grn_id: int = Field(foreign_key="goods_receipt_notes.id", index=True)
+    po_line_id: Optional[int] = Field(default=None, foreign_key="purchase_order_lines.id", index=True)
+    product_id: Optional[int] = Field(default=None, foreign_key="products.id", index=True)
+    sku_snapshot: Optional[str] = Field(default=None, max_length=100)
+    product_name_snapshot: str = Field(max_length=200)
+    quantity_ordered: int = Field(default=0)
+    quantity_received: int = Field(default=0)
+    quantity_accepted: int = Field(default=0)
+    quantity_rejected: int = Field(default=0)
+    discrepancy_type: Optional[str] = Field(default=None, max_length=50)
+    # short_delivery | excess_delivery | model_mismatch | damage | serial_mismatch
+    discrepancy_notes: Optional[str] = None
+    serial_numbers: list = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    unit_cost: Decimal = Field(
+        default=Decimal("0.00"), sa_column=Column(Numeric(12, 2), nullable=False)
+    )
+    created_at: datetime = Field(
+        default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False)
+    )

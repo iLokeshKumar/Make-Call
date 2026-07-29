@@ -11,3 +11,4 @@ from .request_metrics import (  # noqa: F401
     get_availability_snapshot,
     record_response,
 )
+from .tool_call_tracer import trace_tool_call  # noqa: F401

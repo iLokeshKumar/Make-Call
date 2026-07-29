@@ -59,6 +59,12 @@ from routes import integrations as integrations_router
 from routes import mcp_connections as mcp_connections_router
 from routes import apollo_oauth as apollo_oauth_router
 from routes import zoho_oauth as zoho_oauth_router
+from routes import hubspot_oauth as hubspot_oauth_router
+from routes import linkedin_oauth as linkedin_oauth_router
+from routes import salesforce_oauth as salesforce_oauth_router
+from routes import instantly_oauth as instantly_oauth_router
+from routes import microsoft_oauth as microsoft_oauth_router
+from routes import tool_logs as tool_logs_router
 from routes import inventory_sources as inventory_sources_router
 from routes import orders as orders_router
 from routes import invoices as invoices_router
@@ -67,6 +73,10 @@ from routes import tickets as tickets_router
 from routes import installations as installations_router
 from routes import contacts as contacts_router
 from routes import tts as tts_router
+from routes import collections as collections_router
+from routes import books_sync as books_sync_router
+from routes import scheme_claims as scheme_claims_router
+from routes import purchase_suite as purchase_suite_router
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
@@ -891,6 +901,12 @@ app.include_router(integrations_router.router)
 app.include_router(mcp_connections_router.router)
 app.include_router(apollo_oauth_router.router)
 app.include_router(zoho_oauth_router.router)
+app.include_router(hubspot_oauth_router.router)
+app.include_router(linkedin_oauth_router.router)
+app.include_router(salesforce_oauth_router.router)
+app.include_router(instantly_oauth_router.router)
+app.include_router(microsoft_oauth_router.router)
+app.include_router(tool_logs_router.router)
 app.include_router(inventory_sources_router.router, prefix="/crm")
 app.include_router(orders_router.router, prefix="/crm")
 app.include_router(invoices_router.router, prefix="/crm")
@@ -898,6 +914,10 @@ app.include_router(payments_router.router, prefix="/crm")
 app.include_router(tickets_router.router, prefix="/crm")
 app.include_router(installations_router.router, prefix="/crm")
 app.include_router(contacts_router.router, prefix="/crm")
+app.include_router(collections_router.router, prefix="/crm")
+app.include_router(books_sync_router.router, prefix="/crm")
+app.include_router(scheme_claims_router.router, prefix="/crm")
+app.include_router(purchase_suite_router.router, prefix="/crm")
 app.include_router(tts_router.router)
 
 try:

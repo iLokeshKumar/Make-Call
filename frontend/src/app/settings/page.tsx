@@ -18,6 +18,8 @@ import AgentTemplatesTab from "@/components/settings/AgentTemplatesTab";
 import IntegrationsTab from "@/components/settings/IntegrationsTab";
 import CostTab from "@/components/settings/CostTab";
 import FeatureFlagsTab from "@/components/settings/FeatureFlagsTab";
+import ToolCallLogsTab from "@/components/settings/ToolCallLogsTab";
+import MCPConnectionsTab from "@/components/settings/MCPConnectionsTab";
 
 const themeOptions = [
     { value: "light", label: "Light", icon: Sun },
@@ -1063,6 +1065,11 @@ export default function SettingsPage() {
                 {/* Feature Flags Tab */}
                 {activeSection === "feature_flags" && hasAdminAccess && (
                     <FeatureFlagsTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Tool Call Logs Tab */}
+                {activeSection === "tool_logs" && hasAdminAccess && (
+                    <ToolCallLogsTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Profile Section */}
@@ -2538,55 +2545,7 @@ export default function SettingsPage() {
 
                 {/* MCP Connections Tab */}
                 {activeSection === "mcp_connections" && hasAdminAccess && (
-                    <div className="space-y-6">
-                        <div className="rounded-2xl glass p-6 border border-white/40 dark:border-white/10 space-y-5">
-                            <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-3">
-                                    <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-gradient-to-br from-violet-500 to-fuchsia-600">
-                                        <Network className="h-5 w-5 text-white" />
-                                    </div>
-                                    <div>
-                                        <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">MCP Connections</h3>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400">Connect Apollo, Zoho CRM, and custom MCP servers to your AI agents</p>
-                                    </div>
-                                </div>
-                                <button onClick={() => { setMcpError(null); setMcpForm({ name: "", provider: "apollo", url: "", transport: "http", auth_type: "oauth2", capabilities_json: [], enabled: true, priority: 100 }); setMcpModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-violet-600 text-white text-sm font-semibold hover:bg-violet-700 transition-colors">
-                                    <Plus className="h-4 w-4" /> Add Server
-                                </button>
-                            </div>
-                            {mcpServers.length === 0 ? (
-                                <p className="text-sm text-slate-400 py-4 text-center">No MCP servers configured. Add Apollo or Zoho to get started.</p>
-                            ) : (
-                                <div className="overflow-x-auto">
-                                    <table className="w-full text-sm">
-                                        <thead><tr className="border-b border-slate-200 dark:border-slate-700 text-xs font-semibold text-slate-500 uppercase"><th className="text-left pb-2 pr-4">Name</th><th className="text-left pb-2 pr-4">Provider</th><th className="text-left pb-2 pr-4">URL</th><th className="text-left pb-2 pr-4">Health</th><th className="text-left pb-2">Actions</th></tr></thead>
-                                        <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
-                                            {mcpServers.map(s => (
-                                                <tr key={s.id}>
-                                                    <td className="py-3 pr-4 font-medium text-slate-900 dark:text-slate-100">{s.name}</td>
-                                                    <td className="py-3 pr-4"><span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-violet-100 dark:bg-violet-900/30 text-violet-700 dark:text-violet-300">{s.provider}</span></td>
-                                                    <td className="py-3 pr-4 font-mono text-xs text-slate-500 max-w-xs truncate">{s.url}</td>
-                                                    <td className="py-3 pr-4"><span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${s.last_health_status === "healthy" ? "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400" : s.last_health_status === "unhealthy" ? "bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-400" : "bg-slate-100 text-slate-500 dark:bg-slate-700"}`}>{s.last_health_status ?? "unknown"}</span></td>
-                                                    <td className="py-3">
-                                                        <div className="flex items-center gap-1">
-                                                            <button title="Discover tools" disabled={mcpDiscovering === s.id} onClick={async () => { setMcpDiscovering(s.id); await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}/discover`, { method: "POST" }).catch(() => {}); setMcpDiscovering(null); apiFetch(`${API_BASE}/mcp-connections/registry`).then(r => r.ok ? r.json() : []).then(d => setMcpServers(d as MCPServer[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors disabled:opacity-50">{mcpDiscovering === s.id ? <Loader2 className="h-4 w-4 animate-spin" /> : <RefreshCw className="h-4 w-4" />}</button>
-                                                            <button title="Ping health" onClick={async () => { await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}/health`, { method: "POST" }).catch(() => {}); apiFetch(`${API_BASE}/mcp-connections/registry`).then(r => r.ok ? r.json() : []).then(d => setMcpServers(d as MCPServer[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"><Play className="h-4 w-4" /></button>
-                                                            <button title="Edit" onClick={() => { setMcpError(null); setMcpForm({ name: s.name, provider: s.provider, url: s.url, transport: s.transport, auth_type: s.auth_type, capabilities_json: s.capabilities_json, enabled: s.enabled, priority: s.priority }); setMcpModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
-                                                            <button title="Delete" onClick={async () => { if (!confirm(`Delete "${s.name}"?`)) return; await apiFetch(`${API_BASE}/mcp-connections/registry/${s.id}`, { method: "DELETE" }); setMcpServers(p => p.filter(x => x.id !== s.id)); }} className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"><Trash2 className="h-4 w-4" /></button>
-                                                        </div>
-                                                    </td>
-                                                </tr>
-                                            ))}
-                                        </tbody>
-                                    </table>
-                                </div>
-                            )}
-                            <div className="pt-2 border-t border-slate-200 dark:border-slate-700 text-xs text-slate-400 space-y-1">
-                                <p>Apollo OAuth: <a href="/settings?section=profile" className="text-violet-500 underline">Connect Apollo</a> via Settings → Integration Keys → Apollo OAuth, then add it here.</p>
-                                <p>Zoho OAuth: visit <span className="font-mono">{API_BASE}/crm/zoho/auth-url</span> to start the Zoho CRM connection flow.</p>
-                            </div>
-                        </div>
-                    </div>
+                    <MCPConnectionsTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Inventory Sources Tab */}
