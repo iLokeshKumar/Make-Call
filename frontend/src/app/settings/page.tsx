@@ -7,6 +7,7 @@ import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE, CRM_BASE } from "@/lib/api";
 import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import SettingsHome from "@/components/settings/SettingsHome";
 import SectionHeader from "@/components/settings/SectionHeader";
@@ -20,6 +21,8 @@ import CostTab from "@/components/settings/CostTab";
 import FeatureFlagsTab from "@/components/settings/FeatureFlagsTab";
 import ToolCallLogsTab from "@/components/settings/ToolCallLogsTab";
 import MCPConnectionsTab from "@/components/settings/MCPConnectionsTab";
+import CollectionsTab from "@/components/settings/CollectionsTab";
+import PurchaseIndentsTab from "@/components/settings/PurchaseIndentsTab";
 
 const themeOptions = [
     { value: "light", label: "Light", icon: Sun },
@@ -27,8 +30,6 @@ const themeOptions = [
     { value: "system", label: "System", icon: Monitor },
 ] as const;
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
-const CRM_BASE = `${API_BASE}/crm`;
 
 const COMPANY_SETTING_KEYS = {
     systemInstruction: ["SYSTEM_INSTRUCTION", "system_instruction"],
@@ -2546,6 +2547,28 @@ export default function SettingsPage() {
                 {/* MCP Connections Tab */}
                 {activeSection === "mcp_connections" && hasAdminAccess && (
                     <MCPConnectionsTab sessionTimeout={sessionTimeout} />
+                )}
+
+                {/* Finance Tabs */}
+                {activeSection === "collections" && hasAdminAccess && (
+                    <CollectionsTab sessionTimeout={sessionTimeout} />
+                )}
+                {activeSection === "scheme_claims" && hasAdminAccess && (
+                    <div className="py-12 text-center text-slate-400 text-sm">Scheme Claims tab — coming next</div>
+                )}
+                {activeSection === "books_sync" && hasAdminAccess && (
+                    <div className="py-12 text-center text-slate-400 text-sm">Books Sync tab — coming next</div>
+                )}
+
+                {/* Purchase Tabs */}
+                {activeSection === "purchase_indents" && hasAdminAccess && (
+                    <PurchaseIndentsTab sessionTimeout={sessionTimeout} />
+                )}
+                {activeSection === "purchase_orders" && hasAdminAccess && (
+                    <div className="py-12 text-center text-slate-400 text-sm">Purchase Orders tab — coming next</div>
+                )}
+                {activeSection === "grn" && hasAdminAccess && (
+                    <div className="py-12 text-center text-slate-400 text-sm">GRN & Receiving tab — coming next</div>
                 )}
 
                 {/* Inventory Sources Tab */}

@@ -2,6 +2,7 @@ import {
   Sun, Mail, Brain, Zap, KeyRound, Database, Webhook, Layers,
   ShieldCheck, CheckCircle2, Sparkles, Gauge, Server, Users2,
   PhoneForwarded, Settings2, Calendar, BarChart3, Network, Package, Activity,
+  Wallet, ClipboardList, BookOpen, ShoppingCart, FileText, Truck,
 } from "lucide-react";
 import type { SectionDef } from "./SettingsCard";
 
@@ -189,6 +190,64 @@ export const SECTION_DEFS: SectionDef[] = [
     icon: Activity,
     group: "operations",
     iconGradient: "from-violet-500 to-purple-600",
+    adminOnly: true,
+  },
+
+  // ── Finance ──────────────────────────────────────
+  {
+    id: "collections",
+    label: "Collections",
+    description: "AR dunning queue · approve / reject dunning actions · KPI dashboard",
+    icon: Wallet,
+    group: "finance",
+    iconGradient: "from-rose-500 to-red-600",
+    adminOnly: true,
+  },
+  {
+    id: "scheme_claims",
+    label: "Scheme Claims",
+    description: "Dealer scheme claim proposals · approval workflow",
+    icon: ClipboardList,
+    group: "finance",
+    iconGradient: "from-amber-500 to-orange-500",
+    adminOnly: true,
+  },
+  {
+    id: "books_sync",
+    label: "Books Sync",
+    description: "Sync invoices, payments & orders with Zoho Books / Tally",
+    icon: BookOpen,
+    group: "finance",
+    iconGradient: "from-teal-500 to-emerald-600",
+    adminOnly: true,
+  },
+
+  // ── Purchase ─────────────────────────────────────
+  {
+    id: "purchase_indents",
+    label: "Purchase Indents",
+    description: "Approve or reject stock indent requests from the field",
+    icon: ShoppingCart,
+    group: "purchase",
+    iconGradient: "from-blue-500 to-indigo-600",
+    adminOnly: true,
+  },
+  {
+    id: "purchase_orders",
+    label: "Purchase Orders",
+    description: "PO pipeline — generated, acknowledged, in-transit",
+    icon: FileText,
+    group: "purchase",
+    iconGradient: "from-violet-500 to-purple-600",
+    adminOnly: true,
+  },
+  {
+    id: "grn",
+    label: "GRN & Receiving",
+    description: "Goods receipt notes · discrepancy resolution",
+    icon: Truck,
+    group: "purchase",
+    iconGradient: "from-slate-500 to-slate-700",
     adminOnly: true,
   },
 ];

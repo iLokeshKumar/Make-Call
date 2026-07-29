@@ -250,7 +250,31 @@ const CONNECTORS: ConnectorDef[] = [
   },
 ];
 
-const COMING_SOON: { name: string; icon: React.ReactNode; iconBg: string; tagline: string }[] = [];
+const COMING_SOON: { name: string; icon: React.ReactNode; iconBg: string; tagline: string }[] = [
+  {
+    name: "RocketReach",
+    tagline: "Contact & company enrichment — email, phone, LinkedIn from 700M+ profiles",
+    iconBg: "bg-orange-50 dark:bg-orange-900/20",
+    icon: (
+      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
+        <rect width="40" height="40" rx="8" fill="#FF6B2B" />
+        <path d="M12 28 L20 10 L24 18 L28 14" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="28" cy="14" r="3" fill="white" />
+      </svg>
+    ),
+  },
+  {
+    name: "Tally (Books & Accounting)",
+    tagline: "Sync vouchers, ledgers & stock items with Tally Prime via local MCP bridge",
+    iconBg: "bg-blue-50 dark:bg-blue-900/20",
+    icon: (
+      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
+        <rect width="40" height="40" rx="8" fill="#1B4FBB" />
+        <text x="20" y="27" textAnchor="middle" fill="white" fontSize="13" fontWeight="bold" fontFamily="Arial">T</text>
+      </svg>
+    ),
+  },
+];
 
 // ─── ConnectorCard ─────────────────────────────────────────────────────────────
 
