@@ -31,8 +31,10 @@ type ConnectorDef = {
   icon: React.ReactNode;
   iconBg: string;
   authType?: "oauth" | "apikey";
-  authUrl?: string;       // oauth only
-  connectUrl?: string;    // apikey only — POST {api_key}
+  authUrl?: string;           // oauth only
+  connectUrl?: string;        // apikey only — POST body
+  apiKeyJsonField?: string;   // key name in the POST body (default: "api_key")
+  apiKeyPlaceholder?: string; // input placeholder text
   statusUrl: string;
   disconnectUrl: string;
   capabilities: string[];
@@ -223,6 +225,57 @@ const CONNECTORS: ConnectorDef[] = [
     docsUrl: "https://console.cloud.google.com/",
   },
   {
+    id: "rocketreach",
+    name: "RocketReach",
+    tagline: "Contact & company enrichment — verified emails, phones, LinkedIn from 700M+ profiles",
+    authType: "apikey",
+    connectUrl: `${API_BASE}/crm/rocketreach/connect`,
+    statusUrl: `${API_BASE}/crm/rocketreach/status`,
+    disconnectUrl: `${API_BASE}/crm/rocketreach/disconnect`,
+    icon: (
+      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
+        <rect width="40" height="40" rx="8" fill="#FF6B2B" />
+        <path d="M12 28 L20 10 L24 18 L28 14" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
+        <circle cx="28" cy="14" r="3" fill="white" />
+      </svg>
+    ),
+    iconBg: "bg-orange-50 dark:bg-orange-900/20",
+    capabilities: [
+      "Enrich leads with verified work emails & direct dials",
+      "Search 700M+ professional profiles globally",
+      "Find decision-makers by title + company",
+      "Used by Rio enrichment agent during calls",
+    ],
+    envVarsRequired: [],
+    docsUrl: "https://rocketreach.co/api",
+  },
+  {
+    id: "tally",
+    name: "Tally Prime (Books)",
+    tagline: "Post vouchers from Zoho Books directly to Tally Prime via local gateway",
+    authType: "apikey",
+    connectUrl: `${API_BASE}/crm/tally/connect`,
+    statusUrl: `${API_BASE}/crm/tally/status`,
+    disconnectUrl: `${API_BASE}/crm/tally/disconnect`,
+    apiKeyJsonField: "gateway_url",
+    apiKeyPlaceholder: "http://localhost:9000",
+    icon: (
+      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
+        <rect width="40" height="40" rx="8" fill="#1B4FBB" />
+        <text x="20" y="27" textAnchor="middle" fill="white" fontSize="14" fontWeight="bold" fontFamily="Arial">T</text>
+      </svg>
+    ),
+    iconBg: "bg-blue-50 dark:bg-blue-900/20",
+    capabilities: [
+      "Post sales invoices, receipts & payments to Tally",
+      "Works with Tally Prime 2.x via Gateway of Tally (port 9000)",
+      "Accountant reviews in Books Sync tab before posting",
+      "Voucher-level audit trail with retry on failure",
+    ],
+    envVarsRequired: [],
+    docsUrl: "https://help.tallysolutions.com/",
+  },
+  {
     id: "microsoft",
     name: "Microsoft 365",
     tagline: "Outlook email, OneDrive files, and Teams calendar — one connection",
@@ -250,31 +303,7 @@ const CONNECTORS: ConnectorDef[] = [
   },
 ];
 
-const COMING_SOON: { name: string; icon: React.ReactNode; iconBg: string; tagline: string }[] = [
-  {
-    name: "RocketReach",
-    tagline: "Contact & company enrichment — email, phone, LinkedIn from 700M+ profiles",
-    iconBg: "bg-orange-50 dark:bg-orange-900/20",
-    icon: (
-      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
-        <rect width="40" height="40" rx="8" fill="#FF6B2B" />
-        <path d="M12 28 L20 10 L24 18 L28 14" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" />
-        <circle cx="28" cy="14" r="3" fill="white" />
-      </svg>
-    ),
-  },
-  {
-    name: "Tally (Books & Accounting)",
-    tagline: "Sync vouchers, ledgers & stock items with Tally Prime via local MCP bridge",
-    iconBg: "bg-blue-50 dark:bg-blue-900/20",
-    icon: (
-      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
-        <rect width="40" height="40" rx="8" fill="#1B4FBB" />
-        <text x="20" y="27" textAnchor="middle" fill="white" fontSize="13" fontWeight="bold" fontFamily="Arial">T</text>
-      </svg>
-    ),
-  },
-];
+const COMING_SOON: { name: string; icon: React.ReactNode; iconBg: string; tagline: string }[] = [];
 
 // ─── ConnectorCard ─────────────────────────────────────────────────────────────
 
@@ -364,7 +393,7 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
       const res = await apiFetch(connector.connectUrl!, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ api_key: apiKeyInput.trim() }),
+        body: JSON.stringify({ [connector.apiKeyJsonField ?? "api_key"]: apiKeyInput.trim() }),
       });
       if (res.status === 401) { sessionTimeout?.(); setStatus("disconnected"); return; }
       if (!res.ok) {
@@ -519,7 +548,7 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
               value={apiKeyInput}
               onChange={e => setApiKeyInput(e.target.value)}
               onKeyDown={e => e.key === "Enter" && handleConnectApiKey()}
-              placeholder="Paste your API key…"
+              placeholder={connector.apiKeyPlaceholder ?? "Paste your API key…"}
               className="flex-1 px-3 py-2 rounded-lg border border-slate-300 dark:border-slate-600 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 font-mono focus:outline-none focus:ring-2 focus:ring-amber-500"
               autoFocus
             />

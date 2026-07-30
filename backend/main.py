@@ -77,6 +77,8 @@ from routes import collections as collections_router
 from routes import books_sync as books_sync_router
 from routes import scheme_claims as scheme_claims_router
 from routes import purchase_suite as purchase_suite_router
+from routes import rocketreach_oauth as rocketreach_oauth_router
+from routes import tally_connector as tally_connector_router
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
@@ -918,6 +920,8 @@ app.include_router(collections_router.router, prefix="/crm")
 app.include_router(books_sync_router.router, prefix="/crm")
 app.include_router(scheme_claims_router.router, prefix="/crm")
 app.include_router(purchase_suite_router.router, prefix="/crm")
+app.include_router(rocketreach_oauth_router.router)
+app.include_router(tally_connector_router.router)
 app.include_router(tts_router.router)
 
 try:

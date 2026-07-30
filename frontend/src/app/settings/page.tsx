@@ -22,6 +22,8 @@ import FeatureFlagsTab from "@/components/settings/FeatureFlagsTab";
 import ToolCallLogsTab from "@/components/settings/ToolCallLogsTab";
 import MCPConnectionsTab from "@/components/settings/MCPConnectionsTab";
 import CollectionsTab from "@/components/settings/CollectionsTab";
+import SchemeClaimsTab from "@/components/settings/SchemeClaimsTab";
+import BooksSyncTab from "@/components/settings/BooksSyncTab";
 import PurchaseIndentsTab from "@/components/settings/PurchaseIndentsTab";
 
 const themeOptions = [
@@ -2554,10 +2556,10 @@ export default function SettingsPage() {
                     <CollectionsTab sessionTimeout={sessionTimeout} />
                 )}
                 {activeSection === "scheme_claims" && hasAdminAccess && (
-                    <div className="py-12 text-center text-slate-400 text-sm">Scheme Claims tab — coming next</div>
+                    <SchemeClaimsTab sessionTimeout={sessionTimeout} />
                 )}
                 {activeSection === "books_sync" && hasAdminAccess && (
-                    <div className="py-12 text-center text-slate-400 text-sm">Books Sync tab — coming next</div>
+                    <BooksSyncTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Purchase Tabs */}
