@@ -589,6 +589,166 @@ async def _execute_with_session(
             product_name=product_name,
         )
 
+    if tool_name == "check_guardrails":
+        return check_guardrails(
+            requested_discount_percent=_safe_float_arg(arguments.get("requested_discount_percent")),
+        )
+
+    if tool_name == "book_meeting":
+        return await book_meeting(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
+            proposed_time=arguments.get("proposed_time", ""),
+            meeting_type=arguments.get("meeting_type", "demo"),
+            lead_email=arguments.get("lead_email"),
+        )
+
+    if tool_name == "get_call_latency_summary":
+        return get_call_latency_summary(
+            interaction_id=_safe_int_arg(arguments.get("interaction_id")),
+        )
+
+    if tool_name == "get_or_create_lead":
+        return get_or_create_lead(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            name=arguments.get("name", ""),
+            phone=arguments.get("phone", ""),
+            email=arguments.get("email"),
+        )
+
+    if tool_name == "sync_product_catalog":
+        return sync_product_catalog(
+            session=session,
+            company_id=company_id,
+        )
+
+    if tool_name == "book_demo":
+        return await book_demo(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
+            name=arguments.get("name", ""),
+            phone=arguments.get("phone", ""),
+            city=arguments.get("city"),
+            state=arguments.get("state"),
+            pincode=arguments.get("pincode"),
+            demo_date=arguments.get("demo_date", ""),
+            products=arguments.get("products", ""),
+            demo_type=arguments.get("demo_type", "Offline"),
+            email=arguments.get("email"),
+            notes=arguments.get("notes"),
+        )
+
+    if tool_name == "send_communication":
+        return send_communication(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            lead_id=_safe_int_arg(arguments.get("lead_id")),
+            channels=list(arguments.get("channels") or []),
+            content=arguments.get("content", ""),
+            subject=arguments.get("subject"),
+            email=arguments.get("email"),
+            phone=arguments.get("phone"),
+        )
+
+    if tool_name == "get_google_auth_url":
+        return get_google_auth_url(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+        )
+
+    if tool_name == "submit_google_auth_code":
+        return submit_google_auth_code(
+            session=session,
+            company_id=company_id,
+            actor_user_id=user.id,
+            code=arguments.get("code", ""),
+        )
+
+    if tool_name == "calendar_book":
+        try:
+            from routes.calendar import get_company_calendar_credentials
+            from google.oauth2.credentials import Credentials  # type: ignore
+            import googleapiclient.discovery as _gapi  # type: ignore
+            from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+            import uuid as _uuid
+
+            creds = get_company_calendar_credentials(session, company_id)
+            if not creds:
+                return {"error": "Google Calendar not connected. Ask the user to connect it in Settings."}
+
+            service = _gapi.build("calendar", "v3", credentials=creds)
+
+            # Parse proposed_time — expect ISO 8601 or human string like "2024-06-10T15:00:00"
+            proposed_time_str = arguments.get("proposed_time", "")
+            try:
+                start = _dt.fromisoformat(proposed_time_str.replace("Z", "+00:00"))
+            except Exception:
+                start = _dt.now(_tz.utc) + _td(hours=24)
+
+            end = start + _td(minutes=int(arguments.get("duration_minutes", 30)))
+
+            event = {
+                "summary": arguments.get("title", "Meeting with AI Agent"),
+                "description": arguments.get("notes", ""),
+                "start": {"dateTime": start.isoformat(), "timeZone": "UTC"},
+                "end": {"dateTime": end.isoformat(), "timeZone": "UTC"},
+            }
+            attendee_email = arguments.get("attendee_email")
+            if attendee_email:
+                event["attendees"] = [{"email": attendee_email}]
+
+            created = service.events().insert(calendarId="primary", body=event, sendUpdates="all").execute()
+            return {
+                "calendar_event_id": created.get("id"),
+                "calendar_link": created.get("htmlLink"),
+                "start_time": start.isoformat(),
+                "end_time": end.isoformat(),
+                "status": "booked",
+            }
+        except Exception as exc:
+            logger.error("[calendar_book] Failed: %s", exc, exc_info=True)
+            return {"error": f"Calendar booking failed: {exc}"}
+
+    if tool_name == "warm_transfer":
+        from credentials_service import get_company_setting_value, get_user_setting_value
+
+        user_transfer_to = get_user_setting_value(session, user.id, "WARM_TRANSFER_NUMBER") or ""
+        user_transfer_name = get_user_setting_value(session, user.id, "WARM_TRANSFER_NAME") or ""
+        company_transfer_to = get_company_setting_value(session, company_id, "WARM_TRANSFER_NUMBER") or ""
+        company_transfer_name = get_company_setting_value(session, company_id, "WARM_TRANSFER_NAME") or ""
+        configured_transfer_to = user_transfer_to or company_transfer_to
+        configured_transfer_name = user_transfer_name or company_transfer_name
+        transfer_to = configured_transfer_to
+        reason = arguments.get("reason") or ""
+        if not transfer_to:
+            return {
+                "error": "Warm transfer number is not configured. Add WARM_TRANSFER_NUMBER in Settings > Integration Keys or My Email > My Warm Transfer.",
+                "tool": "warm_transfer",
+            }
+        try:
+            from services.call.warm_transfer_service import execute_warm_transfer
+            interaction_id_int = int(interaction_id) if interaction_id else 0
+            return execute_warm_transfer(
+                session=session,
+                company_id=company_id,
+                actor_user_id=user.id,
+                interaction_id=interaction_id_int,
+                transfer_to=transfer_to,
+                transfer_to_name=configured_transfer_name,
+                reason=reason,
+            )
+        except Exception as exc:
+            logger.error("[warm_transfer] Failed: %s", exc, exc_info=True)
+            return {"error": f"Warm transfer failed: {exc}", "tool": "warm_transfer"}
+
     # ── Dispatcher fast-path: delegate to registry if tool is registered ──────
     try:
         from mcp_tools.dispatcher import ToolDispatcher
@@ -605,22 +765,6 @@ async def _execute_with_session(
     except Exception as _disp_exc:
         logger.warning("[tool_adapter] dispatcher check failed, falling through: %s", _disp_exc)
     # ─────────────────────────────────────────────────────────────────────────
-
-    if tool_name == "check_guardrails":
-        return check_guardrails(
-            requested_discount_percent=_safe_float_arg(arguments.get("requested_discount_percent")),
-        )
-
-    if tool_name == "book_meeting":
-        return await book_meeting(
-            session=session,
-            company_id=company_id,
-            actor_user_id=user.id,
-            lead_id=_safe_int_arg(arguments.get("lead_id")),
-            proposed_time=arguments.get("proposed_time", ""),
-            meeting_type=arguments.get("meeting_type", "demo"),
-            lead_email=arguments.get("lead_email"),
-        )
 
     if tool_name == "get_call_latency_summary":
         return get_call_latency_summary(

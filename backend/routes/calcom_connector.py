@@ -40,7 +40,7 @@ from database import get_session
 from models.models import ProviderCredential, User, utc_now
 from models.mcp_server import MCPServer, MCPServerCreate
 from services.mcp import registry_service
-from services.mcp.connection_service import discover_and_cache_tools
+from services.mcp.connection_service import connect_server, discover_and_cache_tools
 from mcp_tools.tool_catalog import invalidate_connections_cache as _invalidate_tool_cache
 from services.mcp.dcr_client import (
     build_auth_url,
@@ -334,12 +334,42 @@ async def calcom_callback(
 
 
 @router.get("/status")
-def status(
+async def status(
     current_user: User = Depends(get_current_user),
     session: Session = Depends(get_session),
 ):
     token = _get(session, current_user.company_id, "access_token")
-    return {"connected": bool(token), "mcp_url": _MCP_URL}
+    if not token:
+        return {"connected": False, "mcp_url": _MCP_URL}
+
+    server = session.exec(
+        select(MCPServer).where(
+            MCPServer.company_id == current_user.company_id,
+            MCPServer.provider == _PROVIDER,
+        )
+    ).first()
+    if not server:
+        return {"connected": False, "mcp_url": _MCP_URL, "error": "MCP server not registered"}
+
+    client = connect_server(server, token)
+    try:
+        tools = await client.list_tools()
+        return {
+            "connected": True,
+            "mcp_url": _MCP_URL,
+            "tool_count": len(tools),
+            "last_health_status": server.last_health_status,
+        }
+    except Exception as exc:
+        return {
+            "connected": False,
+            "mcp_url": _MCP_URL,
+            "last_health_status": "unhealthy",
+            "error": str(exc),
+        }
+    finally:
+        if hasattr(client, "close"):
+            await client.close()
 
 
 @router.delete("/disconnect")

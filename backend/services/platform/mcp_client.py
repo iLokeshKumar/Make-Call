@@ -173,13 +173,64 @@ class MCPStdioClient:
 
 def _build_headers(server: dict, auth_token: str | None = None) -> dict[str, str]:
     headers: dict[str, str] = {}
-    if auth_token:
-        headers["Authorization"] = f"Bearer {auth_token}"
-    elif server.get("auth_env"):
-        token = os.environ.get(server["auth_env"], "")
-        if token:
-            headers["Authorization"] = f"Bearer {token}"
+    if server.get("transport") == "rest":
+        headers["Content-Type"] = "application/json"
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        elif server.get("auth_env"):
+            token = os.environ.get(server["auth_env"], "")
+            if token:
+                headers["X-Api-Key"] = token
+    else:
+        if auth_token:
+            headers["Authorization"] = f"Bearer {auth_token}"
+        elif server.get("auth_env"):
+            token = os.environ.get(server["auth_env"], "")
+            if token:
+                headers["Authorization"] = f"Bearer {token}"
     return headers
+
+
+def _resolve_rest_tool_endpoint(prefix: str, tool_name: str, arguments: dict) -> tuple[str, str, dict]:
+    if prefix == "apollo":
+        if tool_name == "mixed_people_api_search":
+            return "POST", "/mixed_people/search", arguments
+        if tool_name == "contacts_search":
+            return "POST", "/contacts/search", arguments
+        if tool_name == "people_match":
+            return "POST", "/people/match", arguments
+        if tool_name == "organizations_enrich":
+            return "POST", "/organizations/enrich", arguments
+        if tool_name == "emailer_campaigns_add_contact_ids":
+            return "POST", "/emailer_campaigns/add_contact_ids", arguments
+        if tool_name == "analytics_sync_report":
+            return "POST", "/analytics/sync_report", arguments
+        raise ValueError(f"Apollo REST does not support tool '{tool_name}'")
+    raise ValueError(f"REST transport is not implemented for provider '{prefix}'")
+
+
+async def _call_rest_tool(
+    prefix: str,
+    server: dict,
+    tool_name: str,
+    arguments: dict,
+    auth_token: str | None = None,
+) -> dict:
+    method, path, body = _resolve_rest_tool_endpoint(prefix, tool_name, arguments)
+    url = server.get("rest_url", "").rstrip("/") + path
+    if not url:
+        return {"error": f"REST endpoint not configured for '{prefix}'"}
+
+    headers = _build_headers(server, auth_token)
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            resp = await client.request(method, url, headers=headers, json=body)
+            resp.raise_for_status()
+            return resp.json()
+    except Exception as exc:
+        logger.error("[mcp_client] REST %s %s failed: %s", prefix, url, exc)
+        return {"error": str(exc), "source": prefix}
+
 
 
 async def call_external_tool(
@@ -213,6 +264,12 @@ async def call_external_tool(
                 resolved_token = get_company_apollo_token(session, company_id)
         except Exception as exc:
             logger.warning("[mcp_client] Could not load Apollo token from DB: %s", exc)
+
+    if server.get("transport") == "rest":
+        result = await _call_rest_tool(prefix, server, tool_name, arguments, resolved_token)
+        if isinstance(result, dict) and "error" not in result:
+            return {"result": result, "source": prefix}
+        return result
 
     headers = _build_headers(server, resolved_token)
     try:

@@ -6,6 +6,7 @@ import os
 import secrets
 
 from database import engine, rls_company_id
+from models.models import Lead
 from schemas.tool_result import ToolResult
 from sqlmodel import Session
 
