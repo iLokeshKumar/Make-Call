@@ -37,6 +37,9 @@ audio/wavs/
 audio/w_audio/
 audio/dataset/
 audio/xtts_finetuned/
+audio/*.zip
+audio/**/*.wav
+audio/**/*.zip
 
 # Environment
 .env
