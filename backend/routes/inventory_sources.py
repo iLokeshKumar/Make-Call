@@ -12,6 +12,7 @@ GET    /inventory-sources/search       — search products
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import logging
 from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -28,6 +29,7 @@ from models.inventory_source import (
 from models.models import User
 
 router = APIRouter(prefix="/inventory-sources", tags=["Inventory Sources"])
+logger = logging.getLogger(__name__)
 
 
 def _utc_now() -> datetime:
@@ -58,6 +60,53 @@ def list_sources(
     ).all())
 
 
+@router.get("/google-sheets/tabs")
+async def list_google_sheet_tabs(
+    url: str = Query(..., description="Public Google Sheet URL"),
+    current_user: User = Depends(PermissionChecker("settings.manage_company")),
+):
+    """Return worksheet tabs for a public Google Sheet so the user can choose one."""
+    del current_user
+    import httpx as _httpx
+    from services.inventory.google_sheets_provider import _extract_sheet_id, list_public_worksheets
+
+    sheet_id = _extract_sheet_id(url)
+    if not sheet_id:
+        raise HTTPException(status_code=400, detail="Please paste a valid Google Sheets URL.")
+    try:
+        tabs = await list_public_worksheets(url)
+    except Exception as exc:
+        logger.warning("[inventory_sources] google sheet tab discovery failed sheet=%s error=%s", sheet_id, exc)
+        raise HTTPException(
+            status_code=422,
+            detail="Could not read worksheet tabs. Check that sharing is set to Anyone with the link can view.",
+        ) from exc
+
+    if not tabs:
+        # HTML parsing found nothing — verify the sheet is accessible by probing the CSV export.
+        # If reachable, return a single default tab so the UI can auto-select it.
+        try:
+            probe_url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
+            async with _httpx.AsyncClient(follow_redirects=True, timeout=10) as client:
+                probe = await client.get(probe_url)
+            if probe.status_code == 200 and probe.content:
+                tabs = [{"name": "Sheet 1", "gid": "0"}]
+                logger.info(
+                    "[inventory_sources] tab discovery found 0 tabs; sheet accessible — returning default tab sheet_id=%s",
+                    sheet_id,
+                )
+        except Exception as probe_exc:
+            logger.info("[inventory_sources] probe failed sheet_id=%s error=%s", sheet_id, probe_exc)
+
+    if not tabs:
+        raise HTTPException(
+            status_code=422,
+            detail="Could not read worksheet tabs. Check that sharing is set to Anyone with the link can view.",
+        )
+
+    return {"sheet_id": sheet_id, "tabs": tabs}
+
+
 @router.post("", response_model=InventorySourceRead)
 def create_source(
     data: InventorySourceCreate,
@@ -68,6 +117,16 @@ def create_source(
     session.add(source)
     session.commit()
     session.refresh(source)
+    logger.info(
+        "[inventory_sources] created id=%s company=%s name=%r type=%s priority=%s enabled=%s config_keys=%s",
+        source.id,
+        source.company_id,
+        source.name,
+        source.source_type,
+        source.priority,
+        source.enabled,
+        sorted((source.config_json or {}).keys()),
+    )
     return source
 
 
@@ -85,6 +144,16 @@ def update_source(
     session.add(source)
     session.commit()
     session.refresh(source)
+    logger.info(
+        "[inventory_sources] updated id=%s company=%s name=%r type=%s priority=%s enabled=%s config_keys=%s",
+        source.id,
+        source.company_id,
+        source.name,
+        source.source_type,
+        source.priority,
+        source.enabled,
+        sorted((source.config_json or {}).keys()),
+    )
     return source
 
 
@@ -106,9 +175,20 @@ async def sync_source(
     current_user: User = Depends(PermissionChecker("settings.manage_company")),
     session: Session = Depends(get_session),
 ):
-    """Trigger a sync for the given source (re-reads CSV cache, etc.)."""
+    """Trigger a sync — for Google Sheets invalidates the in-memory cache so
+    the next lookup re-fetches fresh data from the sheet."""
     source = _get_source(session, current_user.company_id, source_id)
-    # CSV provider is file-based; clearing its internal cache forces a re-read next call
+
+    if source.source_type == "google_sheets":
+        from services.inventory.google_sheets_provider import GoogleSheetsProvider, invalidate
+        tmp = GoogleSheetsProvider(config=source.config_json, priority=source.priority)
+        invalidate(tmp._cache_key)
+        logger.info(
+            "[inventory_sources] sync invalidated google_sheets cache source_id=%s cache_key=%s",
+            source.id,
+            tmp._cache_key,
+        )
+
     source.last_sync_at = _utc_now()
     session.add(source)
     session.commit()

@@ -17,6 +17,7 @@ import {
 } from "lucide-react";
 
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 import { apiFetch } from "@/utils/apiFetch";
 
 const API_BASE =
@@ -294,6 +295,7 @@ export default function EvalsPage() {
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <UserChip />
           <button
             onClick={() => setShowGuide((v) => !v)}
             className="flex items-center gap-1.5 rounded-xl border border-white/10 px-3 py-2 text-xs text-slate-400 hover:bg-white/5"

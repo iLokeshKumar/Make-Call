@@ -6,7 +6,19 @@ Call populate(registry) once at server startup (e.g. from AsyncMCPServer.__init_
 from __future__ import annotations
 
 from mcp_tools.registry import RegisteredTool, ToolRegistry
-from mcp_tools.specs import analytics, apollo, contacts, crm, enrichment, inventory, knowledge, post_call, schedule, zoho
+from mcp_tools.specs import (
+    analytics,
+    apollo,
+    capabilities,
+    contacts,
+    crm,
+    enrichment,
+    inventory,
+    knowledge,
+    post_call,
+    schedule,
+    zoho,
+)
 
 
 def populate(registry: ToolRegistry) -> None:
@@ -20,6 +32,7 @@ def populate(registry: ToolRegistry) -> None:
     _post_call(registry)
     _enrichment(registry)
     _contacts(registry)
+    _capabilities(registry)
 
 
 def _knowledge(registry: ToolRegistry) -> None:
@@ -170,4 +183,18 @@ def _schedule(registry: ToolRegistry) -> None:
             attr_name=attr,
             spec=spec,
             category="schedule",
+        ))
+
+
+def _capabilities(registry: ToolRegistry) -> None:
+    """Register connector-backed capability tools (Apollo/RocketReach, Zoho,
+    Cal.com/Calendly, inventory). Each routes through the capability router at
+    execution time, so connected apps are usable by dispatcher-based flows too."""
+    for spec in capabilities.all_capability_specs():
+        registry.register(RegisteredTool(
+            name=spec.name,
+            module_path="mcp_tools.executors.capabilities",
+            attr_name=spec.name,
+            spec=spec,
+            category=spec.category,
         ))

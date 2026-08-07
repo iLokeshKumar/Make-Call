@@ -1,12 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { Package, Plus, Trash2, Edit, Save, X, ChevronDown, ChevronUp, Tag, Layers } from "lucide-react";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { Package, Plus, Trash2, Edit, X, ChevronDown, ChevronUp, Layers, Upload, Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 import { useRouter } from "next/navigation";
 import Pagination from "@/components/Pagination";
 
 import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE, CRM_BASE } from "@/lib/api";
+import ImportProductsModal from "@/components/inventory/ImportProductsModal";
 interface Product {
     id?: number;
     name: string;
@@ -70,6 +73,7 @@ export default function InventoryPage() {
     const [products, setProducts] = useState<Product[]>([]);
     const [loading, setLoading] = useState(true);
     const [isModalOpen, setIsModalOpen] = useState(false);
+    const [isImportOpen, setIsImportOpen] = useState(false);
     const [editingProduct, setEditingProduct] = useState<Product | null>(null);
     const [formData, setFormData] = useState<Product>(EMPTY_FORM);
 
@@ -78,8 +82,22 @@ export default function InventoryPage() {
     const itemsPerPage = 10;
     const totalPages = Math.ceil(totalProducts / itemsPerPage);
 
-    const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
-    const CRM_BASE = `${API_BASE}/crm`;
+    const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
+    const [bulkDeleting, setBulkDeleting] = useState(false);
+    const selectAllRef = useRef<HTMLInputElement>(null);
+
+    const pageIds = products.map(p => p.id).filter((id): id is number => id != null);
+    const allPageSelected = pageIds.length > 0 && pageIds.every(id => selectedIds.has(id));
+    const somePageSelected = pageIds.some(id => selectedIds.has(id));
+
+    useEffect(() => {
+        if (selectAllRef.current) {
+            selectAllRef.current.indeterminate = somePageSelected && !allPageSelected;
+        }
+    }, [somePageSelected, allPageSelected]);
+
+    
+    
 
     const fetchInventory = useCallback(async (page: number = 1) => {
         setLoading(true);
@@ -120,6 +138,42 @@ export default function InventoryPage() {
             setFormData(EMPTY_FORM);
         }
         setIsModalOpen(true);
+    };
+
+    const handleSelectAll = () => {
+        if (allPageSelected) {
+            setSelectedIds(prev => { const s = new Set(prev); pageIds.forEach(id => s.delete(id)); return s; });
+        } else {
+            setSelectedIds(prev => { const s = new Set(prev); pageIds.forEach(id => s.add(id)); return s; });
+        }
+    };
+
+    const handleSelectOne = (id: number) => {
+        setSelectedIds(prev => {
+            const s = new Set(prev);
+            s.has(id) ? s.delete(id) : s.add(id);
+            return s;
+        });
+    };
+
+    const handleBulkDelete = async () => {
+        if (selectedIds.size === 0) return;
+        if (!confirm(`Delete ${selectedIds.size} product${selectedIds.size > 1 ? "s" : ""}? This cannot be undone.`)) return;
+        setBulkDeleting(true);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/inventory/bulk`, {
+                method: "DELETE",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ ids: Array.from(selectedIds) }),
+            });
+            if (res.status === 401) { sessionTimeout(); return; }
+            setSelectedIds(new Set());
+            fetchInventory(currentPage);
+        } catch (error) {
+            console.error("Bulk delete failed:", error);
+        } finally {
+            setBulkDeleting(false);
+        }
     };
 
     const handleDelete = async (id: number) => {
@@ -175,21 +229,62 @@ export default function InventoryPage() {
                         Manage products, stock levels, and pricing for the Digital Sales Representative
                     </p>
                 </div>
-                <button
-                    onClick={() => handleOpenModal()}
-                    className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-6 py-3 font-semibold text-white shadow-lg shadow-violet-500/50 hover:shadow-xl hover:scale-105 transition-all duration-300"
-                >
-                    <Plus className="h-5 w-5" />
-                    <span>Add Product</span>
-                </button>
+                <div className="flex items-center gap-3">
+                    <UserChip />
+                    <button
+                        onClick={() => setIsImportOpen(true)}
+                        className="flex items-center space-x-2 rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-4 py-2.5 text-sm font-semibold text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700 transition-colors"
+                    >
+                        <Upload className="h-4 w-4" />
+                        <span>Import</span>
+                    </button>
+                    <button
+                        onClick={() => handleOpenModal()}
+                        className="flex items-center space-x-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-6 py-3 font-semibold text-white shadow-lg shadow-violet-500/50 hover:shadow-xl hover:scale-105 transition-all duration-300"
+                    >
+                        <Plus className="h-5 w-5" />
+                        <span>Add Product</span>
+                    </button>
+                </div>
             </div>
 
             {/* Inventory Table */}
             <div className="rounded-2xl glass border border-white/40 dark:border-white/10 overflow-hidden">
+                {/* Bulk action bar */}
+                {selectedIds.size > 0 && (
+                    <div className="flex items-center gap-3 px-5 py-2.5 bg-violet-50 dark:bg-violet-900/20 border-b border-violet-200 dark:border-violet-800">
+                        <span className="text-sm font-semibold text-violet-700 dark:text-violet-300">
+                            {selectedIds.size} selected
+                        </span>
+                        <button
+                            onClick={handleBulkDelete}
+                            disabled={bulkDeleting}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-600 text-white text-xs font-bold hover:bg-red-700 disabled:opacity-50 transition-colors"
+                        >
+                            {bulkDeleting ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+                            Delete selected
+                        </button>
+                        <button
+                            onClick={() => setSelectedIds(new Set())}
+                            className="text-xs text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
+                        >
+                            Clear
+                        </button>
+                    </div>
+                )}
                 <div className="overflow-x-auto">
                     <table className="w-full text-left">
                         <thead>
                             <tr className="border-b border-white/20 dark:border-white/10 bg-white/40 dark:bg-slate-800/40">
+                                <th className="pl-5 pr-2 py-4 w-10">
+                                    <input
+                                        ref={selectAllRef}
+                                        type="checkbox"
+                                        checked={allPageSelected}
+                                        onChange={handleSelectAll}
+                                        className="rounded border-slate-300 dark:border-slate-600 text-violet-600 focus:ring-violet-500 cursor-pointer"
+                                    />
+                                </th>
                                 <th className="px-6 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Product</th>
                                 <th className="px-5 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Brand / Line</th>
                                 <th className="px-5 py-4 text-sm font-bold text-slate-700 dark:text-slate-300">Category</th>
@@ -205,18 +300,28 @@ export default function InventoryPage() {
                             {loading ? (
                                 Array.from({ length: 5 }).map((_, i) => (
                                     <tr key={i} className="animate-pulse">
-                                        {Array.from({ length: 9 }).map((__, j) => (
+                                        {Array.from({ length: 10 }).map((__, j) => (
                                             <td key={j} className="px-5 py-4"><div className="h-4 bg-slate-200 dark:bg-slate-700 rounded-md" /></td>
                                         ))}
                                     </tr>
                                 ))
                             ) : products.length === 0 ? (
                                 <tr>
-                                    <td colSpan={9} className="px-6 py-12 text-center text-slate-500">No products found in catalog.</td>
+                                    <td colSpan={10} className="px-6 py-12 text-center text-slate-500">No products found in catalog.</td>
                                 </tr>
                             ) : (
                                 products.map((product) => (
-                                    <tr key={product.id} className="hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors">
+                                    <tr key={product.id} className={`hover:bg-white/40 dark:hover:bg-slate-800/40 transition-colors ${product.id && selectedIds.has(product.id) ? "bg-violet-50/60 dark:bg-violet-900/10" : ""}`}>
+                                        <td className="pl-5 pr-2 py-4 w-10">
+                                            {product.id && (
+                                                <input
+                                                    type="checkbox"
+                                                    checked={selectedIds.has(product.id)}
+                                                    onChange={() => handleSelectOne(product.id!)}
+                                                    className="rounded border-slate-300 dark:border-slate-600 text-violet-600 focus:ring-violet-500 cursor-pointer"
+                                                />
+                                            )}
+                                        </td>
                                         <td className="px-6 py-4">
                                             <div className="flex items-center space-x-3">
                                                 {product.image_url ? (
@@ -227,7 +332,7 @@ export default function InventoryPage() {
                                                     </div>
                                                 )}
                                                 <div className="min-w-0">
-                                                    <p className="font-bold text-slate-900 dark:text-slate-100 truncate max-w-[180px]">{product.name}</p>
+                                                    <p className="font-bold text-slate-900 dark:text-slate-100 truncate max-w-[180px]">{product.name || <span className="text-slate-400 font-normal italic">Unnamed</span>}</p>
                                                     {product.model_number && <p className="text-xs text-slate-500 truncate">{product.model_number}</p>}
                                                 </div>
                                             </div>
@@ -469,6 +574,13 @@ export default function InventoryPage() {
                         </div>
                     </div>
                 </div>
+            )}
+
+            {isImportOpen && (
+                <ImportProductsModal
+                    onClose={() => setIsImportOpen(false)}
+                    onDone={() => { setIsImportOpen(false); fetchInventory(); }}
+                />
             )}
         </div>
     );

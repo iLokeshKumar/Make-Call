@@ -37,7 +37,7 @@ export const SECTION_DEFS: SectionDef[] = [
   },
   {
     id: "telephony_config",
-    label: "Telephony & Voice Config",
+    label: "Telephony & Voice Configuration",
     description: "Engine, business hours, silence re-engage, ambient noise, ASR, agent greetings, calendar",
     icon: PhoneForwarded,
     group: "company",
@@ -103,7 +103,7 @@ export const SECTION_DEFS: SectionDef[] = [
   {
     id: "inventory_sources",
     label: "Inventory Sources",
-    description: "Pluggable product inventory: catalog, CSV, ERP API",
+    description: "Ongoing sync: Google Sheets, ERP API, CSV file sources",
     icon: Package,
     group: "integrations",
     iconGradient: "from-green-500 to-teal-600",

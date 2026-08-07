@@ -15,17 +15,24 @@ from services.inventory.base import InventoryProvider
 
 
 def _to_dict(p: Product) -> dict:
-    return {
+    d: dict = {
         "sku": p.sku or str(p.id),
         "name": p.name,
         "stock": p.stock,
-        "price": float(p.price),
+        "price": float(p.price) if p.price else None,
         "currency": p.currency,
         "category": p.category,
         "brand": p.brand,
         "description": p.description,
         "source": "db_product",
     }
+    if p.min_price:
+        d["min_price"] = float(p.min_price)
+    if p.mrp:
+        d["mrp"] = float(p.mrp)
+    if p.model_number:
+        d["model_number"] = p.model_number
+    return d
 
 
 class DbProductProvider(InventoryProvider):
@@ -49,7 +56,13 @@ class DbProductProvider(InventoryProvider):
             select(Product).where(
                 Product.company_id == self.company_id,
                 Product.is_active == True,
-                Product.name.icontains(query),
+                (
+                    Product.name.icontains(query)
+                    | Product.description.icontains(query)
+                    | Product.brand.icontains(query)
+                    | Product.category.icontains(query)
+                    | Product.model_number.icontains(query)
+                ),
             ).limit(20)
         ).all()
         return [_to_dict(p) for p in results]

@@ -14,6 +14,7 @@ import { useAuth } from "@/context/AuthContext";
 import { maskEmail, maskPhone } from "@/utils/security";
 import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE } from "@/lib/api";
 const navItems = [
   { name: "Dashboard", href: "/", icon: LayoutDashboard },
   { name: "Leads", href: "/leads", icon: Users },
@@ -48,7 +49,7 @@ const navItems = [
 export default function Sidebar() {
   const pathname = usePathname();
   const { user, logout, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+  
   const [isCollapsed, setIsCollapsed] = useState(false);
 
   // Resizing State

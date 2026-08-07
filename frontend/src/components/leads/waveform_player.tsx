@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2, Pause, Play, Volume2 } from "lucide-react";
 
 import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE } from "@/lib/api";
 type Word = { text: string; start: number; end: number };
 
 type TranscriptLine = {
@@ -26,7 +27,7 @@ type Props = {
   duration?: number | null;
 };
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+
 
 function parseTranscriptLines(raw: string | null | undefined): TranscriptLine[] {
   if (!raw) return [];

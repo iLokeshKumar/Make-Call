@@ -21,10 +21,13 @@ import CostTab from "@/components/settings/CostTab";
 import FeatureFlagsTab from "@/components/settings/FeatureFlagsTab";
 import ToolCallLogsTab from "@/components/settings/ToolCallLogsTab";
 import MCPConnectionsTab from "@/components/settings/MCPConnectionsTab";
+import UserChip from "@/components/UserChip";
 import CollectionsTab from "@/components/settings/CollectionsTab";
 import SchemeClaimsTab from "@/components/settings/SchemeClaimsTab";
 import BooksSyncTab from "@/components/settings/BooksSyncTab";
 import PurchaseIndentsTab from "@/components/settings/PurchaseIndentsTab";
+import PurchaseOrdersTab from "@/components/settings/PurchaseOrdersTab";
+import GRNTab from "@/components/settings/GRNTab";
 
 const themeOptions = [
     { value: "light", label: "Light", icon: Sun },
@@ -221,12 +224,46 @@ export default function SettingsPage() {
     const [mcpDiscovering, setMcpDiscovering] = useState<number | null>(null);
 
     // Inventory Sources tab
-    type InvSource = { id: number; name: string; source_type: string; priority: number; enabled: boolean; last_sync_at: string | null; created_at: string };
+    type InvSource = { id: number; name: string; source_type: string; priority: number; enabled: boolean; last_sync_at: string | null; created_at: string; config_json: Record<string, unknown> };
+    type InvSheetTab = { name: string; gid: string };
     const [invSources, setInvSources] = useState<InvSource[]>([]);
     const [invModal, setInvModal] = useState<InvSource | "new" | null>(null);
-    const [invForm, setInvForm] = useState({ name: "", source_type: "csv", priority: 80, config_json: "{}", enabled: true });
+    const [invForm, setInvForm] = useState({ name: "", source_type: "google_sheets", priority: 80, sheet_url: "", sheet_name: "", sheet_gid: "", csv_path: "", config_json: "{}", enabled: true });
+    const [invSheetTabs, setInvSheetTabs] = useState<InvSheetTab[]>([]);
+    const [invSheetLoading, setInvSheetLoading] = useState(false);
     const [invSaving, setInvSaving] = useState(false);
     const [invError, setInvError] = useState<string | null>(null);
+
+    const inspectInventorySheetTabs = async (sheetUrl = invForm.sheet_url) => {
+        const trimmedUrl = sheetUrl.trim();
+        if (!trimmedUrl) return;
+        setInvSheetLoading(true);
+        setInvError(null);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/inventory-sources/google-sheets/tabs?url=${encodeURIComponent(trimmedUrl)}`);
+            const body = await res.json();
+            if (!res.ok) {
+                setInvSheetTabs([]);
+                setInvError(body.detail ?? "Could not load worksheets from this Google Sheet.");
+                return;
+            }
+
+            const tabs = (body.tabs ?? []) as InvSheetTab[];
+            setInvSheetTabs(tabs);
+            if (tabs.length > 0) {
+                setInvForm(p => {
+                    if (p.sheet_gid && tabs.some(tab => tab.gid === p.sheet_gid)) return p;
+                    const preferred = tabs.find(tab => tab.name.toLowerCase() === "inventory") ?? tabs[0];
+                    return { ...p, sheet_name: preferred.name, sheet_gid: preferred.gid };
+                });
+            }
+        } catch {
+            setInvSheetTabs([]);
+            setInvError("Could not load worksheets from this Google Sheet.");
+        } finally {
+            setInvSheetLoading(false);
+        }
+    };
 
     // Company Prompts (in persona tab)
     type CompanyPromptVersion = { id: number; version: number; prompt_text: string; is_active: boolean; change_reason?: string | null; created_at?: string };
@@ -1008,13 +1045,16 @@ export default function SettingsPage() {
             <div className="space-y-6 pb-8 text-slate-800 dark:text-slate-100">
             {/* Header */}
             {activeSection === null && (
-                <div>
-                    <h1 className="text-4xl font-bold tracking-tight">
-                        <span className="gradient-text">Settings</span>
-                    </h1>
-                    <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
-                        Configure your CRM preferences and AI behavior
-                    </p>
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h1 className="text-2xl font-bold text-slate-900 dark:text-slate-100 tracking-tight">
+                            Settings
+                        </h1>
+                        <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">
+                            Configure your CRM preferences and AI behavior
+                        </p>
+                    </div>
+                    <UserChip />
                 </div>
             )}
 
@@ -1519,7 +1559,7 @@ export default function SettingsPage() {
                                     type="text"
                                     value={agentGreeting}
                                     onChange={(e) => setAgentGreeting(e.target.value)}
-                                    placeholder="Hello, I'm {agent_name} from {company_name}. Can you hear me okay?"
+                                    placeholder="Hello, I'm {agent_name} from {company_name}. How are you doing today?"
                                     className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
                                 />
                                 <p className="text-[10px] text-slate-400 mt-1">Used when lead name is unknown.</p>
@@ -1530,7 +1570,7 @@ export default function SettingsPage() {
                                     type="text"
                                     value={agentPersonalizedGreeting}
                                     onChange={(e) => setAgentPersonalizedGreeting(e.target.value)}
-                                    placeholder="Hello {lead_name}, this is {agent_name} from {company_name}. Can you hear me okay?"
+                                    placeholder="Hello {lead_name}, this is {agent_name} from {company_name}. How are you doing today?"
                                     className="w-full rounded-lg border border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900 px-3 py-2 text-sm outline-none focus:border-violet-400"
                                 />
                                 <p className="text-[10px] text-slate-400 mt-1">Used when the lead name is known.</p>
@@ -1672,6 +1712,7 @@ export default function SettingsPage() {
                                         <option value="inworld">Inworld</option>
                                         <option value="azure">Azure</option>
                                         <option value="vachana">Vachana</option>
+                                        <option value="voicebox">Voicebox (Local)</option>
                                     </select>
                                 </div>
 
@@ -1721,6 +1762,7 @@ export default function SettingsPage() {
                                         <option value="azure">Azure</option>
                                         <option value="kitten">Kitten (Local)</option>
                                         <option value="vachana">Vachana</option>
+                                        <option value="voicebox">Voicebox (Local)</option>
                                     </select>
                                 </div>
                             </div>
@@ -2567,10 +2609,10 @@ export default function SettingsPage() {
                     <PurchaseIndentsTab sessionTimeout={sessionTimeout} />
                 )}
                 {activeSection === "purchase_orders" && hasAdminAccess && (
-                    <div className="py-12 text-center text-slate-400 text-sm">Purchase Orders tab — coming next</div>
+                    <PurchaseOrdersTab sessionTimeout={sessionTimeout} />
                 )}
                 {activeSection === "grn" && hasAdminAccess && (
-                    <div className="py-12 text-center text-slate-400 text-sm">GRN & Receiving tab — coming next</div>
+                    <GRNTab sessionTimeout={sessionTimeout} />
                 )}
 
                 {/* Inventory Sources Tab */}
@@ -2584,10 +2626,10 @@ export default function SettingsPage() {
                                     </div>
                                     <div>
                                         <h3 className="text-lg font-bold text-slate-900 dark:text-slate-100">Inventory Sources</h3>
-                                        <p className="text-sm text-slate-500 dark:text-slate-400">The built-in Product catalog is always available. Add CSV or ERP sources to layer on top.</p>
+                                        <p className="text-sm text-slate-500 dark:text-slate-400">Configure ongoing sync sources — Google Sheets, ERP API, CSV file paths. For one-time uploads use Import on the Inventory page.</p>
                                     </div>
                                 </div>
-                                <button onClick={() => { setInvError(null); setInvForm({ name: "", source_type: "csv", priority: 80, config_json: "{}", enabled: true }); setInvModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors">
+                                <button onClick={() => { setInvError(null); setInvSheetTabs([]); setInvForm({ name: "", source_type: "google_sheets", priority: 80, sheet_url: "", sheet_name: "", sheet_gid: "", csv_path: "", config_json: "{}", enabled: true }); setInvModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors">
                                     <Plus className="h-4 w-4" /> Add Source
                                 </button>
                             </div>
@@ -2617,7 +2659,7 @@ export default function SettingsPage() {
                                                     <td className="py-3">
                                                         <div className="flex items-center gap-1">
                                                             <button title="Sync now" onClick={async () => { await apiFetch(`${CRM_BASE}/inventory-sources/${s.id}/sync`, { method: "POST" }).catch(() => {}); apiFetch(`${CRM_BASE}/inventory-sources`).then(r => r.ok ? r.json() : []).then(d => setInvSources(d as InvSource[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"><RotateCcw className="h-4 w-4" /></button>
-                                                            <button title="Edit" onClick={() => { setInvError(null); setInvForm({ name: s.name, source_type: s.source_type, priority: s.priority, config_json: "{}", enabled: s.enabled }); setInvModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
+                                                            <button title="Edit" onClick={() => { setInvError(null); setInvSheetTabs([]); setInvForm({ name: s.name, source_type: s.source_type, priority: s.priority, sheet_url: (s.config_json?.url as string) ?? "", sheet_name: (s.config_json?.sheet_name as string) ?? "", sheet_gid: (s.config_json?.gid as string) ?? "", csv_path: (s.config_json?.file_path as string) ?? "", config_json: JSON.stringify(s.config_json ?? {}), enabled: s.enabled }); setInvModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
                                                             <button title="Delete" onClick={async () => { if (!confirm(`Delete "${s.name}"?`)) return; await apiFetch(`${CRM_BASE}/inventory-sources/${s.id}`, { method: "DELETE" }); setInvSources(p => p.filter(x => x.id !== s.id)); }} className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"><Trash2 className="h-4 w-4" /></button>
                                                         </div>
                                                     </td>
@@ -2677,15 +2719,132 @@ export default function SettingsPage() {
                     <div className="p-6 space-y-4">
                         {invError && <div className="text-sm text-red-600 bg-red-50 dark:bg-red-950/30 rounded-lg p-3">{invError}</div>}
                         <div className="grid grid-cols-2 gap-3">
-                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Name</label><input value={invForm.name} onChange={e => setInvForm(p => ({ ...p, name: e.target.value }))} placeholder="Warehouse CSV" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
-                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Type</label><select value={invForm.source_type} onChange={e => setInvForm(p => ({ ...p, source_type: e.target.value }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"><option value="csv">CSV File</option><option value="google_sheets">Google Sheets</option><option value="erp_api">ERP API</option><option value="manual">Manual</option></select></div>
-                            <div><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Priority</label><input type="number" value={invForm.priority} onChange={e => setInvForm(p => ({ ...p, priority: Number(e.target.value) }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" /></div>
-                            <div className="col-span-2"><label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Config (JSON)</label><textarea rows={4} value={invForm.config_json} onChange={e => setInvForm(p => ({ ...p, config_json: e.target.value }))} placeholder={'{"file_path": "/data/inventory.csv"}'} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 resize-none" /></div>
-                            <div className="col-span-2 flex items-center gap-2"><input type="checkbox" id="inv-enabled" checked={invForm.enabled} onChange={e => setInvForm(p => ({ ...p, enabled: e.target.checked }))} className="w-4 h-4 accent-violet-600" /><label htmlFor="inv-enabled" className="text-sm text-slate-700 dark:text-slate-300 cursor-pointer">Enabled</label></div>
+                            <div className="col-span-2">
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Name</label>
+                                <input value={invForm.name} onChange={e => setInvForm(p => ({ ...p, name: e.target.value }))} placeholder="My Product Sheet" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                            </div>
+                            <div className="col-span-2">
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Source Type</label>
+                                <div className="grid grid-cols-1 gap-2">
+                                    {([
+                                        { value: "google_sheets", label: "Google Sheets", desc: "Paste a public Google Sheet link. The AI reads it live — no uploads needed.", available: true },
+                                        { value: "csv", label: "CSV File (server path)", desc: "A CSV file that lives on the backend server. For automated nightly exports from another system.", available: true },
+                                        { value: "erp_api", label: "ERP / Accounting Software", desc: "Connect Tally, Zoho Inventory, SAP, or similar via API.", available: false },
+                                    ] as { value: string; label: string; desc: string; available: boolean }[]).map(opt => (
+                                        <button
+                                            key={opt.value}
+                                            type="button"
+                                            disabled={!opt.available}
+                                            onClick={() => opt.available && setInvForm(p => ({ ...p, source_type: opt.value }))}
+                                            className={`w-full text-left px-4 py-3 rounded-xl border-2 transition-all ${
+                                                invForm.source_type === opt.value
+                                                    ? "border-violet-500 bg-violet-50 dark:bg-violet-900/20"
+                                                    : opt.available
+                                                        ? "border-slate-200 dark:border-slate-700 hover:border-slate-300 dark:hover:border-slate-600"
+                                                        : "border-slate-100 dark:border-slate-800 opacity-50 cursor-not-allowed"
+                                            }`}
+                                        >
+                                            <div className="flex items-center justify-between">
+                                                <span className="text-sm font-semibold text-slate-800 dark:text-slate-200">{opt.label}</span>
+                                                {!opt.available && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-slate-100 dark:bg-slate-800 text-slate-400">Coming soon</span>}
+                                                {opt.available && invForm.source_type === opt.value && <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-violet-100 dark:bg-violet-900/40 text-violet-600 dark:text-violet-400">Selected</span>}
+                                            </div>
+                                            <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{opt.desc}</p>
+                                        </button>
+                                    ))}
+                                </div>
+                            </div>
+                            {invForm.source_type === "google_sheets" && (
+                                <div className="col-span-2 space-y-1.5">
+                                    <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Google Sheet URL</label>
+                                    <input
+                                        type="url"
+                                        value={invForm.sheet_url}
+                                        onChange={e => { setInvSheetTabs([]); setInvForm(p => ({ ...p, sheet_url: e.target.value, sheet_name: "", sheet_gid: "" })); }}
+                                        onBlur={() => { if (invForm.sheet_url.trim()) void inspectInventorySheetTabs(); }}
+                                        placeholder="https://docs.google.com/spreadsheets/d/…/edit"
+                                        className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                    />
+                                    <div className="flex items-center justify-between pt-2">
+                                        <label className="text-xs font-semibold text-slate-500 uppercase block">Worksheet</label>
+                                        <button
+                                            type="button"
+                                            disabled={!invForm.sheet_url.trim() || invSheetLoading}
+                                            onClick={() => void inspectInventorySheetTabs()}
+                                            className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-semibold text-violet-600 hover:bg-violet-50 dark:text-violet-400 dark:hover:bg-violet-900/20 disabled:opacity-50"
+                                        >
+                                            {invSheetLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                            Load tabs
+                                        </button>
+                                    </div>
+                                    {invSheetTabs.length > 1 ? (
+                                        <select
+                                            value={invForm.sheet_gid}
+                                            onChange={e => {
+                                                const tab = invSheetTabs.find(t => t.gid === e.target.value);
+                                                setInvForm(p => ({ ...p, sheet_gid: tab?.gid ?? "", sheet_name: tab?.name ?? "" }));
+                                            }}
+                                            className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                        >
+                                            {invSheetTabs.map(tab => (
+                                                <option key={tab.gid} value={tab.gid}>{tab.name}</option>
+                                            ))}
+                                        </select>
+                                    ) : invSheetTabs.length === 1 ? (
+                                        <div className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100">
+                                            {invSheetTabs[0].name}
+                                        </div>
+                                    ) : (
+                                        <input
+                                            value={invForm.sheet_name}
+                                            onChange={e => setInvForm(p => ({ ...p, sheet_name: e.target.value, sheet_gid: "" }))}
+                                            placeholder="Inventory"
+                                            className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                        />
+                                    )}
+                                    <p className="text-xs text-amber-600 dark:text-amber-400">The sheet must be set to <strong>Anyone with the link can view</strong> in Google Sheets sharing settings.</p>
+                                </div>
+                            )}
+                            {invForm.source_type === "csv" && (
+                                <div className="col-span-2 space-y-1.5">
+                                    <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">File Path on Server</label>
+                                    <input value={invForm.csv_path} onChange={e => setInvForm(p => ({ ...p, csv_path: e.target.value }))} placeholder="/data/inventory.csv" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">This is the full path to a CSV file on the machine running the backend — not a file on your computer.</p>
+                                </div>
+                            )}
+                            <div className="col-span-2">
+                                <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Priority <span className="normal-case font-normal text-slate-400">(higher = checked first)</span></label>
+                                <input type="number" value={invForm.priority} onChange={e => setInvForm(p => ({ ...p, priority: Number(e.target.value) }))} className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                <p className="text-xs text-slate-400 mt-1">Your main inventory table is always 100. Leave this at 80 to use it as a fallback, or set above 100 to override the main table.</p>
+                            </div>
+                            <div className="col-span-2 flex items-center gap-2">
+                                <input type="checkbox" id="inv-enabled" checked={invForm.enabled} onChange={e => setInvForm(p => ({ ...p, enabled: e.target.checked }))} className="w-4 h-4 accent-violet-600" />
+                                <label htmlFor="inv-enabled" className="text-sm text-slate-700 dark:text-slate-300 cursor-pointer">Enabled</label>
+                            </div>
                         </div>
                         <div className="flex justify-end gap-3 pt-2">
                             <button onClick={() => setInvModal(null)} className="px-4 py-2 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors">Cancel</button>
-                            <button disabled={invSaving || !invForm.name.trim()} onClick={async () => { setInvSaving(true); setInvError(null); try { let cfg: Record<string, unknown> = {}; try { cfg = JSON.parse(invForm.config_json); } catch { setInvError("Config must be valid JSON"); setInvSaving(false); return; } const isNew = invModal === "new"; const url = isNew ? `${CRM_BASE}/inventory-sources` : `${CRM_BASE}/inventory-sources/${(invModal as InvSource).id}`; const res = await apiFetch(url, { method: isNew ? "POST" : "PATCH", body: JSON.stringify({ ...invForm, config_json: cfg }) }); if (!res.ok) { setInvError((await res.json()).detail ?? "Save failed"); } else { const updated = await res.json(); setInvSources(p => isNew ? [...p, updated] : p.map(x => x.id === updated.id ? updated : x)); setInvModal(null); } } catch { setInvError("Network error"); } finally { setInvSaving(false); } }} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors">
+                            <button disabled={invSaving || !invForm.name.trim()} onClick={async () => {
+                                setInvSaving(true); setInvError(null);
+                                try {
+                                    let cfg: Record<string, unknown> = {};
+                                    if (invForm.source_type === "google_sheets") {
+                                        if (!invForm.sheet_url.trim()) { setInvError("Please paste the Google Sheet URL."); setInvSaving(false); return; }
+                                        cfg = { url: invForm.sheet_url.trim() };
+                                        if (invForm.sheet_gid.trim()) cfg.gid = invForm.sheet_gid.trim();
+                                        if (invForm.sheet_name.trim()) cfg.sheet_name = invForm.sheet_name.trim();
+                                    } else if (invForm.source_type === "csv") {
+                                        cfg = { file_path: invForm.csv_path.trim() };
+                                    } else {
+                                        try { cfg = JSON.parse(invForm.config_json); } catch { setInvError("Config must be valid JSON"); setInvSaving(false); return; }
+                                    }
+                                    const isNew = invModal === "new";
+                                    const url = isNew ? `${CRM_BASE}/inventory-sources` : `${CRM_BASE}/inventory-sources/${(invModal as InvSource).id}`;
+                                    const res = await apiFetch(url, { method: isNew ? "POST" : "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: invForm.name, source_type: invForm.source_type, priority: invForm.priority, enabled: invForm.enabled, config_json: cfg }) });
+                                    if (!res.ok) { setInvError((await res.json()).detail ?? "Save failed"); }
+                                    else { const updated = await res.json(); setInvSources(p => isNew ? [...p, updated] : p.map(x => x.id === updated.id ? updated : x)); setInvModal(null); }
+                                } catch { setInvError("Network error"); } finally { setInvSaving(false); }
+                            }} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 disabled:opacity-50 transition-colors">
                                 {invSaving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />} Save
                             </button>
                         </div>

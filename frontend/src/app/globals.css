@@ -211,6 +211,54 @@ body {
   background-color: #ede9fe22;
 }
 
+/* ============================================================
+   Light-mode safety-net for pages using dark-only Tailwind
+   patterns (bg-white/5, border-white/10, text-slate-200 etc.)
+   These override the hardcoded dark values so content stays
+   readable when the user switches to light mode.
+   ============================================================ */
+.light .bg-white\/5  { background-color: rgb(248 250 252); }  /* slate-50  */
+.light .bg-white\/3  { background-color: rgb(248 250 252); }
+.light .bg-black\/30 { background-color: rgb(241 245 249); }  /* slate-100 */
+.light .bg-black\/40 { background-color: rgb(241 245 249); }
+.light .bg-black\/20 { background-color: rgb(248 250 252); }  /* slate-50  */
+.light .border-white\/10 { border-color: rgb(226 232 240); }  /* slate-200 */
+.light .border-white\/8  { border-color: rgb(226 232 240); }
+.light .border-white\/5  { border-color: rgb(241 245 249); }  /* slate-100 */
+.light .divide-white\/5  > * + * { border-color: rgb(241 245 249); }
+.light .hover\:bg-white\/5:hover  { background-color: rgb(241 245 249); }
+.light .hover\:bg-white\/3:hover  { background-color: rgb(248 250 252); }
+.light .hover\:bg-white\/10:hover { background-color: rgb(226 232 240); }
+.light .hover\:border-white\/20:hover { border-color: rgb(203 213 225); }  /* slate-300 */
+
+/* Text — dark values become near-invisible on light backgrounds */
+.light .text-slate-100 { color: rgb(15  23  42); }   /* slate-900 */
+.light .text-slate-200 { color: rgb(30  41  59); }   /* slate-800 */
+.light .text-slate-300 { color: rgb(51  65  85); }   /* slate-700 */
+/* slate-400 and below are usable on light bg — keep them */
+
+/* Inputs / textareas that use dark backgrounds */
+.light .bg-slate-800\/50 { background-color: rgb(255 255 255); }
+.light .bg-slate-800     { background-color: rgb(226 232 240); }  /* slate-200 */
+.light .bg-slate-900\/50 { background-color: rgb(248 250 252); }
+.light .bg-slate-900\/80 { background-color: rgb(248 250 252); }
+.light .bg-slate-900\/40 { background-color: rgba(255,255,255,0.6); }
+.light .bg-slate-950\/80 { background-color: rgba(0,0,0,0.3); }
+.light .border-slate-700 { border-color: rgb(203 213 225); }   /* slate-300 */
+.light .border-slate-800 { border-color: rgb(226 232 240); }   /* slate-200 */
+
+/* Page backgrounds */
+.light .bg-slate-950 { background-color: rgb(248 250 252); }   /* slate-50  */
+.light .bg-slate-900 { background-color: rgb(241 245 249); }   /* slate-100 */
+.light .bg-slate-900\/30 { background-color: rgba(241,245,249,0.6); }
+
+/* Table row backgrounds used in dark-first components */
+.light .bg-slate-800\/40 { background-color: rgba(255,255,255,0.8); }
+
+/* Focus ring for dark inputs */
+.light .focus\:ring-violet-500\/50:focus { box-shadow: 0 0 0 2px rgba(139,92,246,0.25); }
+
+
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: var(--font-sans);

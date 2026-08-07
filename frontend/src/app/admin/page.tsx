@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Loader2, Shield, ShieldCheck, UserCheck, UserX, Plus, X, Check, Edit2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 type AdminUser = {
   id: number;
@@ -612,13 +614,16 @@ export default function AdminPage() {
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
       {/* Header */}
-      <div>
-        <h1 className="text-4xl font-bold tracking-tight">
-          <span className="gradient-text">Admin Panel</span>
-        </h1>
-        <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
-          Manage users, roles and permissions
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-4xl font-bold tracking-tight">
+            <span className="gradient-text">Admin Panel</span>
+          </h1>
+          <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
+            Manage users, roles and permissions
+          </p>
+        </div>
+        <UserChip />
       </div>
 
       {/* Tab bar */}

@@ -14,6 +14,7 @@ import {
   DollarSign,
   ShoppingBag } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
 const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:6060";
@@ -391,6 +392,7 @@ export default function QuotesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <UserChip />
           <button
             onClick={handleExportQuoteCSV}
             disabled={exportLoading}

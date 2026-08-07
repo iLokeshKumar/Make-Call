@@ -52,6 +52,7 @@ class InventorySourceRead(SQLModel):
     name: str
     source_type: str
     priority: int
+    config_json: dict
     enabled: bool
     last_sync_at: Optional[datetime]
     created_at: datetime

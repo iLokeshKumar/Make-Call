@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from sqlalchemy import JSON, Column, DateTime, Index, Numeric, String, UniqueConstraint
+from sqlalchemy import JSON, Column, DateTime, Index, Numeric, String, Text, UniqueConstraint
 from sqlmodel import Field, SQLModel
 
 
@@ -2243,7 +2243,7 @@ class ProviderCredential(SQLModel, table=True):
     company_id: int = Field(foreign_key="companies.id", index=True)
     provider: str = Field(max_length=50)     # deepgram | cartesia | mistral | openai | elevenlabs | twilio | plivo | exotel
     key_name: str = Field(max_length=80)    # API_KEY | API_SECRET | ACCOUNT_SID | VOICE_ID
-    value_encrypted: str = Field(max_length=1000)
+    value_encrypted: str = Field(sa_column=Column(Text, nullable=False))
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))
     updated_at: datetime = Field(default_factory=utc_now, sa_column=Column(DateTime(timezone=True), nullable=False))

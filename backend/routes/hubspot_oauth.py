@@ -20,8 +20,11 @@ Flow:
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import os
+import secrets
 from typing import Optional
 
 import httpx
@@ -50,6 +53,15 @@ HUBSPOT_SCOPES = " ".join([
     "crm.schemas.companies.read",
     "crm.schemas.deals.read",
 ])
+
+_HUBSPOT_PKCE_CACHE: dict[int, str] = {}
+
+
+def generate_pkce() -> tuple[str, str]:
+    verifier = secrets.token_urlsafe(64)
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
 
 
 # ── Token storage helpers (ProviderCredential pattern) ────────────────────── #
@@ -127,11 +139,16 @@ def get_auth_url(
             detail="HUBSPOT_CLIENT_ID not set. Create an app at https://developers.hubspot.com/",
         )
     redirect_uri = _redirect_uri(request)
+    verifier, challenge = generate_pkce()
+    _HUBSPOT_PKCE_CACHE[current_user.company_id] = verifier
+
     params = (
         f"?client_id={client_id}"
         f"&redirect_uri={redirect_uri}"
         f"&scope={HUBSPOT_SCOPES.replace(' ', '%20')}"
         f"&state={current_user.company_id}"
+        f"&code_challenge={challenge}"
+        f"&code_challenge_method=S256"
     )
     return {"auth_url": HUBSPOT_AUTH_URL + params, "redirect_uri": redirect_uri}
 
@@ -154,17 +171,22 @@ async def hubspot_oauth_callback(
     if not client_id or not client_secret:
         raise HTTPException(status_code=500, detail="HUBSPOT_CLIENT_ID / HUBSPOT_CLIENT_SECRET not configured")
 
+    code_verifier = _HUBSPOT_PKCE_CACHE.pop(company_id, None)
     try:
         async with httpx.AsyncClient(timeout=20) as client:
+            data_payload = {
+                "grant_type":    "authorization_code",
+                "code":          code,
+                "redirect_uri":  _redirect_uri(request),
+                "client_id":     client_id,
+                "client_secret": client_secret,
+            }
+            if code_verifier:
+                data_payload["code_verifier"] = code_verifier
+
             resp = await client.post(
                 HUBSPOT_TOKEN_URL,
-                data={
-                    "grant_type":    "authorization_code",
-                    "code":          code,
-                    "redirect_uri":  _redirect_uri(request),
-                    "client_id":     client_id,
-                    "client_secret": client_secret,
-                },
+                data=data_payload,
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             resp.raise_for_status()

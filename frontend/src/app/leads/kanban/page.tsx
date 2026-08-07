@@ -5,9 +5,11 @@ import { useRef, useState } from "react";
 import { ArrowLeft, Loader2, Phone, RefreshCw } from "lucide-react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 const ISM_STAGES = [
   { key: "new",         label: "New",          cls: "border-slate-300  bg-slate-50   dark:border-slate-700 dark:bg-slate-900/30",  dot: "bg-slate-400" },
@@ -142,13 +144,16 @@ export default function KanbanPage() {
             Drag leads across columns to update their sales-motion stage.
           </p>
         </div>
-        <button
-          onClick={fetchLeads}
-          disabled={loading}
-          className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:border-violet-400 hover:text-violet-700 dark:border-white/10 dark:text-slate-300 transition disabled:opacity-50"
-        >
-          <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /> Refresh
-        </button>
+        <div className="flex items-center gap-3">
+          <UserChip />
+          <button
+            onClick={fetchLeads}
+            disabled={loading}
+            className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-600 hover:border-violet-400 hover:text-violet-700 dark:border-white/10 dark:text-slate-300 transition disabled:opacity-50"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} /> Refresh
+          </button>
+        </div>
       </div>
 
       {loading ? (

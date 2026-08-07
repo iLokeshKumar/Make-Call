@@ -14,7 +14,9 @@ import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
 import { reportUiLatency } from "@/utils/uiLatency";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+import UserChip from "@/components/UserChip";
+
 
 type Lead = {
   id: number;
@@ -220,7 +222,7 @@ export default function Home() {
             </p>
           </div>
 
-          <div className="flex flex-wrap gap-3">
+          <div className="flex flex-wrap items-center gap-3">
             <Link
               href="/leads"
               className="inline-flex items-center gap-2 rounded-2xl bg-gradient-to-r from-violet-600 to-blue-600 px-5 py-3 font-semibold text-white shadow-lg shadow-violet-500/30 transition hover:scale-[1.02]"
@@ -230,6 +232,7 @@ export default function Home() {
             <div className="rounded-2xl border border-white/40 bg-white/70 px-4 py-3 text-sm text-slate-700 dark:border-white/10 dark:bg-slate-900/40 dark:text-slate-200">
               <span className="font-semibold">Live focus:</span> rep dashboard + Lead 360
             </div>
+            <UserChip />
           </div>
         </div>
       </div>

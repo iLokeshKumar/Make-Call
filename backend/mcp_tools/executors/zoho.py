@@ -176,6 +176,130 @@ async def zoho_create_deal(
         ).model_dump()
 
 
+async def zoho_create_contact(
+    company_id: int,
+    name: str = "",
+    email: str = "",
+    phone: str = "",
+    company: str = "",
+    title: str = "",
+    description: str = "",
+) -> dict:
+    """Create a Contact in Zoho CRM via REST (fallback when no Zoho MCP server row)."""
+    name = (name or "").strip()
+    if not name:
+        return ToolResult.fail(
+            "A contact name is required.",
+            next_suggestion="Pass name='John Doe'.",
+        ).model_dump()
+    first, _, last = name.partition(" ")
+    payload: dict = {"Last_Name": last.strip() or first.strip(), "First_Name": first.strip() if last.strip() else ""}
+    if email:
+        payload["Email"] = email
+    if phone:
+        payload["Phone"] = phone
+    if company:
+        payload["Account_Name"] = company
+    if title:
+        payload["Title"] = title
+    if description:
+        payload["Description"] = description
+
+    def _load_token() -> str:
+        tok = rls_company_id.set(company_id)
+        try:
+            with Session(engine) as session:
+                return _get_zoho_token(session, company_id)
+        finally:
+            rls_company_id.reset(tok)
+
+    async def _create(token: str) -> dict:
+        async with httpx.AsyncClient(timeout=20) as client:
+            resp = await client.post(
+                f"{_ZOHO_API_BASE}/Contacts",
+                headers=_zoho_headers(token),
+                json={"data": [payload]},
+            )
+            resp.raise_for_status()
+        created = resp.json().get("data", [{}])[0]
+        contact_id = created.get("details", {}).get("id") or created.get("id", "")
+        return {
+            "contact_id": contact_id,
+            "name": name,
+            "zoho_record_url": f"https://crm.zoho.com/crm/org/tab/Contacts/{contact_id}" if contact_id else "",
+        }
+
+    try:
+        token = await asyncio.to_thread(_load_token)
+        return ToolResult.ok(await _create(token)).model_dump()
+    except Exception as exc:
+        new_token = await _refresh_if_needed(company_id, exc)
+        if new_token:
+            try:
+                return ToolResult.ok(await _create(new_token)).model_dump()
+            except Exception as exc2:
+                exc = exc2
+        logger.error("[MCP:zoho_create_contact] company=%s error=%s", company_id, exc)
+        return ToolResult.fail(
+            f"Zoho contact creation failed: {exc}",
+            next_suggestion="Verify Zoho CRM is connected at Settings > Integrations > Zoho CRM.",
+        ).model_dump()
+
+
+async def zoho_query_records(
+    company_id: int,
+    module: str = "Contacts",
+    query: str = "",
+    limit: int = 25,
+) -> dict:
+    """Query records from a Zoho CRM module via REST (fallback for crm_query)."""
+    module = (module or "Contacts").strip().title() or "Contacts"
+
+    def _load_token() -> str:
+        tok = rls_company_id.set(company_id)
+        try:
+            with Session(engine) as session:
+                return _get_zoho_token(session, company_id)
+        finally:
+            rls_company_id.reset(tok)
+
+    async def _fetch(token: str) -> list[dict]:
+        headers = _zoho_headers(token)
+        async with httpx.AsyncClient(timeout=20) as client:
+            if query.strip():
+                resp = await client.post(
+                    f"{_ZOHO_API_BASE}/coql",
+                    headers=headers,
+                    json={"select_query": query.strip()},
+                )
+            else:
+                resp = await client.get(
+                    f"{_ZOHO_API_BASE}/{module}",
+                    headers=headers,
+                    params={"per_page": min(max(limit, 1), 200)},
+                )
+            resp.raise_for_status()
+            return resp.json().get("data", [])
+
+    try:
+        token = await asyncio.to_thread(_load_token)
+        records = await _fetch(token)
+        return ToolResult.ok({"module": module, "count": len(records), "records": records[:200]}).model_dump()
+    except Exception as exc:
+        new_token = await _refresh_if_needed(company_id, exc)
+        if new_token:
+            try:
+                records = await _fetch(new_token)
+                return ToolResult.ok({"module": module, "count": len(records), "records": records[:200]}).model_dump()
+            except Exception as exc2:
+                exc = exc2
+        logger.error("[MCP:zoho_query_records] company=%s module=%s error=%s", company_id, module, exc)
+        return ToolResult.fail(
+            f"Zoho query failed: {exc}",
+            next_suggestion="Verify Zoho CRM is connected and the module name is valid.",
+        ).model_dump()
+
+
 async def zoho_update_contact(
     company_id: int,
     contact_id: str,

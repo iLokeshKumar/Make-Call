@@ -8,6 +8,17 @@
     },
     "apollo": {
       "url": "https://mcp.apollo.io/mcp"
+    },
+    "sarvam": {
+      "command": "uvx",
+      "args": ["sarvam-mcp"],
+      "env": {
+        "SARVAM_API_KEY": "sk_6k9xhssq_qgM0zhXpTpHo2Y0v4ZLCFF2O"
+      }
+    },
+    "firecrawl": {
+      "type": "remote",
+      "url": "https://mcp.firecrawl.dev/v2/mcp-oauth"
     }
   }
 }

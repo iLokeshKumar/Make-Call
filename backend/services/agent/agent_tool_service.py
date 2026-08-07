@@ -640,27 +640,52 @@ def send_communication(
         session.refresh(lead)
 
     results: list[dict[str, Any]] = []
+    missing_info: list[dict[str, str]] = []
+
     if "email" in normalized_channels:
-        results.append(
-            send_email_to_lead(
-                session=session,
-                company_id=company_id,
-                actor_user_id=actor_user_id,
-                lead_id=lead.id,
-                subject=subject or "Message from Rio",
-                body=content,
-            )
-        )
+        if not lead.email:
+            missing_info.append({
+                "channel": "email",
+                "missing": "email_address",
+                "ask": "Ask the lead for their email address, then call send_communication again with the email parameter.",
+            })
+            results.append({"channel": "email", "success": False, "error": "no_email"})
+        else:
+            try:
+                results.append(
+                    send_email_to_lead(
+                        session=session,
+                        company_id=company_id,
+                        actor_user_id=actor_user_id,
+                        lead_id=lead.id,
+                        subject=subject or "Message from Rio",
+                        body=content,
+                    )
+                )
+            except Exception as exc:
+                results.append({"channel": "email", "success": False, "error": str(exc)})
+
     if "whatsapp" in normalized_channels:
-        results.append(
-            send_whatsapp_to_lead(
-                session=session,
-                company_id=company_id,
-                actor_user_id=actor_user_id,
-                lead_id=lead.id,
-                body=content,
-            )
-        )
+        if not lead.normalized_phone:
+            missing_info.append({
+                "channel": "whatsapp",
+                "missing": "phone_number",
+                "ask": "Ask the lead for their WhatsApp number, then call send_communication again with the phone parameter.",
+            })
+            results.append({"channel": "whatsapp", "success": False, "error": "no_phone"})
+        else:
+            try:
+                results.append(
+                    send_whatsapp_to_lead(
+                        session=session,
+                        company_id=company_id,
+                        actor_user_id=actor_user_id,
+                        lead_id=lead.id,
+                        body=content,
+                    )
+                )
+            except Exception as exc:
+                results.append({"channel": "whatsapp", "success": False, "error": str(exc)})
 
     completed_channels = [
         item.get("channel")
@@ -690,6 +715,18 @@ def send_communication(
         else:
             channel_status[channel_name] = "failed"
 
+    # Build a human-readable status message
+    parts: list[str] = []
+    if completed_channels:
+        parts.append(f"Sent via {', '.join(completed_channels)}.")
+    if queued_channels:
+        parts.append(f"Queued via {', '.join(queued_channels)}.")
+    if missing_info:
+        for m in missing_info:
+            parts.append(f"Could not send via {m['channel']}: {m['missing']} not on file. {m['ask']}")
+    elif failed_channels:
+        parts.append(f"Failed via {', '.join(failed_channels)}.")
+
     return {
         "success": any(item.get("success") for item in results),
         "lead_id": lead.id,
@@ -698,13 +735,9 @@ def send_communication(
         "queued_channels": queued_channels,
         "failed_channels": failed_channels,
         "channel_status": channel_status,
+        "missing_info": missing_info,
         "results": results,
-        "message": (
-            f"Queued via {', '.join(queued_channels)}; sent via {', '.join(completed_channels)}; "
-            f"failed via {', '.join(failed_channels)}."
-            if results
-            else "No valid communication channels were requested."
-        ),
+        "message": " ".join(parts) if parts else "No valid communication channels were requested.",
     }
 
 

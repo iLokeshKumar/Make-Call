@@ -12,6 +12,7 @@ import CampaignStatusTimelineChart from "@/components/analytics/CampaignStatusTi
 import CampaignConversionChart from "@/components/analytics/CampaignConversionChart";
 import FunnelChart from "@/components/analytics/FunnelChart";
 import LatencyTrendChart from "@/components/analytics/LatencyTrendChart";
+import { API_BASE } from "@/lib/api";
 // Types
 
 interface EngineRow {
@@ -196,7 +197,7 @@ export default function AnalyticsDashboard() {
   const [alertLoading, setAlertLoading] = useState(false);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
 
-  const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+  
 
   const loadSummary = useCallback(async () => {
     if (!user) return;

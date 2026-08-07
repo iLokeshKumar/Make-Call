@@ -5,8 +5,9 @@ import { useEffect, useRef, useState } from "react";
 import { Activity, Mail, MessageCircle, Phone, UserCheck, Trophy, XCircle, AlertTriangle } from "lucide-react";
 
 import { useAuth } from "@/context/AuthContext";
+import { API_BASE } from "@/lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 const MAX_EVENTS = 8;
 

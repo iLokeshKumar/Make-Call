@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
+import UserChip from "@/components/UserChip";
 import {
   Activity,
   BarChart2,
@@ -742,7 +743,8 @@ export default function VoiceAgentsPage() {
                 </div>
                 <p className="text-xs text-slate-400 mt-1 font-medium">{selected?.agent.description || "Agent behavior, runtime, and execution history"}</p>
               </div>
-              {selected && (
+              <div className="flex items-center gap-3">
+                {selected && (
                 <div className="flex gap-2">
                   <button
                     onClick={() => { setTestCallOpen(true); setTestCallResult(null); setTestCallPhone(""); }}
@@ -766,6 +768,8 @@ export default function VoiceAgentsPage() {
                   </button>
                 </div>
               )}
+                <UserChip />
+              </div>
             </div>
             <div className="mt-5 flex gap-2 overflow-x-auto py-1 scrollbar-none">
               {tabs.map(({ id, label, Icon }) => (

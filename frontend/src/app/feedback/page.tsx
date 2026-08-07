@@ -7,9 +7,11 @@ import clsx from "clsx";
 import { useRouter } from "next/navigation";
 
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 type FeedbackItem = {
   id: number;
@@ -666,6 +668,7 @@ export default function FeedbackPage() {
           <p className="mt-1 text-sm font-medium text-slate-500">Call reviews, CSAT scores, and customer sentiment</p>
         </div>
         <div className="flex items-center gap-2">
+          <UserChip />
           <button
             onClick={() => setShowAddModal(true)}
             className="flex items-center gap-2 rounded-xl border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-300 transition-colors hover:text-white"

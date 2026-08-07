@@ -8,7 +8,9 @@ import { useAuth } from "@/context/AuthContext";
 import ImportLeadsModal from "@/components/leads/ImportLeadsModal";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+import UserChip from "@/components/UserChip";
+
 
 /** Strip system-appended log lines from lead notes before displaying. */
 function cleanNotes(notes: string | null | undefined): string {
@@ -268,13 +270,16 @@ export default function LeadsPage() {
             Search, call, and manage your lead pipeline.
           </p>
         </div>
-        <button
-          onClick={() => setShowImport(true)}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-5 py-2.5 font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.02]"
-        >
-          <Download className="h-4 w-4" />
-          Import Leads
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => setShowImport(true)}
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-5 py-2.5 font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.02]"
+          >
+            <Download className="h-4 w-4" />
+            Import Leads
+          </button>
+          <UserChip />
+        </div>
       </div>
 
       <div className="grid grid-cols-1 gap-6 xl:grid-cols-3">

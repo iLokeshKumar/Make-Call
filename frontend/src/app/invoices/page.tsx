@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import UserChip from "@/components/UserChip";
 import {
   AlertCircle,
   CheckCircle,
@@ -295,6 +296,7 @@ export default function InvoicesPage() {
           </p>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
+          <UserChip />
           <button
             onClick={() => { setShowFromOrder((v) => !v); setCreating(false); }}
             className="inline-flex items-center gap-2 rounded-xl border border-slate-200 px-4 py-2.5 text-sm font-semibold text-slate-700 transition hover:border-violet-300 hover:text-violet-700 dark:border-white/10 dark:text-slate-200 dark:hover:border-violet-500/40 dark:hover:text-violet-300"

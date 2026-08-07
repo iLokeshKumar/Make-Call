@@ -39,7 +39,8 @@ import {
   formatNextActionLabel,
   humanizeInteractionTitle,
 } from "@/utils/interaction_format";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 function cleanNotes(notes: string | null | undefined): string {
     if (!notes) return "";

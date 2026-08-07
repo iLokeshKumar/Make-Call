@@ -1032,7 +1032,7 @@ class VoicePipeline:
             return
 
         # Personalized greeting if lead context is available
-        _default_greeting = f"Hello, I'm {self.agent_name} from {self.company_name}. Can you hear me okay?"
+        _default_greeting = f"Hello, I'm {self.agent_name} from {self.company_name}. How are you doing today?"
         greeting = (
             self._agent_greeting_tpl
             .replace("{agent_name}", self.agent_name)
@@ -1053,7 +1053,7 @@ class VoicePipeline:
                                 .replace("{company_name}", self.company_name)
                             )
                         else:
-                            greeting = f"Hello {lead_name}, this is {self.agent_name} from {self.company_name}. Can you hear me okay?"
+                            greeting = f"Hello {lead_name}, this is {self.agent_name} from {self.company_name}. How are you doing today?"
                         logger.info(f"📞 [Personalized Greeting] Sent to {lead_name}")
             except Exception as e:
                 logger.warning(f"⚠️ Failed to parse lead name for greeting: {e}")
@@ -2259,7 +2259,9 @@ class VoicePipeline:
                 self._pending_tts_fallback_task.cancel()
                 self._pending_tts_fallback_task = None
         
-        mistral_tools = get_mistral_tools()
+        # Only expose tools the company actually has connected/enabled — this is
+        # what lets the agent use Apollo/Zoho/Cal.com/Calendly/inventory mid-call.
+        mistral_tools = get_mistral_tools(self.company_id)
         
         full_reply = ""
         tool_calls = None
@@ -2421,6 +2423,18 @@ class VoicePipeline:
                             "check_icp_qualification": "Let me check if this fits your profile.",
                             "check_guardrails":        "Let me check what I can do on pricing.",
                             "warm_transfer":           "Let me get a human agent on the line for you right now.",
+                            "schedule_meeting":         "Great — let me get that meeting scheduled for you right now.",
+                            "get_availability":         "Let me check what times are available for you.",
+                            "list_bookings":            "One moment, let me pull up your bookings.",
+                            "reschedule_meeting":       "Let me move that booking for you now.",
+                            "cancel_meeting":           "Let me cancel that booking for you now.",
+                            "inventory_lookup":         "Let me check our current stock on that for you.",
+                            "inventory_reserve":        "Let me set that aside for you right now.",
+                            "search_prospects":         "Let me search for the right prospects for you.",
+                            "enrich_prospect":          "Let me pull up more details on that contact for you.",
+                            "create_crm_contact":       "Let me save that to your CRM for you now.",
+                            "update_crm_contact":       "Let me update that record in your CRM now.",
+                            "crm_query":                "Let me look that up in your CRM for you.",
                         }
                         
                         # Update context for silence re-engagement

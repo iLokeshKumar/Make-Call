@@ -18,9 +18,11 @@ import {
   Loader2, Pencil, Plus, Power, RefreshCw, Trash2, X,
 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE } from "@/lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+
 
 // Types
 
@@ -445,7 +447,8 @@ export default function IsmRulesPage() {
             Data-driven overrides for stage-based ISM behavior. Lower priority runs first.
           </p>
         </div>
-        <div className="flex gap-2">
+        <div className="flex gap-2 items-center">
+          <UserChip />
           <button onClick={fetchRules} className="flex items-center gap-1.5 px-3 py-1.5 rounded text-sm text-slate-300 border border-white/10 hover:bg-white/5">
             <RefreshCw className="w-4 h-4" />
           </button>

@@ -9,10 +9,12 @@ import {
 
 import { apiFetch } from "@/utils/apiFetch";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { API_BASE } from "@/lib/api";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+
 const WS_BASE = API_BASE.replace(/^http/, "ws");
 const MAX_EVENTS = 100;
 const PULSE_DURATION_MS = 2500;
@@ -166,9 +168,12 @@ export default function IsmActivityPage() {
             Pipeline state above, live decisions below. Cards pulse when the agent acts on them.
           </p>
         </div>
-        <Badge variant={connected ? "default" : "outline"} className={connected ? "bg-emerald-600 text-white" : ""}>
-          {connected ? "● Live" : "○ Disconnected"}
-        </Badge>
+        <div className="flex items-center gap-3">
+          <UserChip />
+          <Badge variant={connected ? "default" : "outline"} className={connected ? "bg-emerald-600 text-white" : ""}>
+            {connected ? "● Live" : "○ Disconnected"}
+          </Badge>
+        </div>
       </div>
 
       {/* Kanban — pipeline state */}

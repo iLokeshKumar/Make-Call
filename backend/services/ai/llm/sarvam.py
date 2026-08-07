@@ -44,6 +44,32 @@ class SarvamLLM(BaseLLM):
         # Use tool-safe history (avoids orphan tool messages on barge-in)
         final_history = self.get_safe_history(limit=8)
 
+        # If the history contains tool messages or assistant tool_calls but
+        # the caller did not supply a `tools` list, strip those entries to
+        # avoid API errors like: "Tool messages found but no tools provided.".
+        has_tool_msgs = any(
+            m.get("role") == "tool" or (
+                m.get("role") == "assistant" and m.get("tool_calls")
+            )
+            for m in final_history
+        )
+        if has_tool_msgs and not tools:
+            logger.warning(
+                "[SarvamLLM] Tool-related history present but no tools provided; stripping tool messages to avoid API errors."
+            )
+            cleaned: list[dict] = []
+            for m in final_history:
+                if m.get("role") == "tool":
+                    continue
+                if m.get("role") == "assistant" and m.get("tool_calls"):
+                    m = dict(m)
+                    m.pop("tool_calls", None)
+                    if not m.get("content"):
+                        # Skip empty assistant messages left over after stripping
+                        continue
+                cleaned.append(m)
+            final_history = cleaned
+
         _NO_TOOL_MODELS = {"sarvam-m", "sarvam-2b"}
         supports_tools = self.model not in _NO_TOOL_MODELS
 

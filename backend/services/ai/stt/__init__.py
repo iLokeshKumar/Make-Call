@@ -1,3 +1,4 @@
+from .voicebox import VoiceboxSTT
 from .deepgram import DeepgramSTT
 from .sarvam import SarvamSTT
 from .cartesia import CartesiaSTT
@@ -10,6 +11,7 @@ from .assemblyai import AssemblyAISTT
 from .azure import AzureSTT
 from .inworld import InworldSTT
 from .vachana import VachanaSTT
+
 
 def get_stt_service(provider: str, api_key: str = None, model: str = None):
     provider = provider.lower()
@@ -37,5 +39,7 @@ def get_stt_service(provider: str, api_key: str = None, model: str = None):
         return InworldSTT(api_key=api_key, model=model)
     elif provider == "vachana":
         return VachanaSTT(api_key=api_key, model=model)
+    elif provider == "voicebox":
+        return VoiceboxSTT(api_key=api_key, model=model)
     else:
         return DeepgramSTT(api_key=api_key, model=model)

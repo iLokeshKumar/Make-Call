@@ -8,22 +8,25 @@ import { toast } from "sonner";
 
 type Proposal = {
   id: number;
-  lead_id: number;
-  lead_name: string;
+  entity_id: number | null;
+  dealer_name: string | null;
+  dealer_phone: string | null;
   action_type: string;
   autonomy_level: string;
-  payload: Record<string, unknown>;
   status: string;
   created_at: string;
   overdue_days?: number;
-  amount_overdue?: number;
+  total_amount_due_inr?: number;
+  dunning_tier?: number;
+  message_preview?: string;
 };
 
 type KPI = {
-  total_overdue_dealers: number;
-  total_overdue_amount: number;
-  pending_proposals: number;
-  collected_this_month: number;
+  overdue_invoice_count: number;
+  total_overdue_inr: number;
+  proposals_pending: number;
+  collected_inr: number;
+  dso_days: number | null;
 };
 
 const TIER_COLOR: Record<string, string> = {
@@ -37,7 +40,7 @@ export default function CollectionsTab({ sessionTimeout: _s }: { sessionTimeout?
 
   const { data: proposals = [], isLoading, refetch } = useQuery({
     queryKey: ["collections-proposals"],
-    queryFn: () => apiGet<{ proposals: Proposal[] }>(`${CRM_BASE}/collections/proposals`).then(r => r.proposals ?? []),
+    queryFn: () => apiGet<{ items: Proposal[] }>(`${CRM_BASE}/collections/proposals`).then(r => r.items ?? []),
   });
 
   const { data: kpis } = useQuery({
@@ -66,7 +69,7 @@ export default function CollectionsTab({ sessionTimeout: _s }: { sessionTimeout?
     onSuccess: () => { refetch(); toast.success("AR scan triggered"); },
   });
 
-  const a2Proposals = proposals.filter(p => p.autonomy_level === "A2" && p.status === "pending");
+  const a2Proposals = proposals.filter(p => p.autonomy_level === "A2" && p.status === "proposed");
   const allA2Selected = a2Proposals.length > 0 && a2Proposals.every(p => selected.has(p.id));
 
   function toggleAll() {
@@ -80,10 +83,10 @@ export default function CollectionsTab({ sessionTimeout: _s }: { sessionTimeout?
       {kpis && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           {[
-            { label: "Overdue Dealers", value: kpis.total_overdue_dealers },
-            { label: "Overdue Amount", value: `₹${(kpis.total_overdue_amount / 100000).toFixed(1)}L` },
-            { label: "Pending Proposals", value: kpis.pending_proposals },
-            { label: "Collected (MTD)", value: `₹${(kpis.collected_this_month / 100000).toFixed(1)}L` },
+            { label: "Overdue Invoices", value: kpis.overdue_invoice_count },
+            { label: "Overdue Amount", value: `₹${(kpis.total_overdue_inr / 100000).toFixed(1)}L` },
+            { label: "Pending Proposals", value: kpis.proposals_pending },
+            { label: "Collected (period)", value: `₹${(kpis.collected_inr / 100000).toFixed(1)}L` },
           ].map(k => (
             <div key={k.label} className="rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 px-4 py-3">
               <p className="text-xs text-slate-500 dark:text-slate-400">{k.label}</p>
@@ -141,7 +144,7 @@ export default function CollectionsTab({ sessionTimeout: _s }: { sessionTimeout?
             ) : proposals.map(p => (
               <tr key={p.id} className="hover:bg-slate-50 dark:hover:bg-slate-800/40 transition-colors">
                 <td className="px-4 py-3">
-                  {p.autonomy_level === "A2" && p.status === "pending" && (
+                  {p.autonomy_level === "A2" && p.status === "proposed" && (
                     <input
                       type="checkbox"
                       checked={selected.has(p.id)}
@@ -150,7 +153,7 @@ export default function CollectionsTab({ sessionTimeout: _s }: { sessionTimeout?
                     />
                   )}
                 </td>
-                <td className="px-4 py-3 font-medium text-slate-900 dark:text-slate-100">{p.lead_name}</td>
+                <td className="px-4 py-3 font-medium text-slate-900 dark:text-slate-100">{p.dealer_name ?? "—"}</td>
                 <td className="px-4 py-3 text-slate-600 dark:text-slate-400 capitalize">{p.action_type.replace(/_/g, " ")}</td>
                 <td className="px-4 py-3 text-center">
                   <span className={`px-2 py-0.5 rounded-full text-xs font-semibold ${TIER_COLOR[p.autonomy_level] ?? ""}`}>

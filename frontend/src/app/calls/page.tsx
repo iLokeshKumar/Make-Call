@@ -13,6 +13,8 @@ import clsx from "clsx";
 import { apiFetch } from "@/utils/apiFetch";
 import WaveformPlayer from "@/components/leads/waveform_player";
 import CallEvalPanel from "@/components/leads/call_eval_panel";
+import { API_BASE, CRM_BASE } from "@/lib/api";
+import UserChip from "@/components/UserChip";
 
 interface ChildInteraction {
     id: number;
@@ -749,8 +751,8 @@ export default function CallsPage() {
     const [dialLimit, setDialLimit] = useState(10);
     const [directionFilter, setDirectionFilter] = useState<"" | "outbound" | "inbound">("");
 
-    const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
-    const CRM_BASE = `${API_BASE}/crm`;
+    
+    
 
     type CallsPayload = { items: Interaction[]; total: number };
     const callsQuery = useQuery<CallsPayload>({
@@ -807,8 +809,9 @@ export default function CallsPage() {
                         )}
                     </p>
                 </div>
-                {/* Direction filter */}
-                <div className="flex items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-1 self-start mt-1">
+                {/* Direction filter + user */}
+                <div className="flex items-center gap-3 self-start mt-1">
+                <div className="flex items-center gap-1 rounded-xl border border-slate-200 dark:border-slate-800 bg-white dark:bg-slate-900 p-1">
                     {(["", "outbound", "inbound"] as const).map(d => (
                         <button
                             key={d}
@@ -823,6 +826,8 @@ export default function CallsPage() {
                             {d === "" ? "All" : d === "outbound" ? "↗ Outbound" : "↙ Inbound"}
                         </button>
                     ))}
+                </div>
+                <UserChip />
                 </div>
             </div>
 

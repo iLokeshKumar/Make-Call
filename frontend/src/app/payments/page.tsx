@@ -2,6 +2,7 @@
 
 import React, { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import UserChip from "@/components/UserChip";
 import {
   CreditCard,
   DollarSign,
@@ -265,12 +266,15 @@ export default function PaymentsPage() {
             Record and track customer payments
           </p>
         </div>
-        <button
-          onClick={() => { setCreating((v) => !v); if (creating) resetCreateForm(); }}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01]"
-        >
-          <Plus className="h-4 w-4" /> Record Payment
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { setCreating((v) => !v); if (creating) resetCreateForm(); }}
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01]"
+          >
+            <Plus className="h-4 w-4" /> Record Payment
+          </button>
+          <UserChip />
+        </div>
       </div>
 
       {/* Toast */}

@@ -31,6 +31,7 @@ from models.mcp_server import MCPServerCreate, MCPServerRead, MCPServerUpdate, M
 from models.models import User
 from services.mcp import capability_router as cap_router
 from services.mcp import connection_service, registry_service
+from mcp_tools.tool_catalog import invalidate_connections_cache as _invalidate_tool_cache
 from services.platform.mcp_client import (
     EXTERNAL_MCP_SERVERS,
     call_external_tool,
@@ -110,7 +111,9 @@ def create_registry_server(
     session: Session = Depends(get_session),
 ):
     """Add a new MCP server to the company's registry."""
-    return registry_service.create_server(session, current_user.company_id, data)
+    server = registry_service.create_server(session, current_user.company_id, data)
+    _invalidate_tool_cache(current_user.company_id)
+    return server
 
 
 @router.patch("/registry/{server_id}", response_model=MCPServerRead)
@@ -120,7 +123,9 @@ def update_registry_server(
     current_user: User = Depends(PermissionChecker("settings.manage_company")),
     session: Session = Depends(get_session),
 ):
-    return registry_service.update_server(session, current_user.company_id, server_id, data)
+    server = registry_service.update_server(session, current_user.company_id, server_id, data)
+    _invalidate_tool_cache(current_user.company_id)
+    return server
 
 
 @router.delete("/registry/{server_id}")
@@ -130,6 +135,7 @@ def delete_registry_server(
     session: Session = Depends(get_session),
 ):
     registry_service.delete_server(session, current_user.company_id, server_id)
+    _invalidate_tool_cache(current_user.company_id)
     return {"deleted": True}
 
 
@@ -158,14 +164,17 @@ async def ping_registry_server(
     server = registry_service.get_server(session, current_user.company_id, server_id)
     from services.mcp.capability_router import _resolve_token
     token = _resolve_token(session, current_user.company_id, server.provider)
+    client = connection_service.connect_server(server, token)
     try:
-        client = connection_service.connect_server(server, token)
         tools = await client.list_tools()
         registry_service.mark_health(session, server_id, "healthy")
         return {"server": server.name, "status": "healthy", "tool_count": len(tools)}
     except Exception as exc:
         registry_service.mark_health(session, server_id, "unhealthy")
         return {"server": server.name, "status": "unhealthy", "error": str(exc)}
+    finally:
+        if hasattr(client, "close"):
+            await client.close()
 
 
 # ── Capability routing ────────────────────────────────────────────────────────── #

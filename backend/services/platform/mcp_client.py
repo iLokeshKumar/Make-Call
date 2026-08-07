@@ -7,8 +7,12 @@ to the right server automatically.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
+import shutil
+import sys
 from typing import Any
 
 import httpx
@@ -81,6 +85,90 @@ class MCPClient:
     async def call_tool(self, name: str, arguments: dict) -> Any:
         await self.initialize()
         return await self._rpc("tools/call", {"name": name, "arguments": arguments})
+
+
+class MCPStdioClient:
+    """MCP client over stdio transport — spawns a subprocess and speaks JSON-RPC on stdin/stdout."""
+
+    def __init__(self, command: list[str], env: dict[str, str] | None = None):
+        self._command = self._resolve_command(command)
+        self._extra_env = env or {}
+        self._proc: asyncio.subprocess.Process | None = None
+        self._initialized = False
+        self._tools: list[dict] | None = None
+        self._msg_id = 0
+
+    @staticmethod
+    def _resolve_command(command: list[str]) -> list[str]:
+        if not command:
+            return command
+        if sys.platform == "win32":
+            resolved = shutil.which(command[0])
+            if resolved:
+                return [resolved] + command[1:]
+        return command
+
+    async def _ensure_process(self) -> None:
+        if self._proc is not None and self._proc.returncode is None:
+            return
+        merged_env = {**os.environ, **self._extra_env}
+        self._proc = await asyncio.create_subprocess_exec(
+            *self._command,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=merged_env,
+        )
+        self._initialized = False
+
+    async def _rpc(self, method: str, params: dict | None = None) -> Any:
+        await self._ensure_process()
+        self._msg_id += 1
+        payload = json.dumps({
+            "jsonrpc": "2.0",
+            "id": self._msg_id,
+            "method": method,
+            "params": params or {},
+        }) + "\n"
+        self._proc.stdin.write(payload.encode())
+        await self._proc.stdin.drain()
+        line = await asyncio.wait_for(self._proc.stdout.readline(), timeout=30)
+        if not line:
+            raise RuntimeError("MCP stdio server closed connection unexpectedly")
+        data = json.loads(line.decode())
+        if "error" in data:
+            raise RuntimeError(f"MCP error: {data['error']}")
+        return data.get("result")
+
+    async def initialize(self) -> None:
+        if self._initialized:
+            return
+        await self._rpc("initialize", {
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": {"name": "rio-crm", "version": "1.0"},
+        })
+        self._initialized = True
+
+    async def list_tools(self) -> list[dict]:
+        if self._tools is not None:
+            return self._tools
+        await self.initialize()
+        result = await self._rpc("tools/list")
+        self._tools = result.get("tools", []) if result else []
+        return self._tools
+
+    async def call_tool(self, name: str, arguments: dict) -> Any:
+        await self.initialize()
+        return await self._rpc("tools/call", {"name": name, "arguments": arguments})
+
+    async def close(self) -> None:
+        if self._proc and self._proc.returncode is None:
+            try:
+                self._proc.stdin.close()
+                await asyncio.wait_for(self._proc.wait(), timeout=5)
+            except Exception:
+                self._proc.kill()
 
 
 def _build_headers(server: dict, auth_token: str | None = None) -> dict[str, str]:

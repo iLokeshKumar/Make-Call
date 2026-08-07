@@ -30,6 +30,7 @@ from sqlmodel import Session, select
 from auth import PermissionChecker, get_current_user
 from database import get_session
 from models.models import ProviderCredential, User, utc_now
+from mcp_tools.tool_catalog import invalidate_connections_cache
 from utils.encryption import decrypt_value, encrypt_value
 
 logger = logging.getLogger(__name__)
@@ -180,6 +181,7 @@ async def zoho_oauth_callback(
     _save_token(session, company_id, "access_token", access_token)
     if refresh_token:
         _save_token(session, company_id, "refresh_token", refresh_token)
+    invalidate_connections_cache(company_id)
 
     logger.info("[zoho_oauth] Company %s connected to Zoho CRM MCP", company_id)
 
@@ -206,6 +208,7 @@ def zoho_disconnect(
     session: Session = Depends(get_session),
 ):
     _delete_tokens(session, current_user.company_id)
+    invalidate_connections_cache(current_user.company_id)
     return {"disconnected": True}
 
 

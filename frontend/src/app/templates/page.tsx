@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { FileText, Plus, Trash2, Eye, Save, X, Loader2 } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 type Template = {
   id: number;
@@ -196,13 +198,16 @@ export default function TemplatesPage() {
       {toast && <Toast message={toast} onClose={() => setToast(null)} />}
 
       {/* Header */}
-      <div>
-        <h1 className="text-4xl font-bold tracking-tight">
-          <span className="gradient-text">Templates</span>
-        </h1>
-        <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
-          Manage message templates across all channels
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-4xl font-bold tracking-tight">
+            <span className="gradient-text">Templates</span>
+          </h1>
+          <p className="mt-2 text-slate-600 dark:text-slate-400 font-medium">
+            Manage message templates across all channels
+          </p>
+        </div>
+        <UserChip />
       </div>
 
       <div className="flex gap-6 items-start flex-col lg:flex-row">

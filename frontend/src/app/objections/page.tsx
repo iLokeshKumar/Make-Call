@@ -3,9 +3,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { BookOpen, Edit3, Plus, Save, Trash2, X, Loader2, Shield, TrendingUp } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 type Objection = {
   id: number;
@@ -206,13 +208,16 @@ export default function ObjectionsPage() {
             </button>
           ))}
         </div>
-        <button
-          onClick={() => setShowCreate((v) => !v)}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20"
-        >
-          {showCreate ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
-          {showCreate ? "Cancel" : "Add manually"}
-        </button>
+        <div className="flex items-center gap-3">
+          <UserChip />
+          <button
+            onClick={() => setShowCreate((v) => !v)}
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20"
+          >
+            {showCreate ? <X className="h-4 w-4" /> : <Plus className="h-4 w-4" />}
+            {showCreate ? "Cancel" : "Add manually"}
+          </button>
+        </div>
       </div>
 
       {/* Create form */}

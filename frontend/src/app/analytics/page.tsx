@@ -15,7 +15,9 @@ import HorizontalMetricBars from "@/components/analytics/HorizontalMetricBars";
 import LatencyTrendChart from "@/components/analytics/LatencyTrendChart";
 import VoiceOverviewTab from "@/components/analytics/VoiceOverviewTab";
 import UsageTab from "@/components/analytics/UsageTab";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+import UserChip from "@/components/UserChip";
+
 
 type EngagementSummary = {
   event_counts: Record<string, number>;
@@ -442,13 +444,14 @@ export default function AnalyticsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          <UserChip />
           <button onClick={handleExportCSV} disabled={exportLoading || (!summary && !latency)}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white/5 text-sm text-slate-400 hover:text-white transition-colors disabled:opacity-40">
+            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-white/5 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors disabled:opacity-40">
             {exportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             Export CSV
           </button>
           <button onClick={handleExportQuoteCSV} disabled={quoteExportLoading}
-            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white/5 text-sm text-slate-400 hover:text-white transition-colors disabled:opacity-40">
+            className="flex items-center gap-2 px-4 py-2 rounded-xl border border-slate-200 dark:border-white/10 bg-slate-100 dark:bg-white/5 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors disabled:opacity-40">
             {quoteExportLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
             Quotes CSV
           </button>
@@ -464,11 +467,11 @@ export default function AnalyticsPage() {
       )}
 
       {/* Main Tabs */}
-      <div className="flex gap-1 border-b border-white/10">
+      <div className="flex gap-1 border-b border-slate-200 dark:border-white/10">
         {MAIN_TABS.map(t => (
           <button key={t} onClick={() => setActiveTab(t)}
             className={clsx("px-5 py-3 text-sm font-semibold capitalize rounded-t-xl transition-all border-b-2",
-              activeTab === t ? "text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-white")}>
+              activeTab === t ? "text-violet-600 dark:text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-slate-900 dark:hover:text-white")}>
             {t === "Overview"    ? <><BarChart2 className="inline h-3.5 w-3.5 mr-1.5" />Overview</>    :
              t === "Voice"       ? <><Phone     className="inline h-3.5 w-3.5 mr-1.5" />Voice</>       :
              t === "Usage"       ? <><Cpu       className="inline h-3.5 w-3.5 mr-1.5" />Usage</>       :
@@ -485,17 +488,17 @@ export default function AnalyticsPage() {
           {/* Day selector */}
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-slate-500 font-medium">Period:</span>
-            <div className="flex rounded-xl overflow-hidden border border-white/10">
+            <div className="flex rounded-xl overflow-hidden border border-slate-200 dark:border-white/10">
               {[7, 14, 30, 90].map(d => (
                 <button key={d} onClick={() => { setUseCustom(false); setDays(d); }}
                   className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
-                    !useCustom && days === d ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                    !useCustom && days === d ? "bg-violet-600 text-white" : "bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white")}>
                   {d}d
                 </button>
               ))}
               <button onClick={() => setUseCustom(v => !v)}
                 className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
-                  useCustom ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                  useCustom ? "bg-violet-600 text-white" : "bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white")}>
                 Custom
               </button>
             </div>
@@ -506,16 +509,16 @@ export default function AnalyticsPage() {
                   value={customFrom}
                   max={customTo || undefined}
                   onChange={e => setCustomFrom(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  className="rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-500"
                 />
-                <span className="text-xs text-slate-500">→</span>
+                <span className="text-xs text-slate-400 dark:text-slate-500">→</span>
                 <input
                   type="date"
                   value={customTo}
                   min={customFrom || undefined}
                   max={new Date().toISOString().split("T")[0]}
                   onChange={e => setCustomTo(e.target.value)}
-                  className="rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-xs text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                  className="rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 px-3 py-1.5 text-xs text-slate-700 dark:text-slate-300 focus:outline-none focus:ring-2 focus:ring-violet-500"
                 />
                 {customFrom && customTo && (
                   <span className="text-[10px] text-violet-400 font-medium">
@@ -543,7 +546,7 @@ export default function AnalyticsPage() {
               </div>
 
               {/* Channel breakdown */}
-              <div className="glass rounded-2xl border border-white/10 p-5">
+              <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 p-5">
                 <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Channel Breakdown</p>
                 <HorizontalMetricBars
                   rows={Object.entries(summary.channel_counts).map(([label, value]) => ({ label, value }))}
@@ -552,14 +555,14 @@ export default function AnalyticsPage() {
 
               {/* Campaign conversion */}
               {summary.campaign_conversion_trends.length > 0 && (
-                <div className="glass rounded-2xl border border-white/10 p-5">
+                <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 p-5">
                   <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Campaign Conversion</p>
                   <CampaignConversionChart rows={summary.campaign_conversion_trends} />
                 </div>
               )}
 
               {summary.campaign_status_over_time.length > 0 && (
-                <div className="glass rounded-2xl border border-white/10 p-5">
+                <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 p-5">
                   <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Campaign Status Timeline</p>
                   <CampaignStatusTimelineChart rows={summary.campaign_status_over_time} limitDays={5} />
                 </div>
@@ -567,26 +570,26 @@ export default function AnalyticsPage() {
 
               {/* Call task + Quote status side by side */}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                <div className="glass rounded-2xl border border-white/10 p-5">
+                <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 p-5">
                   <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Call Task Status</p>
                   <div className="space-y-3">
                     {Object.entries(summary.call_task_status_counts).map(([st, cnt]) => (
                       <div key={st} className="flex items-center gap-3">
                         <span className={clsx("h-2 w-2 rounded-full flex-shrink-0", CALL_STATUS_COLORS[st] ?? "bg-slate-400")} />
-                        <span className="flex-1 text-xs text-slate-400 capitalize">{st}</span>
-                        <span className="text-xs font-bold text-slate-300">{cnt}</span>
+                        <span className="flex-1 text-xs text-slate-500 dark:text-slate-400 capitalize">{st}</span>
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{cnt}</span>
                       </div>
                     ))}
                   </div>
                 </div>
-                <div className="glass rounded-2xl border border-white/10 p-5">
+                <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 p-5">
                   <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">Quote Status</p>
                   <div className="space-y-3">
                     {Object.entries(summary.quote_status_counts).map(([st, cnt]) => (
                       <div key={st} className="flex items-center gap-3">
                         <span className="h-2 w-2 rounded-full bg-blue-500 flex-shrink-0" />
-                        <span className="flex-1 text-xs text-slate-400 capitalize">{st}</span>
-                        <span className="text-xs font-bold text-slate-300">{cnt}</span>
+                        <span className="flex-1 text-xs text-slate-500 dark:text-slate-400 capitalize">{st}</span>
+                        <span className="text-xs font-bold text-slate-700 dark:text-slate-300">{cnt}</span>
                       </div>
                     ))}
                   </div>
@@ -613,27 +616,27 @@ export default function AnalyticsPage() {
           {/* Controls */}
           <div className="flex items-center flex-wrap gap-3">
             {/* Day range */}
-            <div className="flex rounded-xl overflow-hidden border border-white/10">
+            <div className="flex rounded-xl overflow-hidden border border-slate-200 dark:border-white/10">
               {([1, 7, 30] as const).map(d => (
                 <button key={d} onClick={() => setLatencyDays(d)}
                   className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
-                    latencyDays === d ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                    latencyDays === d ? "bg-violet-600 text-white" : "bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white")}>
                   {d === 1 ? "Today" : `${d}d`}
                 </button>
               ))}
             </div>
             {/* Scope */}
-            <div className="flex rounded-xl overflow-hidden border border-white/10">
+            <div className="flex rounded-xl overflow-hidden border border-slate-200 dark:border-white/10">
               {(["all", "mine"] as const).map(s => (
                 <button key={s} onClick={() => setScope(s)}
                   className={clsx("px-4 py-2 text-xs font-semibold capitalize transition-colors",
-                    scope === s ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                    scope === s ? "bg-violet-600 text-white" : "bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white")}>
                   {s === "all" ? "All Users" : "My Calls"}
                 </button>
               ))}
             </div>
             <button onClick={() => fetchLatency(true)} disabled={latencyRefreshing}
-              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-white/5 border border-white/10 text-sm text-slate-400 hover:text-white transition-colors ml-auto">
+              className="flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/10 text-sm text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white transition-colors ml-auto">
               <RefreshCw className={clsx("h-4 w-4", latencyRefreshing && "animate-spin")} />
               Refresh
             </button>
@@ -650,11 +653,11 @@ export default function AnalyticsPage() {
           )}
 
           {/* Sub-tabs */}
-          <div className="flex gap-1 border-b border-white/10">
+          <div className="flex gap-1 border-b border-slate-200 dark:border-white/10">
             {(["engines", "calls", "models", "trend"] as const).map(t => (
               <button key={t} onClick={() => setLatencySubTab(t)}
                 className={clsx("px-5 py-2.5 text-xs font-semibold rounded-t-lg transition-all border-b-2",
-                  latencySubTab === t ? "text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-white")}>
+                  latencySubTab === t ? "text-violet-600 dark:text-violet-400 border-violet-500 bg-violet-500/10" : "text-slate-500 border-transparent hover:text-slate-900 dark:hover:text-white")}>
                 {t === "engines" ? "⚡ Engines" : t === "calls" ? "📞 Calls" : t === "models" ? "🔬 Models" : "📈 Trend"}
               </button>
             ))}
@@ -678,7 +681,7 @@ export default function AnalyticsPage() {
                     const col    = engineColor(e.engine);
                     const maxVal = latency.engines.at(-1)!.total_avg || 1;
                     return (
-                      <div key={e.engine} className="glass rounded-2xl p-5 border border-white/10 hover:border-white/20 transition-all"
+                      <div key={e.engine} className="glass rounded-2xl p-5 border border-slate-200/60 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/20 transition-all"
                         style={{ borderLeftColor: col, borderLeftWidth: 3 }}>
                         <div className="flex items-start justify-between flex-wrap gap-3">
                           <div>
@@ -697,7 +700,7 @@ export default function AnalyticsPage() {
                             <p className="text-[10px] text-slate-500 mt-1">avg / turn</p>
                           </div>
                         </div>
-                        <div className="mt-3 h-5 rounded-lg bg-white/5 overflow-hidden">
+                        <div className="mt-3 h-5 rounded-lg bg-slate-100 dark:bg-white/5 overflow-hidden">
                           <div className="h-full rounded-lg transition-all duration-700"
                             style={{ width: `${Math.max((e.total_avg / maxVal) * 100, 3)}%`, background: `linear-gradient(90deg,${col}cc,${col}44)`, minWidth: "3%" }} />
                         </div>
@@ -714,11 +717,11 @@ export default function AnalyticsPage() {
                   <p className="text-[10px] text-slate-500 uppercase tracking-widest">
                     {latency.interactions.length} calls · click any row to expand
                   </p>
-                  <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+                  <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 overflow-hidden">
                     <div className="overflow-x-auto">
                       <table className="w-full text-xs">
                         <thead>
-                          <tr className="bg-white/5 border-b border-white/10">
+                          <tr className="bg-slate-50 dark:bg-white/5 border-b border-slate-200 dark:border-white/10">
                             {["#","ID","Engine","STT","LLM","TTS","Turns","Avg/Turn","Best","Worst","STT%"].map(h => (
                               <th key={h} className="px-4 py-3 text-left text-slate-500 font-medium whitespace-nowrap">{h}</th>
                             ))}
@@ -732,14 +735,14 @@ export default function AnalyticsPage() {
                             return (
                               <React.Fragment key={c.id}>
                                 <tr onClick={() => setExpandedCall(isExp ? null : c.id)}
-                                  className="border-b border-white/5 cursor-pointer hover:bg-white/5 transition-colors">
+                                  className="border-b border-slate-100 dark:border-white/5 cursor-pointer hover:bg-slate-50 dark:hover:bg-white/5 transition-colors">
                                   <td className="px-4 py-3 font-bold" style={{ color: col }}>#{i + 1}</td>
-                                  <td className="px-4 py-3 text-slate-300">{c.id}</td>
+                                  <td className="px-4 py-3 text-slate-700 dark:text-slate-300">{c.id}</td>
                                   <td className="px-4 py-3 font-mono text-[10px]" style={{ color: engineColor(c.engine) }}>{c.engine}</td>
                                   <td className="px-4 py-3 text-violet-400 text-[10px]">{c.stt_model}</td>
                                   <td className="px-4 py-3 text-emerald-400 text-[10px] max-w-[100px] truncate">{c.llm_model.split("/").pop()}</td>
                                   <td className="px-4 py-3 text-orange-400 text-[10px]">{c.tts_model}</td>
-                                  <td className="px-4 py-3 text-slate-400">{c.turns}</td>
+                                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{c.turns}</td>
                                   <td className="px-4 py-3 font-bold" style={{ color: col }}>{fms(c.total_avg)}</td>
                                   <td className="px-4 py-3 text-emerald-400">{fms(c.total_min)}</td>
                                   <td className="px-4 py-3 text-red-400">{fms(c.total_max)}</td>
@@ -753,7 +756,7 @@ export default function AnalyticsPage() {
                                   </td>
                                 </tr>
                                 {isExp && (
-                                  <tr className="bg-white/[0.02] border-b border-white/5">
+                                  <tr className="bg-slate-50/50 dark:bg-white/[0.02] border-b border-slate-100 dark:border-white/5">
                                     <td colSpan={11} className="px-6 py-4">
                                       <p className="text-[10px] text-slate-500 uppercase tracking-widest mb-3">Detail — Call #{c.id} · {c.engine}</p>
                                       <div className="flex flex-wrap gap-6 mb-3">
@@ -819,24 +822,24 @@ export default function AnalyticsPage() {
       {activeTab === "Alerts" && (
         <div className="space-y-6">
           {/* Create alert */}
-          <div className="glass rounded-2xl border border-white/10 p-5">
+          <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 p-5">
             <p className="text-[10px] font-semibold uppercase tracking-widest text-slate-500 mb-4">New Alert</p>
             <div className="grid grid-cols-1 md:grid-cols-5 gap-3 items-end">
               <div className="md:col-span-2">
                 <label className="text-[10px] text-slate-500 uppercase mb-1 block">Metric</label>
                 <input value={newAlertMetric} onChange={e => setNewAlertMetric(e.target.value)}
                   placeholder="e.g. email_open_rate"
-                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                  className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-violet-500" />
               </div>
               <div>
                 <label className="text-[10px] text-slate-500 uppercase mb-1 block">Threshold</label>
                 <input type="number" value={newAlertThreshold} onChange={e => setNewAlertThreshold(Number(e.target.value))}
-                  className="w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:ring-1 focus:ring-violet-500" />
+                  className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-white/5 px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none focus:ring-1 focus:ring-violet-500" />
               </div>
               <div>
                 <label className="text-[10px] text-slate-500 uppercase mb-1 block">Direction</label>
                 <select value={newAlertDirection} onChange={e => setNewAlertDirection(e.target.value)}
-                  className="w-full rounded-xl border border-white/10 bg-slate-800 px-3 py-2 text-sm text-slate-200 focus:outline-none">
+                  className="w-full rounded-xl border border-slate-200 dark:border-white/10 bg-white dark:bg-slate-800 px-3 py-2 text-sm text-slate-800 dark:text-slate-200 focus:outline-none">
                   <option value="gte">≥ (gte)</option>
                   <option value="lte">≤ (lte)</option>
                 </select>
@@ -857,10 +860,10 @@ export default function AnalyticsPage() {
           ) : alerts.length === 0 ? (
             <p className="text-center py-16 text-slate-600">No alerts configured yet.</p>
           ) : (
-            <div className="glass rounded-2xl border border-white/10 overflow-hidden">
+            <div className="glass rounded-2xl border border-slate-200/60 dark:border-white/10 overflow-hidden">
               <table className="w-full text-xs">
                 <thead>
-                  <tr className="bg-white/5 border-b border-white/10">
+                  <tr className="bg-slate-50 dark:bg-white/5 border-b border-slate-200 dark:border-white/10">
                     {["Metric", "Threshold", "Direction", "Channel", "Last Triggered", "Status", ""].map(h => (
                       <th key={h} className="px-4 py-3 text-left text-slate-500 font-medium whitespace-nowrap">{h}</th>
                     ))}
@@ -868,12 +871,12 @@ export default function AnalyticsPage() {
                 </thead>
                 <tbody>
                   {alerts.map(a => (
-                    <tr key={a.id} className="border-b border-white/5 hover:bg-white/5">
-                      <td className="px-4 py-3 text-slate-300 font-mono">{a.metric}</td>
-                      <td className="px-4 py-3 text-slate-400">{a.threshold}</td>
-                      <td className="px-4 py-3 text-slate-400">{a.direction}</td>
-                      <td className="px-4 py-3 text-slate-400">{a.channel}</td>
-                      <td className="px-4 py-3 text-slate-500">{fmtDate(a.last_triggered_at)}</td>
+                    <tr key={a.id} className="border-b border-slate-100 dark:border-white/5 hover:bg-slate-50 dark:hover:bg-white/5">
+                      <td className="px-4 py-3 text-slate-700 dark:text-slate-300 font-mono">{a.metric}</td>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{a.threshold}</td>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{a.direction}</td>
+                      <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{a.channel}</td>
+                      <td className="px-4 py-3 text-slate-400 dark:text-slate-500">{fmtDate(a.last_triggered_at)}</td>
                       <td className="px-4 py-3">
                         <button onClick={() => handleToggleAlert(a)}
                           className={clsx("px-2.5 py-1 rounded-full text-[10px] font-bold transition-colors",
@@ -902,11 +905,11 @@ export default function AnalyticsPage() {
           {/* Days selector */}
           <div className="flex items-center gap-2">
             <span className="text-xs text-slate-500 font-medium">Period:</span>
-            <div className="flex rounded-xl overflow-hidden border border-white/10">
+            <div className="flex rounded-xl overflow-hidden border border-slate-200 dark:border-white/10">
               {[7, 14, 30, 90].map(d => (
                 <button key={d} onClick={() => setPerfDays(d)}
                   className={clsx("px-4 py-2 text-xs font-semibold transition-colors",
-                    perfDays === d ? "bg-violet-600 text-white" : "bg-white/5 text-slate-400 hover:text-white")}>
+                    perfDays === d ? "bg-violet-600 text-white" : "bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white")}>
                   {d}d
                 </button>
               ))}

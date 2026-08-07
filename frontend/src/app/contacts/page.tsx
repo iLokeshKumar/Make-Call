@@ -2,6 +2,7 @@
 
 import React, { useCallback, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import UserChip from "@/components/UserChip";
 import {
   Loader2,
   Pencil,
@@ -308,12 +309,15 @@ export default function ContactsPage() {
             Manage people associated with accounts and leads
           </p>
         </div>
-        <button
-          onClick={openCreate}
-          className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01]"
-        >
-          <Plus className="h-4 w-4" /> New Contact
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={openCreate}
+            className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-blue-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-500/20 transition hover:scale-[1.01]"
+          >
+            <Plus className="h-4 w-4" /> New Contact
+          </button>
+          <UserChip />
+        </div>
       </div>
 
       {/* Toast */}

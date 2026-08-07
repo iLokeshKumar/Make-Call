@@ -78,8 +78,7 @@ from services.agent.agent_tool_service import (
 logger = logging.getLogger(__name__)
 
 
-def get_mistral_tools(company_id: int | None = None) -> list[dict[str, Any]]:
-    return [
+_ALL_TOOLS: list[dict[str, Any]] = [
         {
             "type": "function",
             "function": {
@@ -292,16 +291,258 @@ def get_mistral_tools(company_id: int | None = None) -> list[dict[str, Any]]:
         },
     ]
 
-    if company_id is None:
-        return _all_tools
 
-    # Filter to only tools the company has enabled
+# ── Connector / capability tools (backed by the MCP capability router) ──────── #
+# These unlock the connected apps: Apollo/RocketReach prospect search, Zoho CRM,
+# Cal.com/Calendly scheduling, and inventory lookup/reserve. They are resolved at
+# runtime by services.mcp.capability_router.route_capability().
+
+_CAPABILITY_TOOLS: list[dict[str, Any]] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "search_prospects",
+            "description": "Search a connected prospect database (Apollo.io or RocketReach) for new leads matching a profile. Use when the user asks to find people, build a prospect list, or gather contact details for outreach.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "person_title": {"type": "string", "description": "Job title filter, e.g. 'Head of Sales' or 'CTO'."},
+                    "industry": {"type": "string", "description": "Industry filter, e.g. 'Software' or 'Healthcare'."},
+                    "location": {"type": "string", "description": "Location filter, e.g. 'India' or 'Bengaluru'."},
+                    "company_size": {"type": "string", "description": "Company size range filter, e.g. '11-50'."},
+                    "seniority": {"type": "string", "description": "Seniority filter, e.g. 'director', 'vp', 'c_level'."},
+                    "limit": {"type": "integer", "description": "Max results to return (default 10)."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enrich_prospect",
+            "description": "Enrich a prospect with verified email, phone, LinkedIn URL, title, and company size from a connected data provider (Apollo/RocketReach). Provide an email, or name + company_name together.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "email": {"type": "string", "description": "Known email address of the person to enrich."},
+                    "name": {"type": "string", "description": "Full name of the person (use with company_name if email is unknown)."},
+                    "company_name": {"type": "string", "description": "Company the person works at (use with name if email is unknown)."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_crm_contact",
+            "description": "Create a contact or lead in the connected CRM (e.g. Zoho). Use when a lead/contact should be saved to the company's CRM.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "email": {"type": "string"},
+                    "phone": {"type": "string"},
+                    "company": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string", "description": "Notes or context about the contact."},
+                },
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "update_crm_contact",
+            "description": "Update an existing contact in the connected CRM (e.g. Zoho) by record id.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "record_id": {"type": "string", "description": "CRM record id of the contact to update."},
+                    "data": {"type": "object", "description": "Field map with the values to update, e.g. {'phone': '+91...'}."},
+                },
+            },
+            "required": ["record_id", "data"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "crm_query",
+            "description": "Query records in the connected CRM (e.g. Zoho) using a query string or module.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Query string (e.g. COQL for Zoho)."},
+                    "module": {"type": "string", "description": "CRM module name, e.g. Contacts, Leads, Deals."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "enroll_sequence",
+            "description": "Enroll a contact into an outreach sequence in the connected engagement platform (e.g. Apollo).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "contact_id": {"type": "string"},
+                    "sequence_id": {"type": "string"},
+                },
+            },
+            "required": ["contact_id", "sequence_id"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "outreach_analytics",
+            "description": "Pull analytics/reports from the connected outreach platform (e.g. Apollo).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "report_name": {"type": "string", "description": "Which report or metric to fetch."},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inventory_lookup",
+            "description": "Look up a product's stock and details across the company's connected inventory sources by SKU.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku": {"type": "string"},
+                    "location": {"type": "string", "description": "Optional warehouse/location filter."},
+                },
+            },
+            "required": ["sku"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "inventory_reserve",
+            "description": "Reserve quantity of a product by SKU across connected inventory sources.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "sku": {"type": "string"},
+                    "qty": {"type": "integer"},
+                },
+            },
+            "required": ["sku", "qty"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "schedule_meeting",
+            "description": "Schedule a meeting/demo on the connected scheduling app (Cal.com or Calendly). Use when the customer agrees to book a meeting.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "event_type_id": {"type": "string", "description": "Scheduling link / event type id to book against."},
+                    "start_time": {"type": "string", "description": "ISO 8601 start datetime, e.g. 2026-08-10T15:00:00."},
+                    "invitee_email": {"type": "string"},
+                    "invitee_name": {"type": "string"},
+                    "notes": {"type": "string"},
+                },
+            },
+            "required": ["start_time"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_availability",
+            "description": "Check available slots on the connected scheduling app (Cal.com/Calendly) for a given date.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "date": {"type": "string", "description": "Date to check, YYYY-MM-DD."},
+                    "event_type_id": {"type": "string"},
+                },
+            },
+            "required": ["date"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_bookings",
+            "description": "List existing bookings/events from the connected scheduling app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "description": "Filter by status, e.g. active, canceled."},
+                    "from_date": {"type": "string"},
+                    "to_date": {"type": "string"},
+                },
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reschedule_meeting",
+            "description": "Reschedule an existing booking on the connected scheduling app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "booking_id": {"type": "string"},
+                    "new_start_time": {"type": "string", "description": "ISO 8601 new start datetime."},
+                },
+            },
+            "required": ["booking_id", "new_start_time"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "cancel_meeting",
+            "description": "Cancel an existing booking on the connected scheduling app.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "booking_id": {"type": "string"},
+                    "reason": {"type": "string"},
+                },
+            },
+            "required": ["booking_id"],
+        },
+    },
+]
+
+_ALL_TOOLS.extend(_CAPABILITY_TOOLS)
+
+
+def get_mistral_tools(company_id: int | None = None) -> list[dict[str, Any]]:
+    """Return LLM function schemas, optionally filtered to a company's enabled tools.
+
+    When ``company_id`` is None, the full catalog is returned (legacy callers). When a
+    company_id is supplied, the list is filtered to the tools that company has enabled
+    — always-on groups plus integrations it has actually connected (MCP servers,
+    inventory sources, etc.). This is what makes connected apps discoverable to the
+    voice agent and other LLM-driven flows.
+    """
+    if company_id is None:
+        return list(_ALL_TOOLS)
+
     try:
         from mcp_tools.tool_catalog import tool_names_for_company
         enabled = tool_names_for_company(company_id)
-        return [t for t in _all_tools if t["function"]["name"] in enabled]
+        return [t for t in _ALL_TOOLS if t["function"]["name"] in enabled]
     except Exception:
-        return _all_tools
+        logger.warning(
+            "[tool_adapter] tool filtering failed for company %s — returning full list",
+            company_id,
+            exc_info=True,
+        )
+        return list(_ALL_TOOLS)
 
 
 async def _execute_with_session(
@@ -330,6 +571,24 @@ async def _execute_with_session(
     user = get_user_or_404(session, user_id)
     company_id = user.company_id
 
+    # get_product_info must run before the dispatcher — the dispatcher calls it
+    # with an incompatible signature (actor_user_id) and swallows the result.
+    if tool_name == "get_product_info":
+        product_name = arguments.get("product_name", "")
+        logger.info("[tool_adapter] get_product_info: searching for %r (company=%s)", product_name, company_id)
+        from services.inventory.factory import build_inventory_service
+        inv = await build_inventory_service(session, company_id)
+        results = await inv.search(product_name)
+        if results:
+            logger.info("[tool_adapter] get_product_info: HIT via inventory service: %s", results[0].get("name"))
+            return results[0]
+        logger.info("[tool_adapter] get_product_info: no inventory hit, falling back to DB")
+        return get_product_info(
+            session=session,
+            company_id=company_id,
+            product_name=product_name,
+        )
+
     # ── Dispatcher fast-path: delegate to registry if tool is registered ──────
     try:
         from mcp_tools.dispatcher import ToolDispatcher
@@ -346,13 +605,6 @@ async def _execute_with_session(
     except Exception as _disp_exc:
         logger.warning("[tool_adapter] dispatcher check failed, falling through: %s", _disp_exc)
     # ─────────────────────────────────────────────────────────────────────────
-
-    if tool_name == "get_product_info":
-        return get_product_info(
-            session=session,
-            company_id=company_id,
-            product_name=arguments.get("product_name", ""),
-        )
 
     if tool_name == "check_guardrails":
         return check_guardrails(

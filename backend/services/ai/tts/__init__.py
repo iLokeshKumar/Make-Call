@@ -1,3 +1,4 @@
+from .voicebox import VoiceboxTTS
 from .elevenlabs import ElevenLabsTTS
 from .cartesia import CartesiaTTS
 from .sarvam import SarvamTTS
@@ -12,6 +13,7 @@ from .azure import AzureTTS
 from .inworld import InworldTTS
 from .kitten import KittenTTS
 from .vachana import VachanaTTS
+
 
 def get_tts_service(provider: str, api_key: str = None, voice_id: str = None, model: str = None):
     provider = provider.lower()
@@ -43,6 +45,8 @@ def get_tts_service(provider: str, api_key: str = None, voice_id: str = None, mo
         return KittenTTS(api_key=api_key, voice_id=voice_id, model=model)
     elif provider == "vachana":
         return VachanaTTS(api_key=api_key, voice_id=voice_id, model=model)
+    elif provider == "voicebox":
+        return VoiceboxTTS(api_key=api_key, voice_id=voice_id, model=model)
     else:
         # Default fallback
         return CartesiaTTS(api_key=api_key, voice_id=voice_id, model=model)

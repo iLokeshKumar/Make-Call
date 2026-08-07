@@ -6,9 +6,11 @@ import {
   Database, FileText, Shield, Users, Lightbulb, Cpu, Mic,
   ChevronDown, ChevronUp, Sparkles, Send } from "lucide-react";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 // Types
 
@@ -288,17 +290,20 @@ export default function KnowledgePage() {
   return (
     <div className="space-y-8 pb-10">
       {/* Header */}
-      <div>
-        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300">
-          AI Memory
-        </p>
-        <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-white">
-          <span className="gradient-text">Knowledge</span> Base
-        </h1>
-        <p className="mt-2 text-slate-600 dark:text-slate-400">
-          Ground Rio in your product facts, objection guides, and playbooks. Indexed documents
-          are injected into every call and agent workflow automatically.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-violet-600 dark:text-violet-300">
+            AI Memory
+          </p>
+          <h1 className="text-4xl font-bold tracking-tight text-slate-900 dark:text-white">
+            <span className="gradient-text">Knowledge</span> Base
+          </h1>
+          <p className="mt-2 text-slate-600 dark:text-slate-400">
+            Ground Rio in your product facts, objection guides, and playbooks. Indexed documents
+            are injected into every call and agent workflow automatically.
+          </p>
+        </div>
+        <UserChip />
       </div>
 
       {/* Collection stats */}

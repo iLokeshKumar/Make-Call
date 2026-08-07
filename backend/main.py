@@ -79,6 +79,9 @@ from routes import scheme_claims as scheme_claims_router
 from routes import purchase_suite as purchase_suite_router
 from routes import rocketreach_oauth as rocketreach_oauth_router
 from routes import tally_connector as tally_connector_router
+from routes import calcom_connector as calcom_connector_router
+from routes import calendly_connector as calendly_connector_router
+from routes import rocketreach_mcp_connector as rocketreach_mcp_connector_router
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
@@ -733,6 +736,45 @@ def _log_startup_checks() -> None:
     logger.info("[Startup] Key validation complete.")
 
 
+async def _mcp_refresh_loop() -> None:
+    """Background loop: refresh MCP tool caches + health for all companies.
+
+    Keeps the capability router's per-company tool caches fresh so connected
+    apps (Cal.com, Calendly, Apollo, RocketReach, Zoho) stay routable even if
+    their OAuth tokens are refreshed out-of-band or a server changes its tools.
+    """
+    import asyncio as _asyncio
+    from sqlmodel import Session as _Session, select as _select
+
+    interval = int(os.getenv("MCP_REFRESH_INTERVAL", "600"))
+    from models.mcp_server import MCPServer
+    from services.mcp.connection_service import refresh_company_servers
+
+    logger.info("[MCPRefresh] Loop started (interval=%ds)", interval)
+    while True:
+        try:
+            await _asyncio.sleep(interval)
+            with _Session(engine) as session:
+                company_ids = sorted({
+                    s.company_id for s in session.exec(
+                        _select(MCPServer).where(MCPServer.enabled == True)  # noqa: E712
+                    ).all()
+                })
+            for cid in company_ids:
+                try:
+                    refreshed = await refresh_company_servers(cid)
+                    if refreshed:
+                        logger.info("[MCPRefresh] company=%s refreshed servers: %s", cid, refreshed)
+                except _asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[MCPRefresh] company=%s refresh failed: %s", cid, exc)
+        except _asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.exception("[MCPRefresh] Tick error: %s", exc)
+
+
 async def _campaign_schedule_loop() -> None:
     """Background loop: tick campaign schedules every 60 seconds."""
     import asyncio as _asyncio
@@ -767,10 +809,12 @@ async def lifespan(app: FastAPI):
     outbox_task = None
     schedule_task = None
     asr_task = None
+    mcp_task = None
     if enable_bg_workers:
         imap_task = _asyncio.create_task(imap_poll_loop())
         outbox_task = _asyncio.create_task(email_outbox_loop())
         schedule_task = _asyncio.create_task(_campaign_schedule_loop())
+        mcp_task = _asyncio.create_task(_mcp_refresh_loop())
         # ASR cleanup loop (in-process). If you prefer cron/Task Scheduler, use scripts/asr_cleanup_runner.py as a fallback.
         try:
             from services.asr_maintenance import asr_cleanup_loop
@@ -784,7 +828,7 @@ async def lifespan(app: FastAPI):
     try:
         yield
     finally:
-        for task in (imap_task, outbox_task, schedule_task, asr_task):
+        for task in (imap_task, outbox_task, schedule_task, asr_task, mcp_task):
             if task:
                 task.cancel()
         cleanup_bridge_executor()
@@ -922,6 +966,9 @@ app.include_router(scheme_claims_router.router, prefix="/crm")
 app.include_router(purchase_suite_router.router, prefix="/crm")
 app.include_router(rocketreach_oauth_router.router)
 app.include_router(tally_connector_router.router)
+app.include_router(calcom_connector_router.router)
+app.include_router(calendly_connector_router.router)
+app.include_router(rocketreach_mcp_connector_router.router)
 app.include_router(tts_router.router)
 
 try:

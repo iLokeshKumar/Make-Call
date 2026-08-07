@@ -5,9 +5,10 @@ import { useAuth } from "@/context/AuthContext";
 import { Shield, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 
 import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE } from "@/lib/api";
 export default function MFASetup() {
     const { user, refreshUser } = useAuth();
-    const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+    
     const [setupData, setSetupData] = useState<{ secret: string; qr_code: string } | null>(null);
     const [mfaCode, setMfaCode] = useState("");
     const [error, setError] = useState("");

@@ -30,6 +30,7 @@ from auth import PermissionChecker, get_current_user
 from database import get_session
 from models.models import CompanySetting, User, utc_now
 from utils.encryption import decrypt_value, encrypt_value
+from mcp_tools.tool_catalog import invalidate_connections_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/crm/apollo", tags=["Apollo OAuth"])
@@ -184,6 +185,7 @@ async def apollo_oauth_callback(
     if refresh_token:
         _save(session, company_id, "APOLLO_REFRESH_TOKEN", refresh_token, secret=True)
     _save(session, company_id, "APOLLO_CONNECTED", "true", secret=False)
+    invalidate_connections_cache(company_id)
 
     logger.info("[apollo_oauth] Company %s connected to Apollo MCP", company_id)
 
@@ -214,6 +216,7 @@ def apollo_disconnect(
     """Remove stored Apollo tokens for this company."""
     for key in ("APOLLO_ACCESS_TOKEN", "APOLLO_REFRESH_TOKEN", "APOLLO_CONNECTED"):
         _delete(session, current_user.company_id, key)
+    invalidate_connections_cache(current_user.company_id)
     return {"disconnected": True}
 
 

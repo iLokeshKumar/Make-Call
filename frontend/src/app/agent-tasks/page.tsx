@@ -7,9 +7,11 @@ import {
   ChevronDown, ChevronUp, RefreshCw, Ban, ExternalLink, Code2 } from "lucide-react";
 import Link from "next/link";
 import { useAuth } from "@/context/AuthContext";
+import UserChip from "@/components/UserChip";
 
 import { apiFetch } from "@/utils/apiFetch";
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
+
 
 // Types
 
@@ -149,13 +151,13 @@ function TaskQueue() {
             className={`px-3 py-1 rounded-full text-xs font-medium border transition-colors ${
               statusFilter === s
                 ? "bg-indigo-600 text-white border-indigo-500"
-                : "bg-white/5 text-slate-400 border-white/10 hover:border-white/20"
+                : "bg-slate-100 dark:bg-white/5 text-slate-600 dark:text-slate-400 border-slate-200 dark:border-white/10 hover:border-slate-300 dark:hover:border-white/20"
             }`}
           >
             {s === "all" ? "All" : s.replace("_", " ")}
           </button>
         ))}
-        <button onClick={fetchTasks} className="ml-auto p-1.5 rounded hover:bg-white/5 text-slate-400 hover:text-slate-200 transition-colors">
+        <button onClick={fetchTasks} className="ml-auto p-1.5 rounded hover:bg-slate-100 dark:hover:bg-white/5 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -169,26 +171,26 @@ function TaskQueue() {
           <p>No tasks found</p>
         </div>
       ) : (
-        <div className="overflow-x-auto rounded-lg border border-white/8">
+        <div className="overflow-x-auto rounded-lg border border-slate-200 dark:border-white/8">
           <table className="w-full text-sm">
             <thead>
-              <tr className="border-b border-white/8 bg-white/3">
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">ID</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">Type</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">Agent</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">Status</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">Lead</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">Attempts</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium">Created</th>
-                <th className="text-left px-4 py-3 text-slate-400 font-medium"></th>
+              <tr className="border-b border-slate-200 dark:border-white/8 bg-slate-50 dark:bg-white/3">
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">ID</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">Type</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">Agent</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">Status</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">Lead</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">Attempts</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium">Created</th>
+                <th className="text-left px-4 py-3 text-slate-500 dark:text-slate-400 font-medium"></th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/5">
+            <tbody className="divide-y divide-slate-100 dark:divide-white/5">
               {tasks.map(task => (
-                <tr key={task.id} className="hover:bg-white/3 transition-colors">
-                  <td className="px-4 py-3 text-slate-500 font-mono text-xs">#{task.id}</td>
-                  <td className="px-4 py-3 text-slate-200 font-medium">{task.task_type}</td>
-                  <td className="px-4 py-3 text-slate-400">{task.assigned_agent}</td>
+                <tr key={task.id} className="hover:bg-slate-50 dark:hover:bg-white/3 transition-colors">
+                  <td className="px-4 py-3 text-slate-400 dark:text-slate-500 font-mono text-xs">#{task.id}</td>
+                  <td className="px-4 py-3 text-slate-800 dark:text-slate-200 font-medium">{task.task_type}</td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{task.assigned_agent}</td>
                   <td className="px-4 py-3"><StatusBadge status={task.status} /></td>
                   <td className="px-4 py-3">
                     {task.lead_id ? (
@@ -197,8 +199,8 @@ function TaskQueue() {
                       </Link>
                     ) : <span className="text-slate-600">—</span>}
                   </td>
-                  <td className="px-4 py-3 text-slate-400">{task.attempts}/{task.max_attempts}</td>
-                  <td className="px-4 py-3 text-slate-500 text-xs">{fmtDate(task.created_at)}</td>
+                  <td className="px-4 py-3 text-slate-500 dark:text-slate-400">{task.attempts}/{task.max_attempts}</td>
+                  <td className="px-4 py-3 text-slate-400 dark:text-slate-500 text-xs">{fmtDate(task.created_at)}</td>
                   <td className="px-4 py-3">
                     {(task.status === "pending" || task.status === "awaiting_approval") && (
                       <button
@@ -259,13 +261,13 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
         {done === "approved"
           ? <CheckCircle className="w-5 h-5 text-emerald-400 shrink-0" />
           : <XCircle className="w-5 h-5 text-red-400 shrink-0" />}
-        <span className="text-slate-300 text-sm">{title} — {done}</span>
+        <span className="text-slate-700 dark:text-slate-300 text-sm">{title} — {done}</span>
       </div>
     );
   }
 
   return (
-    <div className="rounded-lg border border-white/10 bg-white/3 overflow-hidden">
+    <div className="rounded-lg border border-slate-200 dark:border-white/10 bg-white dark:bg-white/3 overflow-hidden">
       {/* Header */}
       <div className="flex items-center gap-3 px-4 py-3">
         <div className="flex-1 min-w-0">
@@ -284,11 +286,11 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
               </span>
             )}
           </div>
-          <p className="text-slate-200 text-sm mt-1 font-medium">{title}</p>
+          <p className="text-slate-800 dark:text-slate-200 text-sm mt-1 font-medium">{title}</p>
           {description && (
-            <p className="text-slate-400 text-xs mt-0.5 line-clamp-2">{description}</p>
+            <p className="text-slate-500 dark:text-slate-400 text-xs mt-0.5 line-clamp-2">{description}</p>
           )}
-          <p className="text-slate-500 text-xs mt-0.5">
+          <p className="text-slate-400 dark:text-slate-500 text-xs mt-0.5">
             Agent: {appr.task.assigned_agent} · Task #{appr.task_id}
             {appr.task.lead_id && (
               <> · <Link href={`/leads/${appr.task.lead_id}`} className="text-indigo-400 hover:underline">Lead #{appr.task.lead_id}</Link></>
@@ -297,7 +299,7 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
         </div>
         <button
           onClick={() => setExpanded(e => !e)}
-          className="p-1.5 text-slate-400 hover:text-slate-200 transition-colors"
+          className="p-1.5 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors"
         >
           {expanded ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
         </button>
@@ -305,7 +307,7 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
 
       {/* Expanded — structured preview + warnings + actions */}
       {expanded && (
-        <div className="border-t border-white/8 px-4 py-3 space-y-3">
+        <div className="border-t border-slate-200 dark:border-white/8 px-4 py-3 space-y-3">
           {/* Warnings (if any) */}
           {warnings.length > 0 && (
             <div className="rounded border border-amber-500/30 bg-amber-500/5 px-3 py-2 space-y-1">
@@ -324,35 +326,35 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
               <p className="text-xs text-slate-500 font-medium uppercase tracking-wide">
                 {p.preview.channel} preview
               </p>
-              <div className="rounded bg-black/30 border border-white/5 p-3 space-y-2 text-sm">
+              <div className="rounded bg-slate-50 dark:bg-black/30 border border-slate-200 dark:border-white/5 p-3 space-y-2 text-sm">
                 {p.preview.to && (
-                  <div><span className="text-slate-500 text-xs">To: </span><span className="text-slate-200">{p.preview.to}</span></div>
+                  <div><span className="text-slate-400 dark:text-slate-500 text-xs">To: </span><span className="text-slate-800 dark:text-slate-200">{p.preview.to}</span></div>
                 )}
                 {p.preview.quote && (
-                  <div><span className="text-slate-500 text-xs">Quote: </span><span className="text-slate-200">{p.preview.quote}</span></div>
+                  <div><span className="text-slate-400 dark:text-slate-500 text-xs">Quote: </span><span className="text-slate-800 dark:text-slate-200">{p.preview.quote}</span></div>
                 )}
                 {p.preview.proposal_id && (
-                  <div><span className="text-slate-500 text-xs">Proposal: </span><span className="text-slate-200">#{p.preview.proposal_id}</span></div>
+                  <div><span className="text-slate-400 dark:text-slate-500 text-xs">Proposal: </span><span className="text-slate-800 dark:text-slate-200">#{p.preview.proposal_id}</span></div>
                 )}
                 {p.preview.pdf_path && (
-                  <div><span className="text-slate-500 text-xs">PDF: </span><span className="text-slate-200">{p.preview.pdf_path}</span></div>
+                  <div><span className="text-slate-400 dark:text-slate-500 text-xs">PDF: </span><span className="text-slate-800 dark:text-slate-200">{p.preview.pdf_path}</span></div>
                 )}
                 {p.preview.channels && p.preview.channels.length > 0 && (
-                  <div><span className="text-slate-500 text-xs">Channels: </span><span className="text-slate-200">{p.preview.channels.join(", ")}</span></div>
+                  <div><span className="text-slate-400 dark:text-slate-500 text-xs">Channels: </span><span className="text-slate-800 dark:text-slate-200">{p.preview.channels.join(", ")}</span></div>
                 )}
                 {p.preview.subject && (
-                  <div><span className="text-slate-500 text-xs">Subject: </span><span className="text-slate-200 font-medium">{p.preview.subject}</span></div>
+                  <div><span className="text-slate-400 dark:text-slate-500 text-xs">Subject: </span><span className="text-slate-800 dark:text-slate-200 font-medium">{p.preview.subject}</span></div>
                 )}
                 {p.preview.body && (
                   <div>
-                    <span className="text-slate-500 text-xs">Body:</span>
-                    <p className="mt-1 text-slate-200 whitespace-pre-wrap text-sm">{p.preview.body}</p>
+                    <span className="text-slate-400 dark:text-slate-500 text-xs">Body:</span>
+                    <p className="mt-1 text-slate-800 dark:text-slate-200 whitespace-pre-wrap text-sm">{p.preview.body}</p>
                   </div>
                 )}
                 {p.preview.message && (
                   <div>
-                    <span className="text-slate-500 text-xs">Message:</span>
-                    <p className="mt-1 text-slate-200 whitespace-pre-wrap text-sm">{p.preview.message}</p>
+                    <span className="text-slate-400 dark:text-slate-500 text-xs">Message:</span>
+                    <p className="mt-1 text-slate-800 dark:text-slate-200 whitespace-pre-wrap text-sm">{p.preview.message}</p>
                   </div>
                 )}
                 {p.preview.cta && (
@@ -366,13 +368,13 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
           <div>
             <button
               onClick={() => setShowRaw(r => !r)}
-              className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-300 transition-colors"
+              className="flex items-center gap-1 text-xs text-slate-400 dark:text-slate-500 hover:text-slate-700 dark:hover:text-slate-300 transition-colors"
             >
               <Code2 className="w-3 h-3" />
               {showRaw ? "Hide" : "Show"} raw payload
             </button>
             {showRaw && (
-              <pre className="mt-2 text-xs text-slate-400 bg-black/30 rounded p-3 overflow-x-auto max-h-40">
+              <pre className="mt-2 text-xs text-slate-600 dark:text-slate-400 bg-slate-100 dark:bg-black/30 rounded p-3 overflow-x-auto max-h-40">
                 {JSON.stringify(p?.raw ?? appr.action_payload, null, 2)}
               </pre>
             )}
@@ -380,15 +382,15 @@ function ApprovalCard({ appr, onRefresh }: { appr: Approval; onRefresh: () => vo
 
           {/* Note */}
           <div>
-            <label className="text-xs text-slate-500 mb-1 block font-medium">
-              Note <span className="text-slate-600">(required for rejection)</span>
+            <label className="text-xs text-slate-500 dark:text-slate-500 mb-1 block font-medium">
+              Note <span className="text-slate-400 dark:text-slate-600">(required for rejection)</span>
             </label>
             <textarea
               value={note}
               onChange={e => setNote(e.target.value)}
               rows={2}
               placeholder="Optional note for the agent log…"
-              className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 resize-none"
+              className="w-full bg-white dark:bg-black/30 border border-slate-200 dark:border-white/10 rounded px-3 py-2 text-sm text-slate-800 dark:text-slate-200 placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:border-indigo-500 resize-none"
             />
           </div>
 
@@ -441,10 +443,10 @@ function ReviewQueue() {
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
-        <p className="text-sm text-slate-400">
+        <p className="text-sm text-slate-500 dark:text-slate-400">
           {approvals.length === 0 ? "No actions awaiting review" : `${approvals.length} action${approvals.length === 1 ? "" : "s"} awaiting review`}
         </p>
-        <button onClick={fetchApprovals} className="p-1.5 rounded hover:bg-white/5 text-slate-400 hover:text-slate-200 transition-colors">
+        <button onClick={fetchApprovals} className="p-1.5 rounded hover:bg-slate-100 dark:hover:bg-white/5 text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 transition-colors">
           <RefreshCw className="w-4 h-4" />
         </button>
       </div>
@@ -482,18 +484,21 @@ export default function AgentTasksPage() {
   return (
     <div className="p-6 max-w-6xl mx-auto space-y-6">
       {/* Header */}
-      <div className="flex items-center gap-3">
-        <div className="p-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
-          <Bot className="w-6 h-6 text-indigo-400" />
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="p-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20">
+            <Bot className="w-6 h-6 text-indigo-400" />
+          </div>
+          <div>
+            <h1 className="text-xl font-semibold text-slate-900 dark:text-slate-100">Agent Tasks</h1>
+            <p className="text-sm text-slate-500 dark:text-slate-400">Orchestrator work queue and human approval gate</p>
+          </div>
         </div>
-        <div>
-          <h1 className="text-xl font-semibold text-slate-100">Agent Tasks</h1>
-          <p className="text-sm text-slate-400">Orchestrator work queue and human approval gate</p>
-        </div>
+        <UserChip />
       </div>
 
       {/* Tabs */}
-      <div className="flex gap-1 bg-white/5 border border-white/8 rounded-lg p-1 w-fit">
+      <div className="flex gap-1 bg-slate-100 dark:bg-white/5 border border-slate-200 dark:border-white/8 rounded-lg p-1 w-fit">
         {(["queue", "review"] as const).map(t => (
           <button
             key={t}
@@ -501,7 +506,7 @@ export default function AgentTasksPage() {
             className={`px-4 py-2 rounded text-sm font-medium transition-colors ${
               tab === t
                 ? "bg-indigo-600 text-white shadow-sm"
-                : "text-slate-400 hover:text-slate-200"
+                : "text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200"
             }`}
           >
             {t === "queue" ? "Task Queue" : "Review Queue"}

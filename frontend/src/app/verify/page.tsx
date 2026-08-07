@@ -4,8 +4,7 @@ import { useEffect, useState, Suspense, useRef } from "react";
 import { useSearchParams } from "next/navigation";
 import { CheckCircle, XCircle, Loader2, ArrowRight } from "lucide-react";
 import Link from "next/link";
-
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE_URL || (typeof window !== "undefined" ? (window.location.hostname.includes("ngrok-free.dev") ? `${window.location.protocol}//${window.location.host}` : `${window.location.protocol}//127.0.0.1:6060`) : "http://127.0.0.1:6060");
+import { API_BASE } from "@/lib/api";
 
 type VerificationResponse = {
     detail?: string | { message?: string };

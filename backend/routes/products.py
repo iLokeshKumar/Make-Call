@@ -1,10 +1,13 @@
 import io
 import logging
+import re
+import difflib
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
-from fastapi.responses import Response
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, UploadFile
+from fastapi.responses import JSONResponse, Response
+from typing import Optional
 from sqlmodel import Session, func, select
 
 from auth import PermissionChecker
@@ -13,51 +16,145 @@ from models.models import Product, ProductCreate, ProductUpdate, User, utc_now
 
 logger = logging.getLogger(__name__)
 
-# Column aliases — maps whatever the user puts in the header → our field name
-_COL_MAP: dict[str, str] = {
-    "name": "name", "product_name": "name", "item_name": "name", "title": "name",
-    "sku": "sku", "code": "sku", "item_code": "sku", "product_code": "sku",
-    "stock": "stock", "quantity": "stock", "qty": "stock", "inventory": "stock",
-    "price": "price", "selling_price": "price", "sale_price": "price", "sp": "price",
-    "mrp": "mrp", "maximum_retail_price": "mrp",
-    "cost_price": "cost_price", "cost": "cost_price", "purchase_price": "cost_price",
-    "min_price": "min_price", "minimum_price": "min_price",
-    "currency": "currency",
-    "note": "note", "notes": "note", "remarks": "note",
-    "brand": "brand", "manufacturer": "brand",
-    "category": "category", "cat": "category",
-    "subcategory": "subcategory", "sub_category": "subcategory", "subcat": "subcategory",
-    "product_line": "product_line", "line": "product_line",
-    "model_number": "model_number", "model": "model_number", "model_no": "model_number",
-    "description": "description", "desc": "description", "details": "description",
-    "hsn_code": "hsn_code", "hsn": "hsn_code",
-    "tax_rate": "tax_rate", "tax": "tax_rate", "gst": "tax_rate",
-    "unit": "unit", "uom": "unit",
-    "reorder_level": "reorder_level", "reorder": "reorder_level",
-    "warranty_months": "warranty_months", "warranty": "warranty_months",
-    "image_url": "image_url", "image": "image_url",
-    "is_active": "is_active", "active": "is_active", "status": "is_active",
+# ---------------------------------------------------------------------------
+# Dynamic column detection
+# ---------------------------------------------------------------------------
+
+_PRODUCT_FIELDS: frozenset[str] = frozenset({
+    "name", "sku", "stock", "price", "mrp", "cost_price", "min_price",
+    "currency", "brand", "category", "subcategory", "product_line",
+    "model_number", "description", "hsn_code", "tax_rate", "unit",
+    "reorder_level", "warranty_months", "note", "image_url", "is_active",
+})
+
+# Explicit aliases only for words that don't match a field name directly
+_ALIASES: dict[str, str] = {
+    "product": "name", "item": "name", "goods": "name", "title": "name",
+    "product_name": "name", "item_name": "name", "goods_name": "name", "part_name": "name",
+    "product_details": "name",
+    "selling_price": "price", "sale_price": "price", "sell_price": "price", "sp": "price",
+    "approved_price": "min_price",
+    "quantity": "stock", "qty": "stock", "inventory": "stock",
+    "maximum_retail_price": "mrp",
+    "cost": "cost_price", "purchase_price": "cost_price", "purchase": "cost_price",
+    "minimum_price": "min_price",
+    "manufacturer": "brand",
+    "cat": "category",
+    "sub_category": "subcategory", "subcat": "subcategory",
+    "model": "model_number", "model_no": "model_number", "part_no": "sku", "part_number": "sku",
+    "desc": "description", "details": "description",
+    "hsn": "hsn_code",
+    "tax": "tax_rate", "gst": "tax_rate", "vat": "tax_rate",
+    "uom": "unit",
+    "reorder": "reorder_level",
+    "warranty": "warranty_months",
+    "notes": "note", "remarks": "note", "comments": "note",
+    "image": "image_url", "photo": "image_url", "picture": "image_url",
+    "active": "is_active", "status": "is_active", "enabled": "is_active",
+    "code": "sku", "item_code": "sku", "product_code": "sku",
+    "line": "product_line",
 }
 
+# Strings that represent missing/empty values in spreadsheets
+_NULL_STRINGS: frozenset[str] = frozenset({
+    "nan", "none", "null", "n/a", "na", "#n/a", "#na",
+    "-", "—", "–", "nil", "",
+})
+
 _DECIMAL_FIELDS = {"price", "mrp", "cost_price", "min_price", "tax_rate"}
+_RANGE_SEP = re.compile(r"\s*[-–—]\s*")
+
+
+def _parse_price_range(val: str) -> tuple["Decimal | None", "Decimal | None"]:
+    """Parse '₹28,500 - ₹32,000' into (Decimal('28500'), Decimal('32000')).
+    Returns (None, None) if not a valid two-part range."""
+    parts = _RANGE_SEP.split(val.strip(), maxsplit=1)
+    if len(parts) != 2:
+        return None, None
+
+    def _clean(s: str) -> "Decimal | None":
+        cleaned = re.sub(r"[^\d.]", "", s.replace(",", ""))
+        try:
+            return Decimal(cleaned) if cleaned else None
+        except InvalidOperation:
+            return None
+
+    lo, hi = _clean(parts[0]), _clean(parts[1])
+    if lo is None or hi is None:
+        return None, None
+    return (lo, hi) if lo <= hi else (hi, lo)
 _INT_FIELDS = {"stock", "reorder_level", "warranty_months"}
 _BOOL_FIELDS = {"is_active"}
-
 _TRUE_VALS = {"1", "true", "yes", "y", "active", "on"}
+
+_STOP_WORDS = {"", "per", "in", "of", "the", "a", "an", "and", "or", "by"}
+
+
+def _normalize_col(col: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", col.strip().lower()).strip("_")
+
+
+def _map_column(col: str) -> str | None:
+    """Dynamically map any column header to a product field name."""
+    norm = _normalize_col(col)
+    if not norm:
+        return None
+
+    # 1. Exact alias match
+    if norm in _ALIASES:
+        return _ALIASES[norm]
+
+    # 2. Exact field name match
+    if norm in _PRODUCT_FIELDS:
+        return norm
+
+    # 3. Word-based: all words of a field name are present in the column words
+    words = set(norm.split("_")) - _STOP_WORDS
+    for field in _PRODUCT_FIELDS:
+        field_words = set(field.split("_")) - _STOP_WORDS
+        if field_words and field_words.issubset(words):
+            return field
+
+    # 4. Alias key words overlap — require multi-word aliases to avoid false positives
+    # (e.g. "product" alias should NOT match "product_catalog" which has 2 words)
+    for alias, field in _ALIASES.items():
+        alias_words = set(alias.split("_")) - _STOP_WORDS
+        if not alias_words:
+            continue
+        if len(alias_words) == 1 and len(words) > 1:
+            continue  # single-word alias must be an exact column name, not one word of many
+        if alias_words.issubset(words):
+            return field
+
+    # 5. Fuzzy fallback
+    candidates = list(_ALIASES) + [f for f in _PRODUCT_FIELDS]
+    matches = difflib.get_close_matches(norm, candidates, n=1, cutoff=0.78)
+    if matches:
+        m = matches[0]
+        return _ALIASES.get(m) or (m if m in _PRODUCT_FIELDS else None)
+
+    return None
 
 
 def _coerce(field: str, raw: Any) -> Any:
-    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+    # Float NaN from pandas
+    if raw is None or (isinstance(raw, float) and raw != raw):
         return None
     val = str(raw).strip()
+    if val.lower() in _NULL_STRINGS:
+        return None
     if field in _DECIMAL_FIELDS:
+        # Strip currency symbols and commas
+        cleaned = re.sub(r"[^\d.\-]", "", val.replace(",", ""))
         try:
-            return Decimal(val.replace(",", ""))
+            return Decimal(cleaned) if cleaned else None
         except InvalidOperation:
             return None
     if field in _INT_FIELDS:
+        # Strip trailing non-numeric (e.g. "10 units" → 10)
+        m = re.match(r"[\-\d]+", val)
         try:
-            return int(float(val))
+            return int(float(m.group())) if m else None
         except (ValueError, TypeError):
             return None
     if field in _BOOL_FIELDS:
@@ -65,30 +162,83 @@ def _coerce(field: str, raw: Any) -> Any:
     return val or None
 
 
-def _parse_product_file(content: bytes, filename: str) -> list[dict]:
-    """Parse CSV or Excel into a list of raw product dicts."""
+def _parse_product_file(
+    content: bytes, filename: str, sheet_name: str | None = None
+) -> list[dict]:
+    """Parse CSV or Excel into a list of raw product dicts using dynamic column detection.
+
+    When multiple columns in the source file map to the same product field, the one
+    whose rows contain the longest average non-empty value is chosen.  This means a
+    "Product Details" column with full product names will automatically beat a
+    "Product Name" column that only holds short category codes — with no hardcoding.
+    """
     import pandas as pd
+    from collections import defaultdict
 
     ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else "csv"
     buf = io.BytesIO(content)
 
     if ext in ("xlsx", "xls"):
-        df = pd.read_excel(buf, dtype=str)
+        df = pd.read_excel(buf, dtype=str, sheet_name=sheet_name if sheet_name else 0)
     else:
         df = pd.read_csv(buf, dtype=str)
 
-    df.columns = [str(c).strip().lower().replace(" ", "_") for c in df.columns]
+    # Collect all candidate columns per field, scored by coverage × avg non-null length.
+    # This ensures a column filled in 33/33 rows always beats one filled in 17/33 rows,
+    # even if the per-row lengths are identical.
+    field_candidates: dict[str, list[tuple[float, str]]] = defaultdict(list)
+    total_rows = max(len(df), 1)
+    for col in df.columns:
+        field = _map_column(str(col))
+        if not field:
+            continue
+        series = df[col].fillna("").astype(str)
+        non_null = series[~series.str.lower().isin(_NULL_STRINGS) & (series.str.len() > 0)]
+        coverage = len(non_null) / total_rows
+        avg_len = float(non_null.str.len().mean()) if len(non_null) > 0 else 0.0
+        score = coverage * avg_len
+        field_candidates[field].append((score, str(col)))
+
+    # For each field, keep only the highest-scoring candidate column
+    col_to_field: dict[str, str] = {
+        max(cands, key=lambda x: x[0])[1]: field
+        for field, cands in field_candidates.items()
+    }
+
+    logger.debug("import column map: %s", col_to_field)
 
     rows = []
     for _, row in df.iterrows():
         product: dict = {}
+        range_derived: set[str] = set()  # fields set by range parsing; protected from overwrite
+
         for raw_col, value in row.items():
-            field = _COL_MAP.get(str(raw_col).strip().lower())
+            field = col_to_field.get(str(raw_col))
             if not field:
                 continue
+
+            # Detect price-range values like "₹28,500 - ₹32,000"
+            if field in _DECIMAL_FIELDS:
+                raw_str = str(value).strip() if value is not None else ""
+                lo, hi = _parse_price_range(raw_str)
+                if lo is not None and hi is not None:
+                    product["min_price"] = lo
+                    product[field] = hi
+                    range_derived.update({"min_price", field})
+                    continue
+
+            # Don't let non-range values overwrite fields already set by range parsing
+            if field in range_derived:
+                continue
+
             coerced = _coerce(field, value)
             if coerced is not None:
                 product[field] = coerced
+
+        # Fallback: rows with only an exact approved/floor price and no range
+        if not product.get("price") and product.get("min_price"):
+            product["price"] = product["min_price"]
+
         if product.get("name"):
             rows.append(product)
     return rows
@@ -260,9 +410,26 @@ async def download_product_template():
     )
 
 
+@router.post("/products/import/sheets")
+async def list_excel_sheets(
+    file: UploadFile = File(...),
+    current_user: User = Depends(PermissionChecker("product.manage")),
+):
+    """Return the sheet names present in an uploaded Excel file."""
+    import pandas as pd
+
+    ext = (file.filename or "").rsplit(".", 1)[-1].lower()
+    if ext not in {"xlsx", "xls"}:
+        raise HTTPException(status_code=400, detail="Only Excel files have multiple sheets.")
+    content = await file.read()
+    xl = pd.ExcelFile(io.BytesIO(content))
+    return JSONResponse({"sheets": xl.sheet_names})
+
+
 @router.post("/products/import")
 async def import_products_from_file(
     file: UploadFile = File(...),
+    sheet_name: Optional[str] = Form(None),
     session: Session = Depends(get_session),
     current_user: User = Depends(PermissionChecker("product.manage")),
 ):
@@ -271,11 +438,9 @@ async def import_products_from_file(
     - Rows with a matching SKU are **updated** (upsert by SKU).
     - Rows without a SKU or with a new SKU are **created**.
     - Returns a summary: created / updated / skipped / errors.
+    - For Excel files with multiple sheets, pass ``sheet_name`` to select one.
 
-    Required column: ``name``.
-    Optional columns: sku, stock, price, mrp, cost_price, currency, brand,
-    category, subcategory, product_line, model_number, description, hsn_code,
-    tax_rate, unit, reorder_level, warranty_months, note, is_active.
+    Required column: ``name`` (or any column the dynamic mapper can infer as the product name).
     """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file uploaded.")
@@ -288,15 +453,19 @@ async def import_products_from_file(
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(status_code=400, detail="File too large (max 10 MB).")
 
+    sn = sheet_name.strip() if sheet_name and sheet_name.strip() else None
     try:
-        rows = _parse_product_file(content, file.filename)
+        rows = _parse_product_file(content, file.filename, sheet_name=sn)
     except Exception as exc:
+        logger.warning("import_products: parse failed for %s: %s", file.filename, exc)
         raise HTTPException(status_code=422, detail=f"Could not parse file: {exc}")
 
     if not rows:
+        logger.warning("import_products: no valid rows found in %s", file.filename)
         raise HTTPException(
             status_code=422,
-            detail="No valid rows found. Ensure the file has a 'name' column.",
+            detail="No valid rows found — could not detect a product name column. "
+                   "Accepted column names: 'Product', 'Name', 'Item', 'Title', or similar.",
         )
 
     created = updated = skipped = 0
@@ -389,6 +558,26 @@ async def update_inventory_product(
     current_user: User = Depends(PermissionChecker("product.manage")),
 ):
     return await update_product(product_id=product_id, data=data, session=session, current_user=current_user)
+
+
+@router.delete("/inventory/bulk")
+async def bulk_delete_inventory_products(
+    ids: list[int] = Body(..., embed=True),
+    session: Session = Depends(get_session),
+    current_user: User = Depends(PermissionChecker("product.manage")),
+):
+    if not ids:
+        raise HTTPException(status_code=400, detail="No IDs provided.")
+    products = session.exec(
+        select(Product).where(
+            Product.company_id == current_user.company_id,
+            Product.id.in_(ids),
+        )
+    ).all()
+    for p in products:
+        session.delete(p)
+    session.commit()
+    return {"deleted": len(products)}
 
 
 @router.delete("/inventory/{product_id}")
