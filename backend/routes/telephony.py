@@ -12,7 +12,7 @@ from twilio.twiml.messaging_response import MessagingResponse
 from twilio.twiml.voice_response import Connect, Dial, Gather, Hangup, VoiceResponse
 
 from auth import PermissionChecker, get_current_user
-from communicators import EnableXCommunicator, ExotelCommunicator, TwilioCommunicator, PlivoCommunicator, VobizCommunicator
+from communicators import BrowserCommunicator, EnableXCommunicator, ExotelCommunicator, TwilioCommunicator, PlivoCommunicator, VobizCommunicator
 from credentials_service import get_company_credential, get_company_setting_value
 from database import get_session
 from models.models import CallTask, Company, Interaction, Lead, User, VoiceAgentRuntimeConfig, utc_now
@@ -116,6 +116,8 @@ def _trigger_enablex_recording(session: Session, company_id: int, interaction_id
 
 
 def get_communicator_for_source(source: str, websocket):
+    if source == "browser":
+        return BrowserCommunicator(websocket)
     if source == "enablex":
         return EnableXCommunicator(websocket)
     if source == "exotel":
@@ -1150,6 +1152,20 @@ async def warm_transfer(
         transfer_to=transfer_to,
         isr_name=isr_name,
     )
+
+
+@router.api_route("/warm-transfer-instructions", methods=["GET", "POST"])
+async def warm_transfer_instructions(transfer_to: str):
+    """Provider callback XML used by Plivo and Vobiz for an active transfer."""
+    from xml.sax.saxutils import escape as xml_escape
+
+    destination = xml_escape(transfer_to)
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response><Speak>Please hold while we connect you to a human agent.</Speak>"
+        f"<Dial><Number>{destination}</Number></Dial></Response>"
+    )
+    return HTMLResponse(content=xml, media_type="application/xml")
 
 
 @router.post("/outbound/callback")

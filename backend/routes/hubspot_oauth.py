@@ -36,6 +36,7 @@ from auth import PermissionChecker, get_current_user
 from database import get_session
 from models.models import ProviderCredential, User, utc_now
 from utils.encryption import decrypt_value, encrypt_value
+from mcp_tools.tool_catalog import invalidate_connections_cache as _invalidate_tool_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/crm/hubspot", tags=["HubSpot OAuth"])
@@ -89,6 +90,11 @@ def _save_token(session: Session, company_id: int, key_name: str, value: str) ->
             is_active=True,
         ))
     session.commit()
+    # Token changes affect which tools unlock — drop the cached connection set.
+    try:
+        _invalidate_tool_cache(company_id)
+    except Exception:
+        pass
 
 
 def _get_token(session: Session, company_id: int, key_name: str) -> Optional[str]:
@@ -117,6 +123,10 @@ def _delete_tokens(session: Session, company_id: int) -> None:
     ).all():
         session.delete(cred)
     session.commit()
+    try:
+        _invalidate_tool_cache(company_id)
+    except Exception:
+        pass
 
 
 def get_company_hubspot_token(session: Session, company_id: int) -> Optional[str]:

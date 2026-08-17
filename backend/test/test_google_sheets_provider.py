@@ -83,6 +83,15 @@ def test_parse_public_sheet_tabs_from_google_page_html() -> None:
     ]
 
 
+def test_parse_public_sheet_title() -> None:
+    assert gsheets._parse_public_sheet_title("<title>Inventory - Google Sheets</title>") == "Inventory"
+    assert gsheets._parse_public_sheet_title("<title>Stock &amp; Pricing - Google Sheets</title>") == "Stock & Pricing"
+    assert gsheets._parse_public_sheet_title(
+        '<meta property="og:title" content="Stock Levels"><title>x - Google Sheets</title>'
+    ) == "Stock Levels"
+    assert gsheets._parse_public_sheet_title("<html><body>no title</body></html>") is None
+
+
 @pytest.mark.asyncio
 async def test_lists_public_worksheets(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(gsheets.httpx, "AsyncClient", _FakeAsyncClient)

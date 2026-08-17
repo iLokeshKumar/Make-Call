@@ -88,6 +88,8 @@ ALL_TENANT_TABLES: list[str] = [
     "voice_agent_tools",
     "voice_agent_voice_presets",
     "voice_agents",
+    "agent_chat_sessions",
+    "agent_chat_messages",
     "provider_phone_numbers",
     "campaign_schedules",
     "sip_trunks",

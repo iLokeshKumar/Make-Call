@@ -204,3 +204,15 @@ async def route_capability(
 def list_capabilities(current_user: User = Depends(get_current_user)):
     """List all available business capability names."""
     return {"capabilities": cap_router.get_capabilities()}
+
+
+@router.get("/capabilities/summary")
+def capabilities_summary(current_user: User = Depends(get_current_user)):
+    """Per-company 'effective capabilities' summary for the Settings card.
+
+    Returns provider priority chains with connected/degraded/disconnected state
+    per capability — the same truth the per-call system prompt injects via
+    connected_providers_context(), so Settings and calls can't diverge.
+    """
+    from services.mcp.connected_providers import build_capabilities_summary
+    return build_capabilities_summary(current_user.company_id)

@@ -137,8 +137,10 @@ def get_or_create_lead(name: str, phone: str, email: Optional[str] = None, compa
         if not lead:
             if not company_id:
                 return {"error": "company_id is required to create a new lead."}
+            if not (name or "").strip():
+                return {"error": "The caller's name is required before creating a lead record.", "next_suggestion": "Ask the caller for their name, then retry."}
             print(f"Creating new lead: {name}")
-            lead = Lead(name=name, normalized_phone=phone, email=email, company_id=company_id)
+            lead = Lead(name=name.strip(), normalized_phone=phone, email=email, company_id=company_id)
             session.add(lead)
             session.commit()
             session.refresh(lead)

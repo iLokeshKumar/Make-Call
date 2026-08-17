@@ -107,38 +107,61 @@ def _parse_public_sheet_tabs(page_html: str) -> list[dict[str, str]]:
     return tabs
 
 
-async def _feeds_api_tabs(
+def _parse_public_sheet_title(page_html: str) -> str | None:
+    """Extract the workbook title from a public Google Sheet page.
+
+    Prefers og:title (exact sheet name), falls back to the <title> tag
+    ("<SheetName> - Google Sheets").
+    """
+    patterns = (
+        re.compile(r'<meta[^>]+(?:property|name)="og:title"[^>]+content="([^"]+)"', re.I),
+        re.compile(r"<meta[^>]+(?:property|name)='og:title'[^>]+content='([^']+)'", re.I),
+        re.compile(r"<title[^>]*>\s*(.*?)(?:\s*[-–—]\s*Google\s*Sheets)?\s*</title>", re.I | re.S),
+    )
+    for pattern in patterns:
+        match = pattern.search(page_html)
+        if not match:
+            continue
+        title = html.unescape(match.group(1)).strip()
+        if title and len(title) <= 200:
+            return title
+    return None
+
+
+async def public_sheet_title(sheet_url: str) -> str | None:
+    """Best-effort fetch of a public Google Sheet's workbook title. Never
+    raises — callers treat None as "no name available" for auto-fill."""
+    sheet_id = _extract_sheet_id(sheet_url)
+    if not sheet_id:
+        return None
+    headers = {"User-Agent": _BROWSER_UA}
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
+            resp = await client.get(
+                f"https://docs.google.com/spreadsheets/d/{sheet_id}/htmlview",
+                headers=headers,
+            )
+            resp.raise_for_status()
+            return _parse_public_sheet_title(resp.text)
+    except Exception:
+        return None
+
+
+async def _gviz_api_tabs(
     client: httpx.AsyncClient, sheet_id: str, headers: dict
 ) -> list[dict[str, str]]:
     """
-    Use the legacy Google Sheets v3 Atom/JSON feeds endpoint to enumerate worksheet
-    tabs for a publicly-shared spreadsheet. This endpoint is more structured than
-    HTML scraping and returns the numeric gid via the visualizationApi link.
+    Check sheet accessibility via Google's GViz API endpoint.
+    Returns default tab if GViz responds cleanly with status: ok.
     """
     try:
-        url = f"https://spreadsheets.google.com/feeds/worksheets/{sheet_id}/public/basic?alt=json"
+        url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/gviz/tq?tqx=out:json"
         resp = await client.get(url, headers=headers)
-        if resp.status_code != 200:
-            return []
-        data = resp.json()
-        entries = data.get("feed", {}).get("entry", [])
-        tabs: list[dict[str, str]] = []
-        for i, entry in enumerate(entries):
-            name = entry.get("title", {}).get("$t", "").strip()
-            if not name or len(name) > 200:
-                continue
-            # The visualizationApi link href contains ?gid=N — that's the real numeric gid.
-            gid: str | None = None
-            for link in entry.get("link", []):
-                href = link.get("href", "")
-                m = re.search(r"[?&]gid=(\d+)", href)
-                if m:
-                    gid = m.group(1)
-                    break
-            tabs.append({"name": name, "gid": gid or str(i)})
-        return tabs
+        if resp.status_code == 200 and 'google.visualization' in resp.text:
+            return [{"name": "Default Tab (Sheet 1)", "gid": "0"}]
+        return []
     except Exception as exc:
-        logger.debug("GoogleSheetsProvider: feeds API failed sheet=%s: %s", sheet_id, exc)
+        logger.debug("GoogleSheetsProvider: GViz API check failed sheet=%s: %s", sheet_id, exc)
         return []
 
 
@@ -150,17 +173,7 @@ async def list_public_worksheets(sheet_url: str) -> list[dict[str, str]]:
     headers = {"User-Agent": _BROWSER_UA}
 
     async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
-        # Strategy 1: Legacy v3 Atom feeds JSON — structured, no API key needed for public sheets.
-        # Returns the real numeric gid via the visualizationApi link on each entry.
-        tabs = await _feeds_api_tabs(client, sheet_id, headers)
-        if tabs:
-            logger.info(
-                "GoogleSheetsProvider: feeds API found %d tab(s) for sheet=%s",
-                len(tabs), sheet_id,
-            )
-            return tabs
-
-        # Strategy 2: HTML scraping of /htmlview and /edit pages.
+        # Strategy 1: HTML scraping of /htmlview and /edit pages.
         for url in [
             f"https://docs.google.com/spreadsheets/d/{sheet_id}/htmlview",
             f"https://docs.google.com/spreadsheets/d/{sheet_id}/edit?usp=sharing",
@@ -177,6 +190,12 @@ async def list_public_worksheets(sheet_url: str) -> list[dict[str, str]]:
                     return tabs
             except Exception as exc:
                 logger.info("GoogleSheetsProvider: tab discovery failed url=%s error=%s", url, exc)
+
+        # Strategy 2: GViz API check — confirms sheet accessibility & returns default tab.
+        tabs = await _gviz_api_tabs(client, sheet_id, headers)
+        if tabs:
+            logger.info("GoogleSheetsProvider: GViz API confirmed sheet accessibility for sheet=%s", sheet_id)
+            return tabs
 
     logger.warning("GoogleSheetsProvider: no worksheet tabs found for sheet=%s", sheet_id)
     return []
@@ -204,8 +223,9 @@ _INVENTORY_SHEET_CANDIDATES = (
 
 
 class GoogleSheetsProvider(InventoryProvider):
-    def __init__(self, config: dict, priority: int = 80):
+    def __init__(self, config: dict, priority: int = 80, company_id: Optional[int] = None):
         self.priority = priority
+        self.company_id = company_id
         sheet_url = config.get("url", "")
         self._sheet_id = _extract_sheet_id(sheet_url)
         self._gid = str(config.get("gid") or _extract_gid(sheet_url) or "").strip() or None
@@ -244,6 +264,18 @@ class GoogleSheetsProvider(InventoryProvider):
 
         from routes.products import _parse_product_file
 
+        headers = {}
+        if self.company_id:
+            try:
+                from database import get_session as _get_db_session
+                from routes.calendar import get_company_calendar_credentials
+                with next(_get_db_session()) as _session:
+                    creds = get_company_calendar_credentials(_session, self.company_id)
+                    if creds and creds.token:
+                        headers["Authorization"] = f"Bearer {creds.token}"
+            except Exception as _exc:
+                logger.debug("GoogleSheetsProvider: could not load OAuth token for company %s: %s", self.company_id, _exc)
+
         errors: list[str] = []
         async with httpx.AsyncClient(follow_redirects=True, timeout=15) as client:
             for candidate in self._candidates():
@@ -255,7 +287,7 @@ class GoogleSheetsProvider(InventoryProvider):
                     url,
                 )
                 try:
-                    resp = await client.get(url)
+                    resp = await client.get(url, headers=headers)
                     resp.raise_for_status()
                     rows = _parse_product_file(resp.content, f"{self._sheet_id}.csv")
                 except Exception as exc:

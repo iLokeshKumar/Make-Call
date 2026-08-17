@@ -9,7 +9,7 @@ from utils.encryption import decrypt_value
 
 logger = logging.getLogger(__name__)
 
-CALENDLY_MCP_URL = "https://mcp.calendly.com/mcp"
+CALENDLY_MCP_URL = "https://mcp.calendly.com"
 
 
 def get_token(session: Session, company_id: int) -> Optional[str]:

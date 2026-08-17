@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -20,7 +21,52 @@ from models.models import (
 )
 
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_AGENT_NAME = "Default Rio"
+
+
+# Generic untailored tool guidance. Used ONLY when per-company connection
+# detection fails (fail-open: a transient error must never strip guidance).
+# When detection succeeds the tailored connected_tools_guidance() builder
+# (services/mcp/connected_providers) emits the '### CONNECTED TOOLS' block with
+# bullets filtered to the capabilities this company actually has — so this
+# constant's bullet list stays the complete set of every possible bullet.
+CONNECTED_TOOLS_GUIDANCE = (
+    "### CONNECTED TOOLS\n"
+    "If the company has connected tools available (scheduling, meeting "
+    "intelligence, prospect data, CRM, or inventory), use them proactively and "
+    "positively whenever they genuinely help the customer:\n"
+    "- Book, reschedule, or cancel a meeting the moment the customer agrees, "
+    "and check availability before promising a time.\n"
+    "- When the customer mentions a past meeting or asks about a recording, "
+    "transcript, or summary, search and pull the relevant meeting assets "
+    "instead of guessing.\n"
+    "- Check the product catalog / inventory before quoting details, and use "
+    "enrichment / CRM tools to personalize the conversation.\n"
+    "Only call a tool when it is actually required or clearly adds value — "
+    "never invent tool results, never call a tool pointlessly, and if a tool is "
+    "unavailable, handle it gracefully and continue the conversation. Never "
+    "expose tool names, IDs, or internal details to the customer; speak "
+    "naturally about outcomes (\"I've scheduled that\", \"here's what I found\")."
+)
+
+
+# Injected INSTEAD of CONNECTED_TOOLS_GUIDANCE when this company has no
+# external provider tools connected (only built-ins like the DB product
+# catalog). A bare account's agent can't actually book, email, or pull
+# recordings — the guard makes that explicit so it never invents outcomes it
+# can't deliver, and handles the request gracefully instead.
+NO_CONNECTED_TOOLS_GUIDANCE = (
+    "### NO EXTERNAL TOOLS CONNECTED\n"
+    "This company has no external integrations connected, so on this call you "
+    "cannot book meetings, send emails or WhatsApp messages, pull meeting "
+    "recordings, look up prospects, or touch any CRM. You can still check the "
+    "product catalog and inventory. Never claim you have booked, emailed, or "
+    "retrieved anything from an external service — if the customer asks, "
+    "handle it gracefully and confirm you've noted the request for a teammate "
+    "to follow up."
+)
 
 
 @dataclass
@@ -221,7 +267,42 @@ def resolve_agent_for_call(
     if prompt.instructions:
         system_prompt = f"{system_prompt}\n\n### AGENT INSTRUCTIONS\n{prompt.instructions}"
 
-    # Company-wide instruction from "Voice & AI Engine" settings tab
+    # Dynamic tool guidance, derived from this company's actual connections
+    # (same source of truth as the Settings 'Effective capabilities' card):
+    #   * tools connected  → guidance bullets tailored to the capabilities the
+    #                        company actually has (e.g. no 'pull recordings'
+    #                        bullet without Zoom) + the per-company provider
+    #                        list (with priority order).
+    #   * no tools         → a short honesty guard instead of ~200 dead tokens
+    #                        of tool guidance for a bare account.
+    #   * detection failed → keep the generic untailored guidance (fail-open:
+    #                        never strip guidance because of a transient error).
+    guidance: str | None = None
+    connected_ctx: str | None = None
+    try:
+        from services.mcp.connected_providers import (
+            connected_providers_context,
+            connected_tools_guidance,
+        )
+        connected_ctx = connected_providers_context(company_id)
+        if connected_ctx:
+            guidance = connected_tools_guidance(company_id)
+    except Exception as exc:
+        logger.debug("[voice_agent_runtime] connected-providers context failed: %s", exc)
+
+    if connected_ctx and guidance:
+        # Tools connected — tailored bullets + the per-company provider list.
+        system_prompt = f"{system_prompt}\n\n{guidance}\n\n{connected_ctx}"
+    elif connected_ctx == "":
+        # Bare account — short honesty guard instead of ~200 dead tokens.
+        system_prompt = f"{system_prompt}\n\n{NO_CONNECTED_TOOLS_GUIDANCE}"
+    else:
+        # Detection failed (or the tailored build failed) — generic untailored
+        # guidance as a safe fallback so no capability hint is silently dropped.
+        system_prompt = f"{system_prompt}\n\n{CONNECTED_TOOLS_GUIDANCE}"
+
+    # Company-wide instruction from "Voice & AI Engine" settings tab — appended
+    # after the tool guidance so company configuration stays authoritative.
     company_instruction = _setting(session, company_id, "SYSTEM_INSTRUCTION")
     if company_instruction:
         system_prompt = f"{system_prompt}\n\n### COMPANY INSTRUCTIONS\n{company_instruction}"

@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import UserChip from "@/components/UserChip";
+import type { ElementType } from "react";
 import {
   Activity,
+  AlertCircle,
   BarChart2,
   Bot,
   Braces,
@@ -20,6 +22,7 @@ import {
   Phone,
   PhoneCall,
   PhoneForwarded,
+  Plug,
   Plus,
   Save,
   Settings2,
@@ -31,6 +34,7 @@ import {
   Wrench,
   X,
   XCircle,
+  Zap,
 } from "lucide-react";
 import clsx from "clsx";
 import { useAuth } from "@/context/AuthContext";
@@ -39,6 +43,15 @@ import GraphEditor from "@/components/voice-agents/graph-editor/GraphEditor";
 import CallFeaturesEditor, {
   type CallFeaturesConfig,
 } from "@/components/voice-agents/CallFeaturesEditor";
+import AgentChatPanel from "@/components/voice-agents/AgentChatPanel";
+// Shared capabilities payload types / provider labels / chip styles — the same
+// truth the Settings → Connectors 'Effective capabilities' card renders.
+import {
+  PROVIDER_LABELS,
+  providerChipCls,
+  type CapabilitiesSummary,
+  type SummaryCapability,
+} from "@/components/settings/MCPConnectionsTab";
 
 const API_BASE =
   process.env.NEXT_PUBLIC_API_BASE_URL ||
@@ -136,6 +149,8 @@ const tabs = [
   { id: "overview", label: "Overview", Icon: Bot },
   { id: "prompts", label: "Prompts", Icon: Sparkles },
   { id: "runtime", label: "Voice & Runtime", Icon: Settings2 },
+  { id: "chat", label: "Chat with Agent", Icon: MessageSquare },
+  { id: "web_call", label: "Web Call", Icon: PhoneCall },
   { id: "call", label: "Call Features", Icon: PhoneCall },
   { id: "ivr", label: "IVR", Icon: Phone },
   { id: "tools", label: "Tools", Icon: Wrench },
@@ -146,6 +161,180 @@ const tabs = [
 ] as const;
 
 type TabId = (typeof tabs)[number]["id"];
+
+// ─── Call readiness — what connected integrations unlock for calls ─────────────
+//
+// Compact form of the Settings → Connectors 'Effective capabilities' card: the
+// bare-account banner, the gated-Zoom note, and one row per capability with
+// 'Unlock:' suggestions. Types / labels / chip styles are imported from
+// MCPConnectionsTab so both pages share one truth (same summary payload).
+// This page has no connector cards, so every action deep-links to
+// Settings → Connectors instead of auto-connecting.
+
+// One capability per row: status dot + label + provider chips + unlock hints.
+function ReadinessRow({ cap }: { cap: SummaryCapability }) {
+  const dot =
+    cap.status === "available"
+      ? "bg-green-500"
+      : cap.status === "degraded"
+        ? "bg-amber-500"
+        : "bg-slate-300 dark:bg-slate-600";
+  const statusText =
+    cap.status === "available" ? "Available" : cap.status === "degraded" ? "Needs attention" : "Not connected";
+  const statusCls =
+    cap.status === "available"
+      ? "text-green-600 dark:text-green-400"
+      : cap.status === "degraded"
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-slate-400 dark:text-slate-500";
+
+  return (
+    <div className="flex items-start gap-2.5">
+      <span className={`mt-1 h-2 w-2 rounded-full flex-shrink-0 ${dot}`} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-slate-700 dark:text-slate-300">{cap.label}</span>
+          <span className={`text-[10px] font-semibold uppercase tracking-wide ${statusCls}`}>{statusText}</span>
+        </div>
+        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+          {cap.providers.map((p) => (
+            <span
+              key={p.provider}
+              title={p.note ?? undefined}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${providerChipCls(p.state)}`}
+            >
+              {p.state === "connected" && <CheckCircle2 className="h-3 w-3 flex-shrink-0" />}
+              {p.state === "degraded" && <AlertCircle className="h-3 w-3 flex-shrink-0" />}
+              {p.state === "disconnected" && <span className="h-1.5 w-1.5 rounded-full bg-slate-300 dark:bg-slate-600 flex-shrink-0" />}
+              {p.label}
+            </span>
+          ))}
+          {cap.status === "unavailable" && cap.suggest.length > 0 && (
+            <span className="inline-flex items-center gap-1">
+              <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">Unlock:</span>
+              {cap.suggest.map((pid) => (
+                <a
+                  key={pid}
+                  href="/settings?section=mcp_connections"
+                  title={`Connect ${PROVIDER_LABELS[pid] ?? pid} in Settings`}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-800/60 hover:bg-violet-100 dark:hover:bg-violet-900/40 transition-colors"
+                >
+                  <Plug className="h-3 w-3 flex-shrink-0" />
+                  {PROVIDER_LABELS[pid] ?? pid}
+                </a>
+              ))}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// One summary card: bare-account banner, gated-Zoom note, and per-capability
+// rows. Deep-links to Settings → Connectors (no connector cards on this page).
+// Wrapped in CollapsibleSection so users can collapse it once reviewed.
+function CallReadinessCard({ summary }: { summary: CapabilitiesSummary }) {
+  return (
+    <CollapsibleSection
+      title="Agent readiness"
+      icon={Zap}
+      defaultOpen
+      headerExtra={
+        <a
+          href="/settings?section=mcp_connections"
+          className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-[11px] font-semibold text-violet-600 dark:text-violet-400 border border-violet-200 dark:border-violet-800/60 hover:bg-violet-50 dark:hover:bg-violet-950/20 transition-colors shrink-0"
+        >
+          <Plug className="h-3 w-3" /> Manage connectors
+        </a>
+      }
+    >
+      {summary.external_connected === false ? (
+        <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-200/70 bg-amber-50/60 px-4 py-3 dark:border-amber-800/40 dark:bg-amber-950/20">
+          <AlertCircle className="h-4 w-4 text-amber-500 flex-shrink-0" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-amber-700 dark:text-amber-400">No external integrations connected</p>
+            <p className="text-[11px] text-amber-700/90 dark:text-amber-400/90 mt-0.5 leading-snug">
+              Your call agent can only check the product catalog — it can't book meetings, pull recordings, look up
+              prospects, or touch a CRM yet. Connect your sales stack before going live.
+            </p>
+          </div>
+          <a
+            href="/settings?section=mcp_connections"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-[11px] font-bold bg-amber-500 text-white hover:bg-amber-600 transition-colors shadow-sm"
+          >
+            <Plug className="h-3 w-3" /> Connect integrations
+          </a>
+        </div>
+      ) : (
+        <>
+          {summary.meeting_write_granted === false && (
+            <div className="flex items-start gap-2 rounded-xl border border-amber-200/70 bg-amber-50/60 px-4 py-3 dark:border-amber-800/40 dark:bg-amber-950/20">
+              <AlertCircle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+              <p className="text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+                Zoom meeting creation is hidden until the <code className="font-mono">meeting:write</code> scope is
+                granted — reconnect Zoom in Settings to unlock it.
+              </p>
+            </div>
+          )}
+          <div className="space-y-2.5">
+            {summary.capabilities.map((cap) => (
+              <ReadinessRow key={cap.key} cap={cap} />
+            ))}
+          </div>
+        </>
+      )}
+    </CollapsibleSection>
+  );
+}
+
+// Collapsible section wrapper — same pattern as the leads detail page
+function CollapsibleSection({
+  title,
+  icon: Icon,
+  defaultOpen = false,
+  children,
+  headerExtra,
+}: {
+  title: string;
+  icon?: ElementType;
+  defaultOpen?: boolean;
+  children: React.ReactNode;
+  headerExtra?: React.ReactNode;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="rounded-2xl border border-slate-200/60 bg-white/60 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 overflow-hidden transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
+      <div className="flex items-center justify-between px-6 py-4">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-2.5 text-left flex-1 min-w-0 cursor-pointer"
+        >
+          {Icon && <Icon className="h-4 w-4 text-violet-500 flex-shrink-0" />}
+          <span className="text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">
+            {title}
+          </span>
+        </button>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          {headerExtra}
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+          >
+            {open ? (
+              <ChevronUp className="h-4 w-4" />
+            ) : (
+              <ChevronDown className="h-4 w-4" />
+            )}
+          </button>
+        </div>
+      </div>
+      {open && <div className="px-6 pb-6 pt-0">{children}</div>}
+    </div>
+  );
+}
 
 export default function VoiceAgentsPage() {
   const { user, sessionTimeout } = useAuth();
@@ -173,6 +362,7 @@ export default function VoiceAgentsPage() {
   const [evalStats, setEvalStats] = useState<EvalStats | null>(null);
   const [extractionResults, setExtractionResults] = useState<ExtractionResult[]>([]);
   const [expandedResult, setExpandedResult] = useState<number | null>(null);
+  const [capSummary, setCapSummary] = useState<CapabilitiesSummary | null>(null);
 
   // Dispositions tab
   type Disposition = { id: number; name: string; label: string; color?: string | null; description?: string | null; is_terminal: boolean };
@@ -244,6 +434,26 @@ export default function VoiceAgentsPage() {
     if (user) void loadAgents();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
+
+  // Agent readiness — same capabilities payload as the Settings card.
+  const fetchCapabilities = useCallback(async () => {
+    try {
+      const res = await apiFetch(`${API_BASE}/mcp-connections/capabilities/summary`);
+      if (res.status === 401) { sessionTimeout(); return; }
+      if (!res.ok) return;
+      setCapSummary(await res.json());
+    } catch { /* non-fatal — the readiness card stays hidden */ }
+  }, [sessionTimeout]);
+
+  useEffect(() => {
+    if (user) void fetchCapabilities();
+  }, [user, fetchCapabilities]);
+
+  // Keep the card in sync with connections made elsewhere (e.g. Settings).
+  useEffect(() => {
+    const t = setInterval(fetchCapabilities, 30000);
+    return () => clearInterval(t);
+  }, [fetchCapabilities]);
 
   useEffect(() => {
     if (!selected) return;
@@ -892,6 +1102,12 @@ export default function VoiceAgentsPage() {
           )}
 
           <div className="p-8">
+            {capSummary && capSummary.capabilities.length > 0 && (
+              <div className="mb-6">
+                <CallReadinessCard summary={capSummary} />
+              </div>
+            )}
+
             {(message || error) && (
               <div
                 className={clsx(
@@ -942,8 +1158,7 @@ export default function VoiceAgentsPage() {
                   </div>
                 </div>
                 {evalStats && evalStats.evaluated > 0 && (
-                  <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-5 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40">
-                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-3">Quality by Axis</p>
+                  <CollapsibleSection title="Quality by Axis" icon={BarChart2} defaultOpen>
                     <div className="grid grid-cols-2 gap-3 md:grid-cols-3">
                       {Object.entries(evalStats.axis_averages).map(([ax, score]) => {
                         const pct = score != null ? (score / 5) * 100 : 0;
@@ -962,25 +1177,27 @@ export default function VoiceAgentsPage() {
                         );
                       })}
                     </div>
-                  </div>
+                  </CollapsibleSection>
                 )}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 space-y-5">
-                  <Field label="Name">
-                    <input
-                      className="w-full rounded-xl border border-slate-200 bg-white/50 px-4 py-2.5 text-sm outline-none transition-all duration-300 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:focus:border-violet-500"
-                      value={agentDraft.name}
-                      onChange={(e) => { setAgentDraft({ ...agentDraft, name: e.target.value }); markDirty(); }}
-                    />
-                  </Field>
-                  <Field label="Description">
-                    <textarea
-                      className="w-full rounded-xl border border-slate-200 bg-white/50 px-4 py-2.5 text-sm outline-none transition-all duration-300 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:focus:border-violet-500 min-h-28"
-                      value={agentDraft.description}
-                      onChange={(e) => { setAgentDraft({ ...agentDraft, description: e.target.value }); markDirty(); }}
-                    />
-                  </Field>
-                  <ActionButton onClick={saveOverview} saving={saving} label="Save Agent" />
-                </div>
+                <CollapsibleSection title="Agent Details" icon={Bot} defaultOpen>
+                  <div className="space-y-5">
+                    <Field label="Name">
+                      <input
+                        className="w-full rounded-xl border border-slate-200 bg-white/50 px-4 py-2.5 text-sm outline-none transition-all duration-300 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:focus:border-violet-500"
+                        value={agentDraft.name}
+                        onChange={(e) => { setAgentDraft({ ...agentDraft, name: e.target.value }); markDirty(); }}
+                      />
+                    </Field>
+                    <Field label="Description">
+                      <textarea
+                        className="w-full rounded-xl border border-slate-200 bg-white/50 px-4 py-2.5 text-sm outline-none transition-all duration-300 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:focus:border-violet-500 min-h-28"
+                        value={agentDraft.description}
+                        onChange={(e) => { setAgentDraft({ ...agentDraft, description: e.target.value }); markDirty(); }}
+                      />
+                    </Field>
+                    <ActionButton onClick={saveOverview} saving={saving} label="Save Agent" />
+                  </div>
+                </CollapsibleSection>
               </section>
             ) : tab === "prompts" ? (
               <section className="max-w-4xl space-y-5">
@@ -1091,8 +1308,7 @@ export default function VoiceAgentsPage() {
             ) : tab === "runtime" ? (
               <section className="max-w-4xl space-y-6">
                 {/* STT */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <h3 className="mb-4 text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Speech-to-Text (STT)</h3>
+                <CollapsibleSection title="Speech-to-Text (STT)" icon={Settings2} defaultOpen>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     <Field label="STT Provider">
                       <ProviderSelect value={runtimeDraft.stt_provider || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, stt_provider: v }); markDirty(); }} options={["deepgram", "sarvam", "assemblyai", "groq", "inworld", "ringg_ai", "gladia", "cartesia", "smallest", "vachana"]} />
@@ -1148,11 +1364,10 @@ export default function VoiceAgentsPage() {
                       </>
                     )}
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* TTS */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <h3 className="mb-4 text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Text-to-Speech (TTS)</h3>
+                <CollapsibleSection title="Text-to-Speech (TTS)" icon={Settings2} defaultOpen>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     <Field label="TTS Provider">
                       <ProviderSelect value={runtimeDraft.tts_provider || ""} onChange={(v) => { setRuntimeDraft({ ...runtimeDraft, tts_provider: v }); markDirty(); }} options={["cartesia", "elevenlabs", "deepgram", "sarvam", "polly", "inworld", "smallest", "rime", "vachana"]} />
@@ -1263,11 +1478,10 @@ export default function VoiceAgentsPage() {
                       </Field>
                     )}
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* LLM */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <h3 className="mb-4 text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Language Model (LLM)</h3>
+                <CollapsibleSection title="Language Model (LLM)" icon={Sparkles} defaultOpen>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     <Field label="LLM Provider">
                       <ProviderSelect value={runtimeDraft.llm_provider || ""} onChange={(v) => setRuntimeDraft({ ...runtimeDraft, llm_provider: v })} options={["mistral", "openai", "gemini", "groq", "anthropic", "openrouter", "cerebras"]} />
@@ -1313,11 +1527,10 @@ export default function VoiceAgentsPage() {
                       </Field>
                     )}
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* Call Settings */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <h3 className="mb-4 text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Call Settings</h3>
+                <CollapsibleSection title="Call Settings" icon={PhoneCall} defaultOpen>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
                     <Field label="Telephony Engine">
                       <ProviderSelect value={runtimeDraft.telephony_engine || ""} onChange={(v) => setRuntimeDraft({ ...runtimeDraft, telephony_engine: v })} options={["twilio", "exotel", "enablex", "vobiz", "plivo"]} />
@@ -1347,14 +1560,10 @@ export default function VoiceAgentsPage() {
                       />
                     </Field>
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* Barge-in Tuning */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Shield className="h-4 w-4 text-slate-500" />
-                    <h3 className="text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Barge-in Tuning</h3>
-                  </div>
+                <CollapsibleSection title="Barge-in Tuning" icon={Shield}>
                   <p className="text-xs text-slate-500 mb-5">Per-agent override of interrupt sensitivity. Leave blank to use env defaults.</p>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
                     <Field label="RMS Threshold (loudness)">
@@ -1382,14 +1591,10 @@ export default function VoiceAgentsPage() {
                       </button>
                     </div>
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* Silence Watcher */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Sliders className="h-4 w-4 text-slate-500" />
-                    <h3 className="text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">Silence Watcher</h3>
-                  </div>
+                <CollapsibleSection title="Silence Watcher" icon={Sliders}>
                   <p className="text-xs text-slate-500 mb-5">How long to wait after agent finishes before re-engaging. Leave blank for env defaults.</p>
                   <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
                     <Field label="Silence Threshold (seconds)">
@@ -1402,27 +1607,26 @@ export default function VoiceAgentsPage() {
                       <input className="w-full rounded-xl border border-slate-200 bg-white/50 px-4 py-2.5 text-sm outline-none transition-all duration-300 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:focus:border-violet-500" type="number" placeholder="1" min={0} max={5} value={rjGet(["silence", "max_reengages"])} onChange={(e) => rjSet(["silence", "max_reengages"], e.target.value ? Number(e.target.value) : "")} />
                     </Field>
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* Feedback Phrase */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <div className="flex items-center gap-2 mb-1">
-                    <MessageSquare className="h-4 w-4 text-slate-500" />
-                    <h3 className="text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent">End-of-call Feedback Phrase</h3>
-                  </div>
+                <CollapsibleSection title="End-of-call Feedback Phrase" icon={MessageSquare}>
                   <p className="text-xs text-slate-500 mb-5">Injected before goodbye if the agent hasn't asked for a 1-5 rating.</p>
                   <Field label="Feedback Phrase">
                     <input className="w-full rounded-xl border border-slate-200 bg-white/50 px-4 py-2.5 text-sm outline-none transition-all duration-300 focus:border-violet-500 focus:ring-4 focus:ring-violet-500/10 dark:border-slate-800 dark:bg-slate-950/40 dark:text-slate-100 dark:focus:border-violet-500" placeholder="Before we wrap up — on a scale of 1 to 5, how would you rate your experience speaking with me today?" value={rjGet(["feedback_phrase"])} onChange={(e) => rjSet(["feedback_phrase"], e.target.value || "")} />
                   </Field>
-                </div>
+                </CollapsibleSection>
 
                 <ActionButton onClick={saveRuntime} saving={saving} label="Save Runtime" />
               </section>
+            ) : tab === "chat" ? (
+              <AgentChatPanel agentId={selected.agent.id} />
+            ) : tab === "web_call" ? (
+              <AgentChatPanel agentId={selected.agent.id} initialMode="web_call" />
             ) : tab === "tools" ? (
               <section className="max-w-5xl space-y-6">
                 {/* Built-in tools */}
-                <div className="rounded-2xl border border-slate-200/60 bg-white/60 p-6 shadow-sm backdrop-blur-sm dark:border-slate-800/40 dark:bg-slate-900/40 transition-all duration-300 hover:shadow-md hover:border-violet-500/10">
-                  <p className="text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent mb-4">Built-in Tools</p>
+                <CollapsibleSection title="Built-in Tools" icon={Wrench} defaultOpen>
                   <div className="flex items-center justify-between rounded-xl border border-slate-200/50 bg-white/40 p-4 dark:border-slate-800/30 dark:bg-slate-900/30">
                     <div>
                       <p className="text-sm font-semibold">Calendar Booking</p>
@@ -1430,14 +1634,16 @@ export default function VoiceAgentsPage() {
                     </div>
                     <button
                       onClick={async () => {
-                        const existing = tools.find((t) => t.tool_type === "calendar_book");
+                        // Treat legacy "calendar_book" rows (from before the booking-tool
+                        // consolidation) as the same toggle state as "book_demo".
+                        const existing = tools.find((t) => t.tool_type === "book_demo" || t.tool_type === "calendar_book");
                         if (existing) {
                           await apiFetch(`${API_BASE}/crm/voice-agents/${selected!.agent.id}/tools/${existing.id}`, { method: "DELETE" });
                         } else {
                           await apiFetch(`${API_BASE}/crm/voice-agents/${selected!.agent.id}/tools`, {
                             method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ name: "calendar_book", description: "Book a Google Calendar meeting", tool_type: "calendar_book", http_method: null, url: null, input_extraction_schema: {}, is_active: true }),
+                            body: JSON.stringify({ name: "book_demo", description: "Book a demo/meeting on Google Calendar (online demos include a Meet link)", tool_type: "book_demo", http_method: null, url: null, input_extraction_schema: {}, is_active: true }),
                           });
                         }
                         const res = await apiFetch(`${API_BASE}/crm/voice-agents/${selected!.agent.id}/tools`, {});
@@ -1445,22 +1651,22 @@ export default function VoiceAgentsPage() {
                       }}
                       className={clsx(
                         "relative h-6 w-11 rounded-full transition-colors cursor-pointer",
-                        tools.some((t) => t.tool_type === "calendar_book") ? "bg-violet-600" : "bg-slate-300 dark:bg-slate-600"
+                        tools.some((t) => t.tool_type === "book_demo" || t.tool_type === "calendar_book") ? "bg-violet-600" : "bg-slate-300 dark:bg-slate-600"
                       )}
                     >
                       <span className={clsx(
                         "absolute left-0 top-1 h-4 w-4 rounded-full bg-white transition-transform",
-                        tools.some((t) => t.tool_type === "calendar_book") ? "translate-x-6" : "translate-x-1"
+                        tools.some((t) => t.tool_type === "book_demo" || t.tool_type === "calendar_book") ? "translate-x-6" : "translate-x-1"
                       )} />
                     </button>
                   </div>
-                </div>
+                </CollapsibleSection>
 
                 {/* Custom HTTP tools */}
                 <div className="grid grid-cols-1 gap-6 lg:grid-cols-[1fr_380px]">
                   <div>
                     <p className="text-sm font-bold bg-gradient-to-r from-slate-800 to-slate-600 dark:from-slate-200 dark:to-slate-400 bg-clip-text text-transparent mb-3">Custom HTTP Tools</p>
-                    <ListPanel items={tools.filter(t => t.tool_type !== "calendar_book").map((tool) => ({
+                    <ListPanel items={tools.filter(t => t.tool_type !== "book_demo" && t.tool_type !== "calendar_book").map((tool) => ({
                     label: `${tool.name} · ${tool.http_method || tool.tool_type} · ${tool.is_active ? "active" : "off"}`,
                     onDelete: async () => {
                       await apiFetch(`${API_BASE}/crm/voice-agents/${selected!.agent.id}/tools/${tool.id}`, { method: "DELETE" });

@@ -161,6 +161,51 @@ async def book_demo(
     )
 
 
+async def schedule_demo(
+    company_id: int,
+    actor_user_id: int,
+    lead_id: int,
+    requested_time: str,
+    product: str,
+    demo_type: str = "Online",
+    duration_minutes: int = 30,
+    notes: str | None = None,
+    provider: str | None = None,
+) -> dict:
+    """Canonical MCP scheduling entry point.
+
+    The domain service owns lead lookup, timezone resolution, persistence,
+    calendar/Meet creation, email delivery, and the returned truth.
+    """
+    from services.agent.agent_tool_service import book_demo as domain_schedule_demo
+
+    token = rls_company_id.set(company_id)
+    try:
+        with Session(engine) as session:
+            lead = session.get(Lead, lead_id)
+            if not lead or lead.company_id != company_id:
+                return ToolResult.fail(f"Lead {lead_id} was not found in this company.").model_dump()
+            return await domain_schedule_demo(
+                session=session,
+                company_id=company_id,
+                actor_user_id=actor_user_id,
+                lead_id=lead_id,
+                name=lead.name or "",
+                phone=lead.normalized_phone or "",
+                demo_date=requested_time,
+                products=product,
+                demo_type=demo_type,
+                duration_minutes=duration_minutes,
+                email=lead.email,
+                notes=notes,
+                provider=provider,
+            )
+    except ValueError as exc:
+        return ToolResult.fail(str(exc), next_suggestion="Ask the lead to confirm the date and time again.").model_dump()
+    finally:
+        rls_company_id.reset(token)
+
+
 async def _book_calendar_event(
     company_id: int,
     lead_email: str,

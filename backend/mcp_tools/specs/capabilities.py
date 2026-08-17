@@ -36,12 +36,22 @@ _ENRICH_PROSPECT_PARAMS = {
 _SCHEDULING_PARAMS = {
     "type": "object",
     "properties": {
-        "event_type_id": {"type": "string", "description": "Scheduling link / event type id."},
+        "event_type_id": {"type": "string", "description": "Scheduling link / event type id (Cal.com/Calendly)."},
         "start_time": {"type": "string", "description": "ISO 8601 start datetime."},
         "invitee_email": {"type": "string"},
         "invitee_name": {"type": "string"},
         "notes": {"type": "string"},
+        "subject": {"type": "string", "description": "Event subject (used by Microsoft 365 calendar)."},
+        "end_time": {"type": "string", "description": "ISO 8601 end datetime (optional; Microsoft 365 calendar)."},
+        "provider": {"type": "string", "description": "Preferred provider to use, e.g. 'calcom', 'calendly', 'microsoft'. Defaults to the documented priority order (Cal.com → Calendly → Microsoft 365)."},
     },
+}
+
+# Optional provider override shared by multi-provider capabilities. The router
+# honours it by trying the named provider first, then the documented fallback
+# chain (see services/mcp/capability_router.PROVIDER_PRIORITY).
+_PROVIDER_PARAM = {
+    "provider": {"type": "string", "description": "Preferred provider, e.g. 'hubspot' or 'zoho' (CRM), 'apollo' (search), 'microsoft' (scheduling/email). Defaults to the documented priority order."},
 }
 
 _CAPABILITY_SPECS: dict[str, ToolSpec] = {
@@ -61,7 +71,13 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
             "The user wants details on a specific known person — use enrich_prospect",
         ],
         returns="List of prospects with name, title, company, email, phone, LinkedIn URL.",
-        parameters=_SEARCH_PROSPECTS_PARAMS,
+        parameters={
+            "type": "object",
+            "properties": {
+                **_SEARCH_PROSPECTS_PARAMS["properties"],
+                **_PROVIDER_PARAM,
+            },
+        },
     ),
     "enrich_prospect": ToolSpec(
         name="enrich_prospect",
@@ -79,7 +95,13 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
             "You already have complete contact details",
         ],
         returns="Dict with person_id, name, title, company, email, phone, linkedin_url, company_size, industry, location.",
-        parameters=_ENRICH_PROSPECT_PARAMS,
+        parameters={
+            "type": "object",
+            "properties": {
+                **_ENRICH_PROSPECT_PARAMS["properties"],
+                **_PROVIDER_PARAM,
+            },
+        },
     ),
     "create_crm_contact": ToolSpec(
         name="create_crm_contact",
@@ -102,6 +124,7 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
                 "company": {"type": "string"},
                 "title": {"type": "string"},
                 "description": {"type": "string"},
+                **_PROVIDER_PARAM,
             },
             "required": ["name"],
         },
@@ -118,6 +141,7 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
             "properties": {
                 "record_id": {"type": "string"},
                 "data": {"type": "object", "description": "Field map of values to update."},
+                **_PROVIDER_PARAM,
             },
             "required": ["record_id", "data"],
         },
@@ -135,7 +159,8 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
             "type": "object",
             "properties": {
                 "query": {"type": "string"},
-                "module": {"type": "string"},
+                "module": {"type": "string", "description": "CRM module/object, e.g. Contacts (Zoho) or contacts/companies/deals (HubSpot)."},
+                **_PROVIDER_PARAM,
             },
         },
     ),
@@ -255,7 +280,7 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
     "reschedule_meeting": ToolSpec(
         name="reschedule_meeting",
         category="integrations",
-        description="Reschedule an existing booking on the connected scheduling app.",
+        description="Reschedule an existing booking on the connected scheduling app (Cal.com, Calendly, or Microsoft 365 calendar).",
         when_to_use=["The user asks to move an existing meeting to a new time"],
         when_not_to_use=["No scheduling app is connected"],
         returns="Updated booking confirmation.",
@@ -264,6 +289,9 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
             "properties": {
                 "booking_id": {"type": "string"},
                 "new_start_time": {"type": "string"},
+                "end_time": {"type": "string", "description": "ISO 8601 new end datetime (optional; Microsoft 365 calendar)."},
+                "subject": {"type": "string", "description": "New subject (optional; Microsoft 365 calendar)."},
+                **_PROVIDER_PARAM,
             },
             "required": ["booking_id", "new_start_time"],
         },
@@ -280,8 +308,67 @@ _CAPABILITY_SPECS: dict[str, ToolSpec] = {
             "properties": {
                 "booking_id": {"type": "string"},
                 "reason": {"type": "string"},
+                **_PROVIDER_PARAM,
             },
             "required": ["booking_id"],
+        },
+    ),
+    "create_meeting": ToolSpec(
+        name="create_meeting",
+        category="integrations",
+        description=(
+            "Create a Zoom meeting via the Zoom REST API and return a join URL. "
+            "This is the auto-fallback meeting-link provider used when the company "
+            "has Zoom connected but not Google Calendar — the booking flow prefers "
+            "Google Meet, then falls back to a Zoom link."
+        ),
+        when_to_use=[
+            "A booking needs an online meeting link and Google Calendar is not connected",
+            "The user explicitly asks for a Zoom meeting link",
+        ],
+        when_not_to_use=[
+            "Google Calendar is connected — book_meeting/book_demo prefer a Google Meet link",
+            "Zoom is not connected, or the app lacks the meeting:write scope",
+        ],
+        returns="Dict with meeting_id, join_url, start_url, start_time, provider='zoom'.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "topic": {"type": "string"},
+                "start_time": {"type": "string", "description": "ISO 8601 start datetime."},
+                "duration_minutes": {"type": "integer", "default": 30},
+                "attendee_email": {"type": "string"},
+            },
+            "required": ["topic"],
+        },
+    ),
+    "send_microsoft_email": ToolSpec(
+        name="send_microsoft_email",
+        category="integrations",
+        description=(
+            "Send an email from the company's connected Microsoft 365 mailbox "
+            "(Outlook) using Microsoft Graph. Use when the user wants an email "
+            "sent from their Microsoft account — e.g. sending the quote, meeting "
+            "notes, or follow-up from Outlook."
+        ),
+        when_to_use=[
+            "The user asks to send an email from Outlook / Microsoft 365",
+            "A document or quote should be emailed from the connected mailbox",
+        ],
+        when_not_to_use=[
+            "Microsoft 365 is not connected",
+            "A WhatsApp message is preferred — use send_communication instead",
+        ],
+        returns="Confirmation with recipient and subject on success.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "to_email": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "cc_email": {"type": "string"},
+            },
+            "required": ["to_email", "subject"],
         },
     ),
 }

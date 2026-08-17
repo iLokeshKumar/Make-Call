@@ -4,9 +4,10 @@ import asyncio
 import logging
 
 from database import engine, rls_company_id
-from models.models import Lead, utc_now
+from models.models import Appointment, Interaction, Lead, LeadRequirement, utc_now
 from schemas.tool_result import ToolResult
 from sqlmodel import Session, select
+from utils.timezone_utils import resolve_lead_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +29,62 @@ def _lead_to_dict(lead: Lead) -> dict:
         "next_action": lead.next_action,
         "lead_score": float(lead.lead_score) if lead.lead_score is not None else None,
         "source": lead.source,
+    }
+
+
+def _serialize_lead_context(
+    lead: Lead,
+    *,
+    effective_timezone: str,
+    interactions: list[Interaction],
+    requirement: LeadRequirement | None,
+    appointments: list[Appointment],
+) -> dict:
+    return {
+        "lead": {
+            **_lead_to_dict(lead),
+            "timezone": lead.timezone,
+            "preferred_language": lead.preferred_language,
+            "next_action_due_at": lead.next_action_due_at.isoformat() if lead.next_action_due_at else None,
+        },
+        "effective_timezone": effective_timezone,
+        "timezone_source": "lead.timezone" if lead.timezone else "resolver",
+        "recent_interactions": [
+            {
+                "id": item.id,
+                "type": item.type,
+                "channel": item.channel,
+                "direction": item.direction,
+                "status": item.status,
+                "content": item.content,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+                "started_at": item.started_at.isoformat() if item.started_at else None,
+            }
+            for item in interactions
+        ],
+        "requirement": None if requirement is None else {
+            "id": requirement.id,
+            "use_case": requirement.use_case,
+            "budget_range": requirement.budget_range,
+            "timeline": requirement.timeline,
+            "decision_maker": requirement.decision_maker,
+            "pain_points": requirement.pain_points,
+            "required_products": requirement.required_products,
+            "notes": requirement.notes,
+            "structured_data": requirement.structured_data,
+        },
+        "appointments": [
+            {
+                "id": item.id,
+                "appointment_time": item.appointment_time.isoformat() if item.appointment_time else None,
+                "status": item.status,
+                "notes": item.notes,
+                "meeting_link": item.meeting_link,
+                "calendar_event_id": item.calendar_event_id,
+                "created_at": item.created_at.isoformat() if item.created_at else None,
+            }
+            for item in appointments
+        ],
     }
 
 
@@ -121,6 +178,73 @@ async def get_lead_info(lead_id: int, company_id: int) -> dict:
     except Exception as exc:
         logger.error("[MCP:get_lead_info] lead=%s error=%s", lead_id, exc)
         return ToolResult.fail(f"Lead info fetch failed: {exc}").model_dump()
+
+
+async def get_lead_context(lead_id: int, company_id: int, interaction_limit: int = 20) -> dict:
+    def _sync() -> dict | None:
+        token = rls_company_id.set(company_id)
+        try:
+            with Session(engine) as session:
+                lead = session.exec(
+                    select(Lead).where(
+                        Lead.id == lead_id,
+                        Lead.company_id == company_id,
+                        Lead.deleted_at.is_(None),
+                    )
+                ).first()
+                if lead is None:
+                    return None
+
+                interactions = session.exec(
+                    select(Interaction)
+                    .where(
+                        Interaction.company_id == company_id,
+                        Interaction.lead_id == lead_id,
+                    )
+                    .order_by(Interaction.created_at.desc())
+                    .limit(interaction_limit)
+                ).all()
+                requirement = session.exec(
+                    select(LeadRequirement).where(
+                        LeadRequirement.company_id == company_id,
+                        LeadRequirement.lead_id == lead_id,
+                    )
+                ).first()
+                appointments = session.exec(
+                    select(Appointment)
+                    .where(
+                        Appointment.company_id == company_id,
+                        Appointment.lead_id == lead_id,
+                    )
+                    .order_by(Appointment.appointment_time.asc())
+                    .limit(20)
+                ).all()
+                effective_timezone = resolve_lead_timezone(
+                    lead,
+                    session=session,
+                    company_id=company_id,
+                )
+                return _serialize_lead_context(
+                    lead,
+                    effective_timezone=effective_timezone,
+                    interactions=list(interactions),
+                    requirement=requirement,
+                    appointments=list(appointments),
+                )
+        finally:
+            rls_company_id.reset(token)
+
+    try:
+        data = await asyncio.to_thread(_sync)
+        if data is None:
+            return ToolResult.fail(
+                f"Lead {lead_id} not found.",
+                next_suggestion="Verify the lead_id or load the lead first.",
+            ).model_dump()
+        return ToolResult.ok(data).model_dump()
+    except Exception as exc:
+        logger.error("[MCP:get_lead_context] lead=%s error=%s", lead_id, exc)
+        return ToolResult.fail(f"Lead context fetch failed: {exc}").model_dump()
 
 
 async def update_lead_status(

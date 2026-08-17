@@ -3,16 +3,20 @@ import sys
 import time
 import asyncio
 
-if sys.platform.startswith("win"):
-    try:
-        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
-    except Exception as _e:
+# if sys.platform.startswith("win"):
+#     try:
+#         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     except Exception as _e:
 
-        import sys as _sys
-        print(
-            f"[startup] WARN: failed to set WindowsSelectorEventLoopPolicy: {_e!r}",
-            file=_sys.stderr,
-        )
+#         import sys as _sys
+#         print(
+#             f"[startup] WARN: failed to set WindowsSelectorEventLoopPolicy: {_e!r}",
+#             file=_sys.stderr,
+#         )
+
+from win_async_fix import apply_windows_async_fix
+apply_windows_async_fix()
+
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,6 +27,7 @@ load_dotenv(_env_path, override=False)
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi import WebSocketDisconnect
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlmodel import Session, select
@@ -73,6 +78,9 @@ from routes import tickets as tickets_router
 from routes import installations as installations_router
 from routes import contacts as contacts_router
 from routes import tts as tts_router
+from routes import agent_chat as agent_chat_router
+from auth import ALGORITHM, SECRET_KEY
+import jwt
 from routes import collections as collections_router
 from routes import books_sync as books_sync_router
 from routes import scheme_claims as scheme_claims_router
@@ -82,6 +90,7 @@ from routes import tally_connector as tally_connector_router
 from routes import calcom_connector as calcom_connector_router
 from routes import calendly_connector as calendly_connector_router
 from routes import rocketreach_mcp_connector as rocketreach_mcp_connector_router
+from routes import zoom_oauth as zoom_oauth_router
 from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
 from utils.lead_utils import get_comprehensive_lead_context
 from utils.logger import generate_request_id, request_id_var, setup_logger
@@ -560,6 +569,9 @@ async def run_media_stream(websocket: WebSocket, source: str) -> None:
             lead_id=lead.id if lead else None,
             lead_language=lead_language_code,
             runtime_json=resolved_runtime.runtime.runtime_json if resolved_runtime.runtime else {},
+            agent_id=resolved_runtime.agent.id,
+            audio_encoding="linear16" if source == "browser" else "pcm_mulaw",
+            audio_sample_rate=16000 if source == "browser" else 8000,
         )
 
         try:
@@ -969,7 +981,9 @@ app.include_router(tally_connector_router.router)
 app.include_router(calcom_connector_router.router)
 app.include_router(calendly_connector_router.router)
 app.include_router(rocketreach_mcp_connector_router.router)
+app.include_router(zoom_oauth_router.router)
 app.include_router(tts_router.router)
+app.include_router(agent_chat_router.router)
 
 try:
     from mcp_server import get_mcp_asgi_app
@@ -1081,6 +1095,46 @@ async def vobiz_media_stream(websocket: WebSocket):
 @app.websocket("/enablex-media-stream")
 async def enablex_media_stream(websocket: WebSocket):
     await run_media_stream(websocket, "enablex")
+
+
+@app.websocket("/ws/web-call")
+async def browser_web_call(websocket: WebSocket):
+    """Authenticated browser voice transport over the shared VoicePipeline."""
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("typ") != "web_call" or not payload.get("user_id") or not payload.get("company_id"):
+            raise ValueError("invalid web-call token")
+        with Session(engine) as check_session:
+            user = check_session.get(User, int(payload["user_id"]))
+            if not user or user.company_id != int(payload["company_id"]) or user.token_version != payload.get("token_version"):
+                raise ValueError("invalid web-call user")
+    except Exception:
+        await websocket.close(code=4401)
+        return
+    # run_media_stream resolves the already-authenticated user from these
+    # server-validated query values and keeps all existing tenant checks.
+    from starlette.datastructures import QueryParams
+    query = QueryParams({
+        "user_id": str(payload["user_id"]),
+        "company_id": str(payload["company_id"]),
+        "agent_id": str(payload.get("agent_id") or "0"),
+        "lead_id": str(payload.get("lead_id") or "0"),
+        "call_task_id": "0",
+    })
+
+    class _AuthenticatedBrowserSocket:
+        def __init__(self, real, params):
+            self._real = real
+            self.query_params = params
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    await run_media_stream(_AuthenticatedBrowserSocket(websocket, query), "browser")
 
 
 @app.websocket("/ws/sentiment/{interaction_id}")

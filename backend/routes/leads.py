@@ -810,6 +810,7 @@ async def get_lead_deal_timeline(
         products_label = ""
         location = ""
         extra_notes = ""
+        meeting_provider = ""
         if appt.notes:
             for part in appt.notes.split(";"):
                 part = part.strip()
@@ -821,6 +822,8 @@ async def get_lead_deal_timeline(
                     location = part.split("=", 1)[1].strip()
                 elif part.lower().startswith("notes="):
                     extra_notes = part.split("=", 1)[1].strip()
+                elif part.lower().startswith("meeting_provider="):
+                    meeting_provider = part.split("=", 1)[1].strip()
 
         events.append({
             "kind": "appointment",
@@ -832,6 +835,7 @@ async def get_lead_deal_timeline(
             "location": location or None,
             "notes": extra_notes or appt.notes,
             "meeting_link": appt.meeting_link,
+            "meeting_provider": meeting_provider or None,
         })
 
     quotes = session.exec(

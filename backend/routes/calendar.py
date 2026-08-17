@@ -27,7 +27,11 @@ CALENDAR_SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/gmail.readonly",
     # Drive + Sheets + Docs
+    # drive.file only exposes files the app itself created/opened; the
+    # metadata scope is what makes the inventory picker able to LIST the
+    # account's spreadsheets.
     "https://www.googleapis.com/auth/drive.file",
+    "https://www.googleapis.com/auth/drive.metadata.readonly",
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/documents",
     # Identity
@@ -165,6 +169,14 @@ def calendar_oauth_callback(
     except Exception:
         pass
 
+    # Google Calendar connection just changed — drop the tool-connections cache
+    # so book_meeting/book_demo unlock for this company immediately.
+    try:
+        from mcp_tools.tool_catalog import invalidate_connections_cache
+        invalidate_connections_cache(company_id)
+    except Exception:
+        pass
+
     # Redirect to frontend settings page after auth
     frontend_base = os.getenv("FRONTEND_URL", "http://localhost:3006")
     from fastapi.responses import RedirectResponse
@@ -200,6 +212,11 @@ def calendar_disconnect(
         if row:
             session.delete(row)
     session.commit()
+    try:
+        from mcp_tools.tool_catalog import invalidate_connections_cache
+        invalidate_connections_cache(current_user.company_id)
+    except Exception:
+        pass
     return {"status": "disconnected"}
 
 

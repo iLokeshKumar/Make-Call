@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Optional
 from urllib.parse import urlencode
 
@@ -41,6 +42,7 @@ from auth import PermissionChecker, get_current_user
 from database import get_session
 from models.models import ProviderCredential, User, utc_now
 from utils.encryption import decrypt_value, encrypt_value
+from mcp_tools.tool_catalog import invalidate_connections_cache as _invalidate_tool_cache
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/crm/microsoft", tags=["Microsoft 365 OAuth"])
@@ -89,6 +91,11 @@ def _save_token(session: Session, company_id: int, key_name: str, value: str) ->
             is_active=True,
         ))
     session.commit()
+    # Token changes affect which tools unlock — drop the cached connection set.
+    try:
+        _invalidate_tool_cache(company_id)
+    except Exception:
+        pass
 
 
 def _get_token(session: Session, company_id: int, key_name: str) -> Optional[str]:
@@ -117,11 +124,93 @@ def _delete_tokens(session: Session, company_id: int) -> None:
     ).all():
         session.delete(cred)
     session.commit()
+    try:
+        _invalidate_tool_cache(company_id)
+    except Exception:
+        pass
+
+
+# Microsoft access tokens are short-lived (~60 min). Refresh the token 5 min
+# before it expires so long-running reads (e.g. OneDrive Excel inventory) never
+# fail with a stale-token 401.
+_ACCESS_TOKEN_SKEW_SECONDS = 300
+
+
+def _token_is_expired(token: str) -> bool:
+    """Return True when the access token is expired or within the skew window.
+
+    Decodes the JWT without verifying the signature (the token is only used to
+    read its ``exp`` claim). Non-JWT/opaque tokens fail open (return False) —
+    the 401 retry path in callers covers those stale cases.
+    """
+    try:
+        import jwt as _jwt
+        payload = _jwt.decode(token, options={"verify_signature": False})
+        exp = payload.get("exp")
+        if not exp:
+            return False
+        return time.time() >= float(exp) - _ACCESS_TOKEN_SKEW_SECONDS
+    except Exception:
+        return False
+
+
+def get_or_refresh_microsoft_token(session: Session, company_id: int, force: bool = False) -> Optional[str]:
+    """Return a fresh Microsoft access token, auto-refreshing when needed.
+
+    Reads the stored access token. If it is missing, expired, close to expiry,
+    or ``force`` is True (e.g. a 401 came back from Graph), exchanges the
+    stored refresh token at MS_TOKEN_URL, persists the new token pair, and
+    returns the fresh access token. Returns None when Microsoft is not
+    connected or the refresh fails.
+    """
+    token = _get_token(session, company_id, "access_token")
+    if not token:
+        return None
+    if not force and not _token_is_expired(token):
+        return token
+
+    refresh_token = _get_token(session, company_id, "refresh_token")
+    client_id = os.getenv("MICROSOFT_CLIENT_ID")
+    client_secret = os.getenv("MICROSOFT_CLIENT_SECRET")
+    if not refresh_token or not client_id or not client_secret:
+        return None
+
+    try:
+        resp = httpx.post(
+            MS_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "scope": MICROSOFT_SCOPES,
+            },
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("[microsoft_oauth] Token refresh failed for company %s: %s", company_id, exc)
+        return None
+
+    new_token = data.get("access_token")
+    if not new_token:
+        return None
+    _save_token(session, company_id, "access_token", new_token)
+    if new_rt := data.get("refresh_token"):
+        _save_token(session, company_id, "refresh_token", new_rt)
+    logger.info("[microsoft_oauth] Refreshed Microsoft access token for company %s", company_id)
+    return new_token
 
 
 def get_company_microsoft_token(session: Session, company_id: int) -> Optional[str]:
-    """Return stored Microsoft access token (used by Microsoft provider adapter)."""
-    return _get_token(session, company_id, "access_token")
+    """Return a fresh Microsoft access token, auto-refreshing when expired.
+
+    Used by the Microsoft provider adapter and OneDrive/SharePoint inventory
+    reads so callers never hit a stale-token 401 after ~1 hour.
+    """
+    return get_or_refresh_microsoft_token(session, company_id)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────── #

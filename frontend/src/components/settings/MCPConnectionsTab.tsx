@@ -3,9 +3,10 @@
 import { useEffect, useState, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
 import {
-  CheckCircle2, Loader2, ExternalLink, Unplug, Plug,
+  CheckCircle2, Loader2, ExternalLink, Unplug, Plug, Lock,
   Plus, RefreshCw, Trash2, Play, Network, Database,
-  Search, Calendar, Mail, BookOpen, AlertCircle,
+  Search, Calendar, Mail, BookOpen, AlertCircle, Zap,
+  ChevronDown, ChevronUp,
 } from "lucide-react";
 import { apiFetch } from "@/utils/apiFetch";
 import { useMCPServers, useCreateMCPServer, useDeleteMCPServer, useDiscoverMCPTools, usePingMCPHealth } from "@/hooks/useMCPServers";
@@ -90,8 +91,8 @@ const CATEGORIES: Record<ConnectorDef["category"], {
 const CONNECTORS: ConnectorDef[] = [
   {
     id: "zoho",
-    name: "Zoho CRM",
-    tagline: "Two-way sync of deals, contacts, and pipeline stages",
+    name: "Zoho CRM + Books",
+    tagline: "CRM sync plus Zoho Books items, prices, and inventory",
     category: "crm",
     icon: (
       <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
@@ -107,6 +108,7 @@ const CONNECTORS: ConnectorDef[] = [
       "Read & update Deals, Contacts, Leads",
       "Push AI call outcomes to pipeline stages",
       "Pull contact history before calls",
+      "Read Zoho Books items, prices, and stock",
     ],
     envVarsRequired: ["ZOHO_CLIENT_ID", "ZOHO_CLIENT_SECRET"],
     docsUrl: "https://api-console.zoho.com/",
@@ -370,6 +372,32 @@ const CONNECTORS: ConnectorDef[] = [
     docsUrl: "https://portal.azure.com/",
   },
   {
+    id: "zoom",
+    name: "Zoom",
+    tagline: "Meeting intelligence — search meetings, pull transcripts & recordings",
+    category: "communication",
+    authUrl: `${API_BASE}/crm/zoom/auth-url`,
+    statusUrl: `${API_BASE}/crm/zoom/status`,
+    disconnectUrl: `${API_BASE}/crm/zoom/disconnect`,
+    icon: (
+      <svg viewBox="0 0 40 40" className="h-7 w-7" fill="none">
+        <rect width="40" height="40" rx="8" fill="#2D8CFF" />
+        <path d="M12 14 L20 14 L20 20 L12 20 Z" fill="white" fillOpacity="0.95" />
+        <path d="M22 14 L28 20 L22 26 Z" fill="white" fillOpacity="0.85" />
+        <path d="M12 22 L20 22 L20 26 L12 26 Z" fill="white" fillOpacity="0.95" />
+      </svg>
+    ),
+    iconBg: "bg-blue-600 dark:bg-blue-700",
+    capabilities: [
+      "Search meetings by topic, host or date range",
+      "Pull meeting assets — summaries, transcripts & recordings",
+      "List cloud recordings & fetch recording resources",
+      "Create meetings & share join links",
+    ],
+    envVarsRequired: ["ZOOM_CLIENT_ID", "ZOOM_CLIENT_SECRET"],
+    docsUrl: "https://developers.zoom.us/docs/mcp/zoom-meetings-mcp-server/",
+  },
+  {
     id: "instantly",
     name: "Instantly",
     tagline: "Cold email sequencing and deliverability at scale",
@@ -421,11 +449,335 @@ const CONNECTORS: ConnectorDef[] = [
   },
 ];
 
+// ─── Capabilities summary card ────────────────────────────────────────────────
+
+// Provider id -> human label (mirrors backend services/mcp/connected_providers).
+// Exported so other pages (e.g. the voice-agents readiness card) reuse the same
+// labels and stay in lockstep with the Settings card.
+export const PROVIDER_LABELS: Record<string, string> = {
+  apollo: "Apollo.io",
+  zoho: "Zoho CRM",
+  hubspot: "HubSpot",
+  calcom: "Cal.com",
+  calendly: "Calendly",
+  microsoft: "Microsoft 365",
+  google_calendar: "Google Calendar",
+  rocketreach_mcp: "RocketReach",
+  zoom: "Zoom",
+  inventory: "Inventory",
+  communication: "Email / WhatsApp",
+};
+
+type SummaryProviderState = "connected" | "degraded" | "disconnected";
+export type SummaryProvider = {
+  provider: string;
+  label: string;
+  state: SummaryProviderState;
+  note: string | null;
+};
+export type SummaryCapability = {
+  key: string;
+  label: string;
+  status: "available" | "degraded" | "unavailable";
+  chain: string;
+  providers: SummaryProvider[];
+  // Provider ids to suggest connecting when the capability is unavailable.
+  suggest: string[];
+};
+export type CapabilitiesSummary = {
+  connected_providers: string[];
+  // False when only built-in capabilities (e.g. the DB product catalog) exist.
+  external_connected: boolean;
+  meeting_write_granted: boolean | null;
+  capabilities: SummaryCapability[];
+};
+
+// Capability provider id -> ConnectorCard id (for the one-click unlock jump).
+// google_calendar lives under the "google" connector card; communication and
+// inventory have no card (SMTP/WhatsApp settings / built-in) — no jump for them.
+const PROVIDER_TO_CONNECTOR: Record<string, string | null> = {
+  google_calendar: "google",
+  communication: null,
+  inventory: null,
+};
+
+function scrollToConnector(providerId: string) {
+  const connectorId = PROVIDER_TO_CONNECTOR[providerId] ?? providerId;
+  const el = document.getElementById(`connector-${connectorId}`);
+  if (!el) return;
+  el.scrollIntoView({ behavior: "smooth", block: "start" });
+  el.classList.add("ring-2", "ring-violet-500");
+  setTimeout(() => el.classList.remove("ring-2", "ring-violet-500"), 2000);
+}
+
+// Suggestion chip: an action that jumps to the connector card when one exists,
+// otherwise a plain static chip (e.g. "Email / WhatsApp" — configured via SMTP).
+function ConnectorSuggestionChip({ providerId, onConnect }: {
+  providerId: string;
+  onConnect?: (providerId: string) => void;
+}) {
+  const label = PROVIDER_LABELS[providerId] ?? providerId;
+  // A provider is clickable when it has a connector card: the map's only
+  // non-null entry (google_calendar -> google) is clickable, its null entries
+  // (communication/inventory — SMTP settings / built-in) are not, and anything
+  // not in the map defaults to its own connector card id.
+  const clickable = PROVIDER_TO_CONNECTOR[providerId] !== null;
+  if (!clickable) {
+    return (
+      <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400 border border-slate-200 dark:border-slate-700">
+        {label}
+      </span>
+    );
+  }
+  // Auto-connect: scroll+flash the card AND run its connect flow. Falls back
+  // to a plain scroll if no trigger is registered yet.
+  return (
+    <button
+      onClick={() => (onConnect ?? scrollToConnector)(providerId)}
+      title={`Connect ${label} to unlock this`}
+      className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-800/60 hover:bg-violet-100 dark:hover:bg-violet-900/40 transition-colors"
+    >
+      <Plug className="h-3 w-3 flex-shrink-0" />
+      {label}
+    </button>
+  );
+}
+
+export function providerChipCls(state: SummaryProviderState) {
+  switch (state) {
+    case "connected":
+      return "bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800/60";
+    case "degraded":
+      return "bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-300 border-amber-200 dark:border-amber-800/60";
+    default:
+      return "bg-slate-50 dark:bg-slate-800/50 text-slate-400 dark:text-slate-500 border-slate-200 dark:border-slate-700";
+  }
+}
+
+function CapabilityRow({ cap, onConnect }: {
+  cap: SummaryCapability;
+  onConnect?: (providerId: string) => void;
+}) {
+  const dot =
+    cap.status === "available"
+      ? "bg-green-500"
+      : cap.status === "degraded"
+        ? "bg-amber-500"
+        : "bg-slate-300 dark:bg-slate-600";
+  const statusText =
+    cap.status === "available" ? "Available" : cap.status === "degraded" ? "Needs attention" : "Not connected";
+  const statusCls =
+    cap.status === "available"
+      ? "text-green-600 dark:text-green-400"
+      : cap.status === "degraded"
+        ? "text-amber-600 dark:text-amber-400"
+        : "text-slate-400 dark:text-slate-500";
+
+  return (
+    <div className="flex items-start gap-3">
+      <span className={`mt-1.5 h-2 w-2 rounded-full flex-shrink-0 ${dot}`} />
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs font-semibold text-slate-800 dark:text-slate-200">{cap.label}</span>
+          <span className={`text-[10px] font-semibold uppercase tracking-wide ${statusCls}`}>{statusText}</span>
+        </div>
+        {cap.status !== "unavailable" && (
+          <p className="mt-0.5 text-[10px] text-slate-400 dark:text-slate-500">
+            Priority: {cap.chain}
+          </p>
+        )}
+        <div className="mt-1.5 flex flex-wrap gap-1.5">
+          {cap.providers.map(p => (
+            <span
+              key={p.provider}
+              title={p.note ?? undefined}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-medium border ${providerChipCls(p.state)}`}
+            >
+              {p.state === "connected" && <CheckCircle2 className="h-3 w-3 flex-shrink-0" />}
+              {p.state === "degraded" && <AlertCircle className="h-3 w-3 flex-shrink-0" />}
+              {p.state === "disconnected" && <span className="h-1.5 w-1.5 rounded-full bg-slate-300 dark:bg-slate-600 flex-shrink-0" />}
+              {p.label}
+            </span>
+          ))}
+        </div>
+        {cap.status === "unavailable" && cap.suggest.length > 0 && (
+          <div className="mt-1.5 flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-medium uppercase tracking-wide text-slate-400 dark:text-slate-500">Unlock with:</span>
+            {cap.suggest.map(pid => (
+              <ConnectorSuggestionChip key={pid} providerId={pid} onConnect={onConnect} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function CapabilitiesSummaryCard({
+  sessionTimeout,
+  getConnectTrigger,
+}: {
+  sessionTimeout?: SessionTimeout;
+  // Resolves the auto-connect trigger for a connector card id (registered by
+  // ConnectorCard via registerConnect) — undefined when not registered.
+  getConnectTrigger?: (connectorId: string) => (() => void) | undefined;
+}) {
+  const [data, setData] = useState<CapabilitiesSummary | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const searchParams = useSearchParams();
+  const paramsStr = searchParams.toString();
+
+  const fetchSummary = useCallback(async () => {
+    try {
+      const res = await apiFetch(`${API_BASE}/mcp-connections/capabilities/summary`);
+      if (res.status === 401) { sessionTimeout?.(); return; }
+      if (!res.ok) throw new Error("Failed to load capabilities");
+      setData(await res.json());
+      setError(null);
+    } catch {
+      setError("Cannot reach the API server");
+    } finally {
+      setLoading(false);
+    }
+  }, [sessionTimeout]);
+
+  // Fetch on mount and whenever the URL changes (OAuth callbacks navigate back
+  // with ?connector=connected/error, so the card settles right after a connect).
+  useEffect(() => { fetchSummary(); }, [fetchSummary, paramsStr]);
+
+  // Light poll so the card reflects a connector that connected elsewhere.
+  useEffect(() => {
+    const t = setInterval(fetchSummary, 20000);
+    return () => clearInterval(t);
+  }, [fetchSummary]);
+
+  // Auto-connect from an 'Unlock with:' suggestion chip: scroll + flash the
+  // target connector card, then run that card's own connect flow (OAuth popup,
+  // or reveal its API-key input) — no second click required.
+  const handleSuggestionConnect = (providerId: string) => {
+    scrollToConnector(providerId);
+    const connectorId = PROVIDER_TO_CONNECTOR[providerId] ?? providerId;
+    getConnectTrigger?.(connectorId)?.();
+  };
+
+  const [open, setOpen] = useState(true);
+
+  return (
+    <div className="rounded-2xl border border-slate-200 dark:border-slate-700/60 bg-white dark:bg-slate-900 overflow-hidden">
+      {/* Collapsible Header */}
+      <div className="flex items-center justify-between px-5 py-4 border-b border-slate-200 dark:border-slate-700/60">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex items-center gap-2 text-left flex-1 min-w-0 cursor-pointer"
+        >
+          <Zap className="h-4 w-4 text-amber-500 flex-shrink-0" />
+          <span className="text-sm font-semibold text-slate-700 dark:text-slate-300">Effective capabilities</span>
+          <span className="text-xs text-slate-400">— what your agents can actually do right now</span>
+        </button>
+        <div className="flex items-center gap-1.5 flex-shrink-0">
+          <button
+            onClick={fetchSummary}
+            disabled={loading}
+            title="Refresh"
+            className="p-1.5 rounded-lg text-slate-400 hover:text-violet-600 hover:bg-violet-50 dark:hover:bg-violet-900/20 transition-colors disabled:opacity-50 cursor-pointer"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+          </button>
+          <button
+            type="button"
+            onClick={() => setOpen((v) => !v)}
+            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors cursor-pointer"
+          >
+            {open ? <ChevronUp className="h-4 w-4" /> : <ChevronDown className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <>
+          {loading ? (
+            <div className="flex items-center justify-center py-8">
+              <Loader2 className="h-5 w-5 animate-spin text-slate-400" />
+            </div>
+          ) : error ? (
+            <div className="flex items-start gap-2 p-5">
+              <AlertCircle className="h-3.5 w-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+              <p className="text-xs text-red-600 dark:text-red-400">{error}</p>
+            </div>
+          ) : data && data.capabilities.length > 0 ? (
+            <>
+              {/* Bare-account banner — nothing external connected */}
+              {data.external_connected === false && (
+                <div className="mx-5 mt-4 flex items-start gap-2 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
+                  <AlertCircle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">No external integrations connected</p>
+                    <p className="text-[11px] text-amber-700/90 dark:text-amber-400/90 mt-0.5 leading-snug">
+                      Your agents can only check the product catalog right now. Connect your sales stack below to unlock scheduling, meetings, CRM, prospect search, and outreach — each missing capability shows what to connect.
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* Connected provider chips */}
+              <div className="px-5 pt-4 flex flex-wrap gap-1.5">
+                {data.connected_providers.length === 0 ? (
+                  <p className="text-xs text-slate-400">No integrations connected yet — connect one below to unlock it for agents.</p>
+                ) : (
+                  data.connected_providers.map(id => (
+                    <span
+                      key={id}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold bg-violet-50 dark:bg-violet-900/20 text-violet-700 dark:text-violet-300 border border-violet-200 dark:border-violet-800/60"
+                    >
+                      <CheckCircle2 className="h-3 w-3 flex-shrink-0" />
+                      {PROVIDER_LABELS[id] ?? id}
+                    </span>
+                  ))
+                )}
+              </div>
+
+              {/* Zoom meeting creation gated note — consumed from meeting_write_granted */}
+              {data.meeting_write_granted === false && (
+                <div className="mx-5 mt-4 flex items-start gap-2 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
+                  <AlertCircle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-amber-700 dark:text-amber-400 leading-snug">
+                    Zoom meeting creation is hidden until the <code className="font-mono">meeting:write</code> scope is granted — reconnect Zoom below to unlock it.
+                  </p>
+                </div>
+              )}
+
+              {/* Capability rows */}
+              <div className="px-5 py-4 space-y-3.5">
+                {data.capabilities.map(cap => (
+                  <CapabilityRow key={cap.key} cap={cap} onConnect={handleSuggestionConnect} />
+                ))}
+              </div>
+            </>
+          ) : null}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ─── ConnectorCard ─────────────────────────────────────────────────────────────
 
-function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef; sessionTimeout?: SessionTimeout }) {
+function ConnectorCard({ connector, sessionTimeout, registerConnect }: {
+  connector: ConnectorDef;
+  sessionTimeout?: SessionTimeout;
+  // Lets the Effective capabilities card run THIS card's connect flow directly
+  // (auto-connect from an 'Unlock with:' suggestion chip — no second click).
+  registerConnect?: (connectorId: string, fn: () => void) => void;
+}) {
   const [status, setStatus] = useState<ConnectionStatus>("idle");
   const [toast, setToast] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  // Raw status payload. warning (scope hint) and meetingWriteGranted (gated tool
+  // state) are DERIVED from it, so the warning box + capability list always stay
+  // in lockstep with the latest real status — no separate state to drift.
+  const [statusData, setStatusData] = useState<any>(null);
   const [apiKeyInput, setApiKeyInput] = useState("");
   const [showApiKeyInput, setShowApiKeyInput] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
@@ -440,11 +792,15 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
     try {
       const res = await apiFetch(connector.statusUrl);
       if (res.status === 401) { sessionTimeout?.(); return; }
-      if (!res.ok) { setStatus("disconnected"); return; }
+      if (!res.ok) { setStatus("disconnected"); setStatusError("Status endpoint unavailable"); return; }
       const data = await res.json();
       setStatus(data.connected ? "connected" : "disconnected");
+      setStatusError(data.connected ? null : (data.error ?? null));
+      setStatusData(data);
     } catch {
       setStatus("error");
+      setStatusError("Cannot reach the API server");
+      setStatusData(null);
     }
   }, [connector.statusUrl, sessionTimeout]);
 
@@ -452,15 +808,39 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
 
   useEffect(() => {
     const param = searchParams.get(connector.id);
-    if (param === "connected") {
-      setStatus("connected");
-      setToast(`${connector.name} connected`);
-      setTimeout(() => setToast(null), 4000);
-      const url = new URL(window.location.href);
-      url.searchParams.delete(connector.id);
-      router.replace(url.pathname + (url.search || ""), { scroll: false });
-    }
-  }, [searchParams, connector.id, connector.name, router]);
+    if (param !== "connected" && param !== "error") return;
+    // Never trust the URL param: show the spinner and only settle once the real
+    // status endpoint confirms the connection state (the OAuth callback may have
+    // completed while tool discovery failed).
+    (async () => {
+      setStatus("checking");
+      try {
+        const res = await apiFetch(connector.statusUrl);
+        if (res.status === 401) { sessionTimeout?.(); return; }
+        if (!res.ok) {
+          setStatus("disconnected");
+          setStatusError("Status endpoint unavailable");
+          return;
+        }
+        const data = await res.json();
+        setStatus(data.connected ? "connected" : "disconnected");
+        setStatusError(data.connected ? null : (data.error ?? null));
+        setStatusData(data);
+        setToast(
+          data.connected
+            ? `${connector.name} connected`
+            : `${connector.name} ${param === "error" ? "connection failed" : "not connected"} — see details below`
+        );
+        setTimeout(() => setToast(null), 5000);
+      } catch {
+        setStatus("error");
+        setStatusError("Cannot reach the API server");
+      }
+    })();
+    const url = new URL(window.location.href);
+    url.searchParams.delete(connector.id);
+    router.replace(url.pathname + (url.search || ""), { scroll: false });
+  }, [searchParams, connector.id, connector.name, router, sessionTimeout]);
 
   const stopPolling = useCallback(() => {
     if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
@@ -478,6 +858,7 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
           const data = await res.json();
           if (data.connected) {
             setStatus("connected");
+            setStatusData(data);
             setToast(`${connector.name} connected`);
             setTimeout(() => setToast(null), 4000);
             stopPolling();
@@ -485,7 +866,7 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
           }
         }
       } catch { /* ignore */ }
-      if (attempts >= 30) { stopPolling(); setStatus("disconnected"); }
+      if (attempts >= 30) { stopPolling(); setStatus("disconnected"); setStatusData(null); }
     }, 2000);
   }, [connector.statusUrl, connector.name, sessionTimeout, stopPolling]);
 
@@ -494,6 +875,7 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
   const handleConnectApiKey = async () => {
     if (!apiKeyInput.trim()) return;
     setStatus("connecting");
+    setStatusError(null);
     try {
       const res = await apiFetch(connector.connectUrl!, {
         method: "POST",
@@ -506,10 +888,32 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
         try { const body = await res.json(); detail = body.detail ?? detail; } catch { /* ignore */ }
         throw new Error(detail);
       }
-      setStatus("connected");
-      setToast(`${connector.name} connected`);
       setShowApiKeyInput(false);
       setApiKeyInput("");
+      // Only settle the badge once the status endpoint confirms the key works.
+      setStatus("checking");
+      let connectedNow: boolean | null = null; // null = verification inconclusive
+      try {
+        const vres = await apiFetch(connector.statusUrl);
+        if (vres.status === 401) { sessionTimeout?.(); return; }
+        if (vres.ok) {
+          const vdata = await vres.json();
+          connectedNow = !!vdata.connected;
+          setStatus(connectedNow ? "connected" : "disconnected");
+          setStatusError(connectedNow ? null : (vdata.error ?? null));
+        }
+      } catch { /* inconclusive */ }
+      if (connectedNow === null) {
+        // Status endpoint unreachable — the backend accepted & stored the key,
+        // so settle on connected instead of punishing a network blip.
+        setStatus("connected");
+        setStatusError(null);
+      }
+      setToast(
+        connectedNow === false
+          ? `${connector.name} saved, but not connected — see details below`
+          : `${connector.name} connected`
+      );
       setTimeout(() => setToast(null), 4000);
     } catch (err: unknown) {
       setStatus("disconnected");
@@ -521,6 +925,10 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
   const handleConnect = async () => {
     if (isApiKey) { setShowApiKeyInput(true); return; }
     setStatus("connecting");
+    setStatusError(null);
+    // Don't clear the warning here: a failed auth-URL fetch or a cancelled popup
+    // must not permanently hide the scope warning. It only updates from real
+    // status data (mount check, URL-param re-check, or polling success).
     try {
       const res = await apiFetch(connector.authUrl!);
       if (res.status === 401) { sessionTimeout?.(); return; }
@@ -546,6 +954,8 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
       const res = await apiFetch(connector.disconnectUrl, { method: "DELETE" });
       if (res.status === 401) { sessionTimeout?.(); return; }
       setStatus("disconnected");
+      setStatusError(null);
+      setStatusData(null);
       setToast(`${connector.name} disconnected`);
       setTimeout(() => setToast(null), 3000);
     } catch {
@@ -557,12 +967,35 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
   const isConnected = status === "connected";
   const isLoading = status === "checking" || status === "connecting";
 
+  // Auto-connect trigger registered for the Effective capabilities card. Runs
+  // this card's own handleConnect (OAuth popup, or reveals the API-key input)
+  // but skips while a check/connect is in flight so we never stack popups.
+  const connectFnRef = useRef<() => void>(() => {});
+  connectFnRef.current = () => {
+    if (isLoading) return;
+    handleConnect();
+  };
+  useEffect(() => {
+    registerConnect?.(connector.id, () => connectFnRef.current());
+    return () => registerConnect?.(connector.id, () => {});
+  }, [registerConnect, connector.id]);
+
+  // Derived from the latest status payload: the scope hint for the warning box
+  // and whether meeting creation is actually granted (gates the capability row).
+  // null = unknown (not connected / no data / check failed) — treated as neutral.
+  const meetingWriteGranted: boolean | null = statusData?.meeting_write_granted ?? null;
+  const warning: string | null =
+    meetingWriteGranted === false ? (statusData?.meeting_write_hint ?? null) : null;
+
   return (
-    <div className={`relative rounded-2xl border bg-white dark:bg-slate-900 flex flex-col transition-all duration-200 ${
-      isConnected
-        ? `${cat.border} shadow-sm`
-        : "border-slate-200 dark:border-slate-700/60"
-    }`}>
+    <div
+      id={`connector-${connector.id}`}
+      className={`relative rounded-2xl border bg-white dark:bg-slate-900 flex flex-col transition-all duration-200 scroll-mt-6 ${
+        isConnected
+          ? `${cat.border} shadow-sm`
+          : "border-slate-200 dark:border-slate-700/60"
+      }`}
+    >
       {/* Connected top bar */}
       {isConnected && (
         <div className="absolute top-0 left-0 right-0 h-0.5 rounded-t-2xl bg-gradient-to-r from-green-400 to-emerald-500" />
@@ -597,6 +1030,10 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-violet-100 dark:bg-violet-900/30 text-violet-600 dark:text-violet-400">
                   <Loader2 className="h-2.5 w-2.5 animate-spin" /> Connecting
                 </span>
+              ) : status === "disconnected" || status === "error" ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold bg-slate-100 dark:bg-slate-800 text-slate-500 dark:text-slate-400">
+                  <span className="h-1.5 w-1.5 rounded-full bg-slate-400" /> Not connected
+                </span>
               ) : null}
             </div>
             <p className="mt-1 text-xs text-slate-500 dark:text-slate-400 leading-snug">{connector.tagline}</p>
@@ -605,12 +1042,27 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
 
         {/* Capabilities */}
         <ul className="space-y-1.5 flex-1">
-          {connector.capabilities.map(cap => (
-            <li key={cap} className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-400">
-              <CheckCircle2 className="h-3.5 w-3.5 text-green-500 flex-shrink-0 mt-0.5" />
-              {cap}
-            </li>
-          ))}
+          {connector.capabilities.map(cap => {
+            // Zoom meeting creation is gated on the meeting:write scope: when the
+            // status says the scope is missing, show it as locked instead of the
+            // generic (green-check) capability line.
+            const gated =
+              connector.id === "zoom" &&
+              cap.startsWith("Create meetings") &&
+              meetingWriteGranted === false;
+            return (
+              <li key={cap} className="flex items-start gap-2 text-xs text-slate-600 dark:text-slate-400">
+                {gated ? (
+                  <Lock className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+                ) : (
+                  <CheckCircle2 className="h-3.5 w-3.5 text-green-500 flex-shrink-0 mt-0.5" />
+                )}
+                {gated
+                  ? "Create meetings — hidden until the 'meeting:write' scope is granted"
+                  : cap}
+              </li>
+            );
+          })}
         </ul>
 
         {/* Env vars warning */}
@@ -621,6 +1073,39 @@ function ConnectorCard({ connector, sessionTimeout }: { connector: ConnectorDef;
               {connector.envVarsRequired.map(v => (
                 <code key={v} className="text-[10px] px-1 py-0.5 rounded bg-amber-100 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400 font-mono">{v}</code>
               ))}
+            </div>
+          </div>
+        )}
+
+        {/* Connection error — why it's not connected, so fixing is straightforward */}
+        {!isConnected && statusError && (
+          <div className="flex items-start gap-2 p-2.5 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800/40">
+            <AlertCircle className="h-3.5 w-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+            <p className="text-[11px] text-red-600 dark:text-red-400 break-all leading-snug">{statusError}</p>
+          </div>
+        )}
+
+        {/* Connected but partially limited — e.g. Zoom connected without meeting:write */}
+        {warning && (
+          <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
+            <AlertCircle className="h-3.5 w-3.5 text-amber-500 flex-shrink-0 mt-0.5" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[11px] font-semibold text-amber-700 dark:text-amber-400">Meeting creation unavailable</p>
+              <p className="text-[11px] text-amber-700/90 dark:text-amber-400/90 mt-0.5 leading-snug">{warning}</p>
+              {/* One-click fix: re-run the OAuth flow so Zoom re-issues the token
+                  with the newly added meeting:write scope. Reuses handleConnect
+                  (opens the popup + polls status; the warning clears automatically
+                  once the scope is granted). */}
+              {connector.authUrl && (
+                <button
+                  onClick={handleConnect}
+                  disabled={isLoading}
+                  className="mt-2 inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-semibold bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-300 border border-amber-300 dark:border-amber-700/60 hover:bg-amber-200 dark:hover:bg-amber-900/50 disabled:opacity-50 transition-colors"
+                >
+                  {status === "connecting" ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  Reconnect {connector.name}
+                </button>
+              )}
             </div>
           </div>
         )}
@@ -901,6 +1386,18 @@ function CustomServersSection({ sessionTimeout: _sessionTimeout }: { sessionTime
 const CATEGORY_ORDER: ConnectorDef["category"][] = ["crm", "enrichment", "scheduling", "communication", "accounting"];
 
 export default function MCPConnectionsTab({ sessionTimeout }: { sessionTimeout?: SessionTimeout }) {
+  // Registry of each ConnectorCard's auto-connect trigger, keyed by connector
+  // id, so the Effective capabilities card can run a card's connect flow
+  // directly from an 'Unlock with:' suggestion chip.
+  const connectTriggers = useRef<Record<string, () => void>>({});
+  const registerConnect = useCallback((connectorId: string, fn: () => void) => {
+    connectTriggers.current[connectorId] = fn;
+  }, []);
+  const getConnectTrigger = useCallback(
+    (connectorId: string) => connectTriggers.current[connectorId],
+    []
+  );
+
   const grouped = CATEGORY_ORDER.map(cat => ({
     cat,
     connectors: CONNECTORS.filter(c => c.category === cat),
@@ -916,6 +1413,9 @@ export default function MCPConnectionsTab({ sessionTimeout }: { sessionTimeout?:
         </p>
       </div>
 
+      {/* Effective capabilities summary — same truth the agents see on calls */}
+      <CapabilitiesSummaryCard sessionTimeout={sessionTimeout} getConnectTrigger={getConnectTrigger} />
+
       {/* Grouped sections */}
       {grouped.map(({ cat, connectors }) => {
         const meta = CATEGORIES[cat];
@@ -930,7 +1430,7 @@ export default function MCPConnectionsTab({ sessionTimeout }: { sessionTimeout?:
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
               {connectors.map(c => (
-                <ConnectorCard key={c.id} connector={c} sessionTimeout={sessionTimeout} />
+                <ConnectorCard key={c.id} connector={c} sessionTimeout={sessionTimeout} registerConnect={registerConnect} />
               ))}
             </div>
           </section>

@@ -434,13 +434,17 @@ async def rocketreach_mcp_callback(
         session.delete(cred)
     session.commit()
 
+    # Register + discover MCP server tools. Only report "connected" when the
+    # server is genuinely reachable and exposes tools — a broken connection must
+    # NOT show the green badge in the UI. (discover_and_cache_tools swallows
+    # connection errors internally and returns 0 on failure.)
     server = _upsert_mcp_server(session, company_id)
-    try:
-        await discover_and_cache_tools(session, server, access_token)
-    except Exception as exc:
-        logger.warning("[rocketreach_mcp] Tool discovery failed (non-fatal): %s", exc)
+    tool_count = await discover_and_cache_tools(session, server, access_token)
+    if tool_count <= 0:
+        logger.error("[rocketreach_mcp] No tools discovered for company %s — connection not usable", company_id)
+        return RedirectResponse(url=f"{frontend_base}/settings?section=mcp_connections&rocketreach_mcp=error")
 
-    logger.info("[rocketreach_mcp] Company %s connected via OAuth", company_id)
+    logger.info("[rocketreach_mcp] Company %s connected via OAuth (%d tools)", company_id, tool_count)
     return RedirectResponse(
         url=f"{frontend_base}/settings?section=mcp_connections&rocketreach_mcp=connected"
     )

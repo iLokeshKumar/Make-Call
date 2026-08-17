@@ -45,9 +45,31 @@ class MCPClient:
 
     def __init__(self, url: str, headers: dict[str, str] | None = None):
         self.url = url
-        self.headers = {"Content-Type": "application/json", **(headers or {})}
+        # MCP Streamable HTTP requires clients to advertise both JSON and SSE
+        # response formats via the Accept header; strict servers (Calendly, Zoom)
+        # reject requests without it with HTTP 406 Not Acceptable.
+        self.headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json, text/event-stream",
+            **(headers or {}),
+        }
         self._tools: list[dict] | None = None
         self._initialized = False
+
+    @staticmethod
+    def _parse_response(resp: httpx.Response) -> Any:
+        """Parse a Streamable HTTP response — plain JSON or SSE (`text/event-stream`)."""
+        ctype = resp.headers.get("content-type", "")
+        if "text/event-stream" in ctype:
+            data_lines = [
+                line[len("data:"):].strip()
+                for line in resp.text.splitlines()
+                if line.startswith("data:")
+            ]
+            if not data_lines:
+                raise RuntimeError("MCP server returned an empty SSE response")
+            return json.loads(data_lines[-1])
+        return resp.json()
 
     async def _rpc(self, method: str, params: dict | None = None) -> Any:
         payload = {
@@ -59,7 +81,7 @@ class MCPClient:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(self.url, json=payload, headers=self.headers)
             resp.raise_for_status()
-            data = resp.json()
+            data = self._parse_response(resp)
             if "error" in data:
                 raise RuntimeError(f"MCP server error: {data['error']}")
             return data.get("result")

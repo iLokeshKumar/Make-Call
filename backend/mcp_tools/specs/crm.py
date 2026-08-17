@@ -44,6 +44,28 @@ get_lead_info = ToolSpec(
     ),
 )
 
+get_lead_context = ToolSpec(
+    name="get_lead_context",
+    category="crm",
+    description=(
+        "Retrieve the lead's CRM context in one call: profile, effective timezone, "
+        "recent interactions, requirement snapshot, and scheduled appointments."
+    ),
+    when_to_use=[
+        "You need the lead's effective timezone before booking or explaining a time",
+        "You need one tenant-scoped database payload instead of stitching together multiple reads",
+        "You are debugging why interactions, appointments, and emails disagree",
+    ],
+    when_not_to_use=[
+        "You only need a basic lead profile with no history",
+        "You are trying to run arbitrary SQL against the database",
+    ],
+    returns=(
+        "Dict: {lead, effective_timezone, timezone_source, recent_interactions, "
+        "requirement, appointments}."
+    ),
+)
+
 update_lead_status = ToolSpec(
     name="update_lead_status",
     category="crm",

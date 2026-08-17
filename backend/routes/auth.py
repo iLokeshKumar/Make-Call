@@ -1391,6 +1391,11 @@ async def google_callback(
         _upsert_company_setting(session, current_user.company_id, "GCAL_REFRESH_TOKEN", refresh_token, current_user.id, True)
     if expiry:
         _upsert_company_setting(session, current_user.company_id, "GCAL_TOKEN_EXPIRY", expiry, current_user.id)
+    try:
+        from mcp_tools.tool_catalog import invalidate_connections_cache
+        invalidate_connections_cache(current_user.company_id)
+    except Exception:
+        pass
     user_email = None
     try:
         headers = {"Authorization": f"Bearer {creds.token}"}

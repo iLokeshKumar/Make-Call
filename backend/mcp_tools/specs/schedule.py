@@ -1,5 +1,33 @@
 from mcp_tools.spec import ToolSpec
 
+schedule_demo = ToolSpec(
+    name="schedule_demo",
+    category="schedule",
+    description=(
+        "Authoritatively schedule a lead demo. Loads the lead, resolves the lead's "
+        "runtime timezone, converts the requested local time into one timezone-aware "
+        "appointment, persists it, creates the online meeting/calendar event, sends "
+        "one confirmation, and returns the persisted appointment. This is the only "
+        "tool that should be used to schedule a demo."
+    ),
+    when_to_use=[
+        "The lead explicitly agrees to a demo and gives a date/time",
+        "The lead gives natural language such as 'tomorrow at 10 AM'",
+    ],
+    when_not_to_use=[
+        "The lead has not confirmed a time",
+        "You are only sending a non-scheduling follow-up",
+        "You need to send a second confirmation after this tool succeeds",
+    ],
+    returns=(
+        "The persisted appointment: {appointment_id, lead_id, requested_time, "
+        "appointment_time, timezone, status, meeting_link, calendar_event_id, "
+        "email_sent, provider}. Downstream messages must use these returned values. "
+        "The provider is selected from the company's connected scheduling integrations; "
+        "do not assume Google Calendar."
+    ),
+)
+
 book_meeting = ToolSpec(
     name="book_meeting",
     category="schedule",

@@ -6,6 +6,8 @@ Provider routing:
   - Twilio  → redirect active call into <Conference>, dial ISR into same room
   - Exotel  → use Exotel call transfer API
   - EnableX → use EnableX conference/transfer API (fallback to notification only)
+  - Plivo   → transfer the active call to provider-hosted XML instructions
+  - Vobiz   → transfer the active call to provider-hosted XML instructions
 """
 from __future__ import annotations
 
@@ -26,9 +28,13 @@ logger = logging.getLogger(__name__)
 
 
 def _get_telephony_provider(session: Session, company_id: int) -> str:
+    # Outbound dialing uses TELEPHONY_ENGINE. TELEPHONY_PROVIDER is retained
+    # as a backwards-compatible alias for older installations.
     return (
-        get_company_setting_value(session, company_id, "TELEPHONY_PROVIDER") or "twilio"
-    ).lower()
+        get_company_setting_value(session, company_id, "TELEPHONY_ENGINE")
+        or get_company_setting_value(session, company_id, "TELEPHONY_PROVIDER")
+        or "twilio"
+    ).strip().lower()
 
 
 def _resolve_callback_base(session: Session, company_id: int) -> str:
@@ -51,6 +57,7 @@ def _twilio_warm_transfer(
 ) -> dict:
     import twilio.twiml.voice_response as twiml_voice
     from twilio.rest import Client as TwilioClient
+    from twilio.base.exceptions import TwilioRestException
 
     account_sid = get_company_credential(session, company_id, "TWILIO_ACCOUNT_SID")
     auth_token = get_company_credential(session, company_id, "TWILIO_AUTH_TOKEN")
@@ -82,11 +89,24 @@ def _twilio_warm_transfer(
         start_conference_on_enter=False,
         end_conference_on_exit=True,   # hang up conference when ISR leaves
     )
-    isr_call = client.calls.create(
-        to=transfer_to,
-        from_=from_number,
-        twiml=str(isr_twiml),
-    )
+    try:
+        isr_call = client.calls.create(
+            to=transfer_to,
+            from_=from_number,
+            twiml=str(isr_twiml),
+        )
+    except TwilioRestException as exc:
+        if exc.code == 21219:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Twilio trial restriction ({exc.code}): '{transfer_to}' is not a verified number. "
+                    "Trial accounts can only call numbers verified in the Twilio console — add the number "
+                    "under Phone Numbers → Verified Caller IDs, or upgrade the account (Billing → Upgrade) "
+                    "to call any number."
+                ),
+            )
+        raise HTTPException(status_code=502, detail=f"Twilio transfer failed ({exc.code}): {exc.msg}")
 
     return {
         "provider": "twilio",
@@ -159,6 +179,82 @@ def _enablex_warm_transfer(
     return {"provider": "enablex", "conference_name": conference_name, "transferred_to": transfer_to}
 
 
+def _transfer_instruction_url(callback_base: str, transfer_to: str) -> str:
+    from urllib.parse import urlencode
+
+    return f"{callback_base}/warm-transfer-instructions?{urlencode({'transfer_to': transfer_to})}"
+
+
+def _plivo_warm_transfer(
+    session: Session,
+    company_id: int,
+    call_sid: str,
+    transfer_to: str,
+    callback_base: str,
+) -> dict:
+    import requests as _req
+
+    auth_id = get_company_credential(session, company_id, "PLIVO_AUTH_ID")
+    auth_token = get_company_credential(session, company_id, "PLIVO_AUTH_TOKEN")
+    if not all([auth_id, auth_token]):
+        raise HTTPException(status_code=400, detail="Plivo credentials not configured")
+
+    url = f"https://api.plivo.com/v1/Account/{auth_id}/Call/{call_sid}/"
+    response = _req.post(
+        url,
+        auth=(auth_id, auth_token),
+        json={
+            "legs": "aleg",
+            "aleg_url": _transfer_instruction_url(callback_base, transfer_to),
+            "aleg_method": "POST",
+        },
+        timeout=10,
+    )
+    if response.status_code not in (200, 201, 202):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Plivo transfer failed ({response.status_code}): {response.text[:300]}",
+        )
+    return {"provider": "plivo", "call_sid": call_sid, "transferred_to": transfer_to}
+
+
+def _vobiz_warm_transfer(
+    session: Session,
+    company_id: int,
+    call_sid: str,
+    transfer_to: str,
+    callback_base: str,
+) -> dict:
+    import requests as _req
+
+    auth_id = get_company_credential(session, company_id, "VOBIZ_AUTH_ID")
+    auth_token = get_company_credential(session, company_id, "VOBIZ_AUTH_TOKEN")
+    if not all([auth_id, auth_token]):
+        raise HTTPException(status_code=400, detail="Vobiz credentials not configured")
+
+    url = f"https://api.vobiz.ai/api/v1/Account/{auth_id}/Call/{call_sid}/"
+    response = _req.post(
+        url,
+        headers={
+            "X-Auth-ID": auth_id,
+            "X-Auth-Token": auth_token,
+            "Content-Type": "application/json",
+        },
+        json={
+            "legs": "aleg",
+            "aleg_url": _transfer_instruction_url(callback_base, transfer_to),
+            "aleg_method": "POST",
+        },
+        timeout=10,
+    )
+    if response.status_code not in (200, 201, 202):
+        raise HTTPException(
+            status_code=502,
+            detail=f"Vobiz transfer failed ({response.status_code}): {response.text[:300]}",
+        )
+    return {"provider": "vobiz", "call_sid": call_sid, "transferred_to": transfer_to}
+
+
 # Public entry point
 
 def execute_warm_transfer(
@@ -168,11 +264,14 @@ def execute_warm_transfer(
     interaction_id: int,
     transfer_to: str,
     isr_name: Optional[str] = None,
+    transfer_to_name: Optional[str] = None,
+    reason: Optional[str] = None,
 ) -> dict:
     """
     Bridge an active call (identified by interaction_id) to a human ISR.
     Updates the interaction metadata with transfer details.
     """
+    effective_isr_name = isr_name or transfer_to_name
     interaction = session.get(Interaction, interaction_id)
     if not interaction or interaction.company_id != company_id:
         raise HTTPException(status_code=404, detail="Interaction not found")
@@ -185,7 +284,14 @@ def execute_warm_transfer(
     transfer_to_normalized = normalize_phone(transfer_to)
     conference_name = f"transfer-{interaction_id}-{uuid.uuid4().hex[:8]}"
     callback_base = _resolve_callback_base(session, company_id)
-    provider = _get_telephony_provider(session, company_id)
+    # Prefer the provider captured on the interaction. This protects an
+    # in-progress call if the company setting changes after dialing.
+    provider = (
+        metadata.get("telephony_provider")
+        or metadata.get("telephony_engine")
+        or interaction.source
+        or _get_telephony_provider(session, company_id)
+    ).strip().lower()
 
     logger.info(
         "[WarmTransfer] interaction=%s provider=%s transfer_to=%s",
@@ -196,10 +302,22 @@ def execute_warm_transfer(
         result = _exotel_warm_transfer(session, company_id, call_sid, transfer_to_normalized)
     elif provider == "enablex":
         result = _enablex_warm_transfer(session, company_id, call_sid, transfer_to_normalized, conference_name)
-    else:
-        # Twilio (default) and any unknown provider
+    elif provider == "plivo":
+        result = _plivo_warm_transfer(
+            session, company_id, call_sid, transfer_to_normalized, callback_base
+        )
+    elif provider == "vobiz":
+        result = _vobiz_warm_transfer(
+            session, company_id, call_sid, transfer_to_normalized, callback_base
+        )
+    elif provider == "twilio":
         result = _twilio_warm_transfer(
             session, company_id, call_sid, transfer_to_normalized, conference_name, callback_base
+        )
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Warm transfer is not supported for telephony provider '{provider}'",
         )
 
     # Persist transfer details on the interaction
@@ -207,7 +325,8 @@ def execute_warm_transfer(
         **metadata,
         "warm_transfer": {
             "transferred_to": transfer_to_normalized,
-            "isr_name": isr_name,
+            "isr_name": effective_isr_name,
+            "reason": reason,
             "provider": provider,
             "conference_name": conference_name,
             **result,

@@ -1,6 +1,7 @@
 import os
 import logging
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import json
 import re
 from typing import Optional
@@ -28,12 +29,12 @@ class DateNormalizer:
         )
         self.llm = get_llm_service(provider, system_prompt)
 
-    async def normalize(self, raw_date_str: str) -> Optional[datetime]:
+    async def normalize(self, raw_date_str: str, timezone_str: str = "UTC") -> Optional[datetime]:
         """Normalize a string using AI and return a corrected datetime object."""
         if not raw_date_str:
             return None
             
-        now = datetime.now()
+        now = datetime.now(ZoneInfo(timezone_str))
         
         # Reset messages to only contain system prompt for a fresh stateless call
         self.llm.messages = [{"role": "system", "content": self.llm.system_prompt}]
@@ -90,8 +91,12 @@ class DateNormalizer:
 # Singleton instance
 _normalizer = None
 
-async def normalize_date_ai(raw_str: str, provider: str = None) -> Optional[datetime]:
+async def normalize_date_ai(
+    raw_str: str,
+    provider: str = None,
+    timezone_str: str = "UTC",
+) -> Optional[datetime]:
     global _normalizer
     if _normalizer is None:
         _normalizer = DateNormalizer(provider=provider)
-    return await _normalizer.normalize(raw_str)
+    return await _normalizer.normalize(raw_str, timezone_str=timezone_str)

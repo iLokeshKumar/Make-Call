@@ -814,6 +814,43 @@ class VoiceAgentExecutionEvent(SQLModel, table=True):
     )
 
 
+class AgentChatSession(AuditMixin, table=True):
+    """Persistent text/browser conversation session for a voice agent."""
+    __tablename__ = "agent_chat_sessions"
+    __table_args__ = (
+        Index("ix_agent_chat_sessions_company_updated", "company_id", "updated_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    agent_id: int = Field(foreign_key="voice_agents.id", index=True)
+    user_id: Optional[int] = Field(default=None, foreign_key="users.id", index=True)
+    lead_id: Optional[int] = Field(default=None, foreign_key="leads.id", index=True)
+    transport: str = Field(default="chat", max_length=20)
+    status: str = Field(default="active", max_length=20)
+    metadata_json: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+
+
+class AgentChatMessage(SQLModel, table=True):
+    """One durable turn/event in a chat or browser voice session."""
+    __tablename__ = "agent_chat_messages"
+    __table_args__ = (
+        Index("ix_agent_chat_messages_session_created", "session_id", "created_at"),
+    )
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    company_id: int = Field(foreign_key="companies.id", index=True)
+    session_id: int = Field(foreign_key="agent_chat_sessions.id", index=True)
+    role: str = Field(max_length=20)
+    content: str = Field(default="", sa_column=Column(Text, nullable=False))
+    tool_name: Optional[str] = Field(default=None, max_length=120)
+    tool_call_id: Optional[str] = Field(default=None, max_length=200)
+    tool_arguments: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    tool_result: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    metadata_json: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
+    created_at: datetime = Field(default_factory=utc_now)
+
+
 class VoiceAgentExtractionTemplate(AuditMixin, table=True):
     __tablename__ = "voice_agent_extraction_templates"
 

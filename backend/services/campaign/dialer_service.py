@@ -231,6 +231,16 @@ def _initiate_twilio_call(
                 status_code=402,
                 detail=f"Twilio account error ({exc.code}): {exc.msg}. Check credentials or account balance.",
             )
+        if exc.code == 21219:
+            raise HTTPException(
+                status_code=402,
+                detail=(
+                    f"Twilio trial restriction ({exc.code}): '{normalized_to}' is not a verified number. "
+                    "Trial accounts can only call numbers verified in the Twilio console — add the number "
+                    "under Phone Numbers → Verified Caller IDs, or upgrade the account (Billing → Upgrade) "
+                    "to call any number."
+                ),
+            )
         if exc.code in (21210, 21211, 21214, 21604):
             raise HTTPException(
                 status_code=400,

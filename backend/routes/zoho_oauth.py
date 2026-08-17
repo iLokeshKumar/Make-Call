@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Optional
 
 import httpx
@@ -45,6 +46,13 @@ ZOHO_SCOPES = " ".join([
     "ZohoCRM.settings.ALL",
     "ZohoCRM.bulk.ALL",
     "ZohoCRM.org.ALL",
+    "WorkDrive.files.READ",
+    # Zoho requires BOTH WorkDrive scopes for the binary file download API
+    # (download.zoho.com) — without ZohoFiles.files.READ it returns 401
+    # INVALID_OAUTHSCOPE (confirmed in Zoho's help forum).
+    "ZohoFiles.files.READ",
+    "ZohoSheet.dataAPI.READ",
+    "ZohoBooks.fullaccess.all",
 ])
 
 
@@ -103,9 +111,85 @@ def _delete_tokens(session: Session, company_id: int) -> None:
     session.commit()
 
 
+# Zoho access tokens are short-lived (~1 hour). Refresh the token 5 min before
+# it expires so long-running reads (e.g. Zoho Books inventory) never fail with a
+# stale-token 401.
+_ACCESS_TOKEN_SKEW_SECONDS = 300
+
+
+def _token_is_expired(token: str) -> bool:
+    """Return True when the access token is expired or within the skew window.
+
+    Decodes the JWT without verifying the signature (the token is only used to
+    read its ``exp`` claim). Non-JWT/opaque tokens fail open (return False) —
+    the 401 retry path in callers covers those stale cases.
+    """
+    try:
+        import jwt as _jwt
+        payload = _jwt.decode(token, options={"verify_signature": False})
+        exp = payload.get("exp")
+        if not exp:
+            return False
+        return time.time() >= float(exp) - _ACCESS_TOKEN_SKEW_SECONDS
+    except Exception:
+        return False
+
+
+def get_or_refresh_zoho_token(session: Session, company_id: int, force: bool = False) -> Optional[str]:
+    """Return a fresh Zoho access token, auto-refreshing when needed.
+
+    Reads the stored access token. If it is missing, expired, close to expiry,
+    or ``force`` is True (e.g. a 401 came back from Zoho), exchanges the stored
+    refresh token at ZOHO_TOKEN_URL, persists the new access token, and returns
+    it. Returns None when Zoho is not connected or the refresh fails.
+    """
+    token = _get_token(session, company_id, "access_token")
+    if not token:
+        return None
+    if not force and not _token_is_expired(token):
+        return token
+
+    refresh_token = _get_token(session, company_id, "refresh_token")
+    client_id = os.getenv("ZOHO_CLIENT_ID")
+    client_secret = os.getenv("ZOHO_CLIENT_SECRET")
+    if not refresh_token or not client_id or not client_secret:
+        return None
+
+    try:
+        resp = httpx.post(
+            ZOHO_TOKEN_URL,
+            data={
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            },
+            timeout=20,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        logger.warning("[zoho_oauth] Token refresh failed for company %s: %s", company_id, exc)
+        return None
+
+    new_token = data.get("access_token")
+    if not new_token:
+        return None
+    _save_token(session, company_id, "access_token", new_token)
+    if new_rt := data.get("refresh_token"):
+        _save_token(session, company_id, "refresh_token", new_rt)
+    invalidate_connections_cache(company_id)
+    logger.info("[zoho_oauth] Refreshed Zoho access token for company %s", company_id)
+    return new_token
+
+
 def get_company_zoho_token(session: Session, company_id: int) -> Optional[str]:
-    """Return the stored Zoho access token (used by zoho provider adapter)."""
-    return _get_token(session, company_id, "access_token")
+    """Return a fresh Zoho access token, auto-refreshing when expired.
+
+    Used by the Zoho provider adapter and REST executors so callers never hit
+    a stale-token 401 after ~1 hour.
+    """
+    return get_or_refresh_zoho_token(session, company_id)
 
 
 # ── Routes ────────────────────────────────────────────────────────────────── #
@@ -183,7 +267,7 @@ async def zoho_oauth_callback(
         _save_token(session, company_id, "refresh_token", refresh_token)
     invalidate_connections_cache(company_id)
 
-    logger.info("[zoho_oauth] Company %s connected to Zoho CRM MCP", company_id)
+    logger.info("[zoho_oauth] Company %s connected to Zoho CRM, Sheet and WorkDrive", company_id)
 
     frontend_base = os.getenv("FRONTEND_URL", "http://localhost:3006")
     return RedirectResponse(url=f"{frontend_base}/settings?zoho=connected")

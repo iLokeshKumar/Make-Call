@@ -4,6 +4,15 @@ import argparse
 import logging
 import time
 
+# Windows: switch to the Selector event-loop policy BEFORE any async code or
+# psycopg import. Otherwise psycopg's async connection pool (the LangGraph
+# AsyncPostgresSaver checkpointer used during pre-call research) fails with
+# "Psycopg cannot use the 'ProactorEventLoop'" on every pool open — which also
+# makes the 15s pre-call KB budget time out. Same fix as backend/main.py.
+from win_async_fix import apply_windows_async_fix
+
+apply_windows_async_fix()
+
 from database import engine, init_db
 from services.automation_worker_service import run_worker_cycle, run_worker_forever
 from sqlmodel import Session

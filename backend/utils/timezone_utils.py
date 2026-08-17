@@ -206,6 +206,46 @@ def localize_datetime(dt: datetime.datetime, timezone_str: str) -> datetime.date
     return dt.astimezone(tz)
 
 
+def parse_datetime_for_timezone(
+    value: str,
+    timezone_str: str,
+    *,
+    require_local_wall_clock: bool = False,
+) -> datetime.datetime:
+    """Parse a scheduling timestamp using an explicit timezone contract.
+
+    Scheduling tools receive a lead-local wall-clock value (for example,
+    ``2026-08-14T10:00:00``).  A naive timestamp is therefore attached to the
+    lead timezone; it must never be assumed to be UTC.  Callers that use the
+    local-wall-clock contract can reject offsets because a model adding ``Z``
+    would silently move a 10:00 IST booking to 15:30 IST.
+    """
+    raw = (value or "").strip()
+    if not raw:
+        raise ValueError("A meeting date/time is required")
+    try:
+        parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"Invalid ISO meeting date/time: {value!r}") from exc
+
+    if parsed.tzinfo is not None:
+        if require_local_wall_clock:
+            expected = parsed.astimezone(ZoneInfo(timezone_str))
+            # A timestamp with an offset is safe only when that offset agrees
+            # with the lead's runtime timezone at that date (DST included).
+            # This catches models that append Z to a local wall-clock value.
+            wall_clock = parsed.replace(tzinfo=None)
+            if wall_clock != expected.replace(tzinfo=None):
+                raise ValueError(
+                    f"Meeting time offset does not match the lead timezone {timezone_str}; "
+                    "send the lead-local wall-clock time"
+                )
+            return expected
+        return parsed.astimezone(ZoneInfo(timezone_str))
+
+    return parsed.replace(tzinfo=ZoneInfo(timezone_str))
+
+
 def format_datetime_for_timezone(
     dt: datetime.datetime | None,
     timezone_str: str,

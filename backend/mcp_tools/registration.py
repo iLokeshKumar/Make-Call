@@ -83,6 +83,7 @@ def _crm(registry: ToolRegistry) -> None:
     for spec, attr in [
         (crm.get_or_create_lead, "get_or_create_lead"),
         (crm.get_lead_info, "get_lead_info"),
+        (crm.get_lead_context, "get_lead_context"),
         (crm.update_lead_status, "update_lead_status"),
     ]:
         registry.register(RegisteredTool(
@@ -172,6 +173,7 @@ def _contacts(registry: ToolRegistry) -> None:
 
 def _schedule(registry: ToolRegistry) -> None:
     for spec, attr in [
+        (schedule.schedule_demo, "schedule_demo"),
         (schedule.book_meeting, "book_meeting"),
         (schedule.book_demo, "book_demo"),
         (schedule.get_google_auth_url, "get_google_auth_url"),

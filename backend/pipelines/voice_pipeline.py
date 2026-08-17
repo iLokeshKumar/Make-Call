@@ -102,7 +102,7 @@ class VoicePipeline:
                  company_name: str = "Yexis Electronics", user: User = None, lead_context: str = None,
                  company_website: str = None, lead_id: int = None,
                  audio_encoding: str = "pcm_mulaw", audio_sample_rate: int = 8000,
-                 lead_language: str = "en-IN", runtime_json: dict = None):
+                 lead_language: str = "en-IN", runtime_json: dict = None, agent_id: int | None = None):
         self.communicator = communicator
         self.interaction_id = interaction_id
         self.system_prompt = system_prompt
@@ -127,6 +127,7 @@ class VoicePipeline:
         self.llm_provider = llm_provider or "mistral"
         self.tts_provider = tts_provider or "cartesia"
         self.lead_language = lead_language or "en-IN"
+        self.agent_id = agent_id
 
         self.audio_encoding = audio_encoding
         self.audio_sample_rate = audio_sample_rate
@@ -2261,7 +2262,9 @@ class VoicePipeline:
         
         # Only expose tools the company actually has connected/enabled — this is
         # what lets the agent use Apollo/Zoho/Cal.com/Calendly/inventory mid-call.
-        mistral_tools = get_mistral_tools(self.company_id)
+        # When the call is tied to a specific voice agent with an allowlist
+        # (VoiceAgentTool rows), further restrict to that agent's tools.
+        mistral_tools = get_mistral_tools(self.company_id, agent_id=self.agent_id)
         
         full_reply = ""
         tool_calls = None
@@ -2417,7 +2420,6 @@ class VoicePipeline:
                             "get_product_info":        "Let me pull up the details on that for you.",
                             "book_meeting":            "Let me get that booked for you right now.",
                             "book_demo":               "I'm scheduling that demo for you now.",
-                            "calendar_book":           "Let me book that in the calendar for you right now.",
                             "send_communication":      "Sending that over to you now.",
                             "get_or_create_lead":      "One moment while I update your record.",
                             "check_icp_qualification": "Let me check if this fits your profile.",
@@ -2440,7 +2442,7 @@ class VoicePipeline:
                         # Update context for silence re-engagement
                         if tool_name in ["get_product_info", "check_guardrails"]:
                             self.last_context_type = "pricing"
-                        elif tool_name in ["book_meeting", "book_demo", "calendar_book"]:
+                        elif tool_name in ["book_meeting", "book_demo"]:
                             self.last_context_type = "demo"
                         
                         thinking_msg = thinking_phrases.get(tool_name, "One moment, let me look into that for you.")

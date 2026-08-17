@@ -145,10 +145,11 @@ _RESEARCHER_SYSTEM_PROMPT = (
 async def create_agent(llm, company_id: int = 0):
     from langchain.agents import create_agent
     from agents.checkpointer import get_async_checkpointer
+    from services.mcp.connected_providers import agent_system_prompt
     return create_agent(
         llm,
         tools=RESEARCHER_TOOLS,
-        system_prompt=_RESEARCHER_SYSTEM_PROMPT,
+        system_prompt=agent_system_prompt(_RESEARCHER_SYSTEM_PROMPT, company_id),
         checkpointer=await get_async_checkpointer(),
     )
 

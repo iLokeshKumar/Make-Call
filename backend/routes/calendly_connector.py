@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/crm/calendly", tags=["Calendly"])
 
 _PROVIDER   = "calendly"
-_MCP_URL    = "https://mcp.calendly.com/mcp"
+_MCP_URL    = "https://mcp.calendly.com"
 _MCP_BASE   = "https://mcp.calendly.com"
 
 
@@ -295,14 +295,17 @@ async def calendly_callback(
         session.delete(cred)
     session.commit()
 
-    # Register + discover MCP server tools
+    # Register + discover MCP server tools. Only report "connected" when the
+    # server is genuinely reachable and exposes tools — a broken connection must
+    # NOT show the green badge in the UI. (discover_and_cache_tools swallows
+    # connection errors internally and returns 0 on failure.)
     server = _upsert_mcp_server(session, company_id)
-    try:
-        await discover_and_cache_tools(session, server, access_token)
-    except Exception as exc:
-        logger.warning("[calendly] Tool discovery failed (non-fatal): %s", exc)
+    tool_count = await discover_and_cache_tools(session, server, access_token)
+    if tool_count <= 0:
+        logger.error("[calendly] No tools discovered for company %s — connection not usable", company_id)
+        return RedirectResponse(url=f"{frontend_base}/settings?section=mcp_connections&calendly=error")
 
-    logger.info("[calendly] Company %s connected via OAuth", company_id)
+    logger.info("[calendly] Company %s connected via OAuth (%d tools)", company_id, tool_count)
     return RedirectResponse(
         url=f"{frontend_base}/settings?section=mcp_connections&calendly=connected"
     )

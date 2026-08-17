@@ -19,7 +19,7 @@ class InventorySource(SQLModel, table=True):
     id: Optional[int] = Field(default=None, primary_key=True)
     company_id: int = Field(foreign_key="companies.id", index=True)
     name: str = Field(max_length=200)
-    source_type: str = Field(max_length=50)  # db_product | csv | google_sheets | erp_api | manual
+    source_type: str = Field(max_length=50)  # db_product | csv | google_sheets | microsoft_excel | zoho_sheet | zoho_books | erp_api | manual
     priority: int = Field(default=100)
     config_json: dict = Field(default_factory=dict, sa_column=Column(JSON, nullable=False))
     enabled: bool = Field(default=True)

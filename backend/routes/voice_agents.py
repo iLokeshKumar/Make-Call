@@ -391,16 +391,41 @@ async def create_tool(
     current_user: User = Depends(PermissionChecker("settings.manage_company")),
 ):
     get_agent_or_404(session, current_user.company_id, agent_id)
-    item = VoiceAgentTool(
-        company_id=current_user.company_id,
-        agent_id=agent_id,
-        **data.model_dump(),
-        created_by=current_user.id,
-        updated_by=current_user.id,
-    )
-    session.add(item)
+    # One row per tool name per company (UniqueConstraint company_id+name) —
+    # reuse an existing row for this tool instead of failing with a duplicate
+    # key when a second agent toggles the same tool on.
+    existing = session.exec(
+        select(VoiceAgentTool).where(
+            VoiceAgentTool.company_id == current_user.company_id,
+            VoiceAgentTool.name == data.name,
+        )
+    ).first()
+    if existing:
+        item = existing
+        item.agent_id = agent_id
+        for field, value in data.model_dump().items():
+            setattr(item, field, value)
+        item.updated_at = utc_now()
+        item.updated_by = current_user.id
+        session.add(item)
+    else:
+        item = VoiceAgentTool(
+            company_id=current_user.company_id,
+            agent_id=agent_id,
+            **data.model_dump(),
+            created_by=current_user.id,
+            updated_by=current_user.id,
+        )
+        session.add(item)
     session.commit()
     session.refresh(item)
+    # Per-agent tool allowlist feeds get_mistral_tools at call time — drop the
+    # cached allowlists so the next call picks up the change immediately.
+    try:
+        from mcp_tools.tool_catalog import invalidate_agent_tools_cache
+        invalidate_agent_tools_cache(current_user.company_id)
+    except Exception:
+        pass
     return item
 
 
@@ -423,6 +448,11 @@ async def delete_tool(
         raise HTTPException(status_code=404, detail="Tool not found")
     session.delete(tool)
     session.commit()
+    try:
+        from mcp_tools.tool_catalog import invalidate_agent_tools_cache
+        invalidate_agent_tools_cache(current_user.company_id)
+    except Exception:
+        pass
     return {"status": "deleted", "tool_id": tool_id}
 
 

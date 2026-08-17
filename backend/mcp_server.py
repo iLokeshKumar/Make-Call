@@ -14,7 +14,7 @@ except ImportError:
 from sqlmodel import Session, select
 
 from database import engine, rls_company_id
-from models.models import Appointment, Interaction, Lead, Product, User
+from models.models import Appointment, Interaction, Lead, LeadRequirement, Product, User
 from services.agent.agent_tool_service import (
     book_demo as service_book_demo,
     book_meeting as service_book_meeting,
@@ -28,6 +28,7 @@ from services.agent.agent_tool_service import (
     submit_google_auth_code as service_submit_google_auth_code,
     sync_product_catalog as service_sync_product_catalog,
 )
+from utils.timezone_utils import resolve_lead_timezone
 
 logger = logging.getLogger(__name__)
 
@@ -404,6 +405,104 @@ async def get_or_create_lead(
 
 
 @mcp.tool()
+async def get_lead_context(
+    lead_id: int,
+    user_id: int,
+    interaction_limit: int = 20,
+) -> dict[str, Any]:
+    """Return tenant-scoped CRM context for one lead."""
+    def _q(session, company_id, _actor):
+        lead = session.exec(
+            select(Lead).where(
+                Lead.id == lead_id,
+                Lead.company_id == company_id,
+                Lead.deleted_at.is_(None),
+            )
+        ).first()
+        if not lead:
+            return {"error": f"Lead {lead_id} not found"}
+
+        effective_timezone = resolve_lead_timezone(
+            lead,
+            session=session,
+            company_id=company_id,
+        )
+        interactions = session.exec(
+            select(Interaction)
+            .where(
+                Interaction.company_id == company_id,
+                Interaction.lead_id == lead_id,
+            )
+            .order_by(Interaction.created_at.desc())
+            .limit(interaction_limit)
+        ).all()
+        requirement = session.exec(
+            select(LeadRequirement).where(
+                LeadRequirement.company_id == company_id,
+                LeadRequirement.lead_id == lead_id,
+            )
+        ).first()
+        appointments = session.exec(
+            select(Appointment)
+            .where(
+                Appointment.company_id == company_id,
+                Appointment.lead_id == lead_id,
+            )
+            .order_by(Appointment.appointment_time.asc())
+            .limit(20)
+        ).all()
+
+        return {
+            "lead": {
+                "id": lead.id,
+                "name": lead.name,
+                "email": lead.email,
+                "phone": lead.normalized_phone,
+                "status": lead.status,
+                "ism_stage": lead.ism_stage,
+                "timezone": lead.timezone,
+                "product_interest": lead.product_interest,
+                "next_action": lead.next_action,
+            },
+            "effective_timezone": effective_timezone,
+            "timezone_source": "lead.timezone" if lead.timezone else "resolver",
+            "recent_interactions": [
+                {
+                    "id": item.id,
+                    "type": item.type,
+                    "channel": item.channel,
+                    "direction": item.direction,
+                    "status": item.status,
+                    "content": item.content,
+                    "created_at": item.created_at.isoformat() if item.created_at else None,
+                    "started_at": item.started_at.isoformat() if item.started_at else None,
+                }
+                for item in interactions
+            ],
+            "requirement": None if requirement is None else {
+                "use_case": requirement.use_case,
+                "budget_range": requirement.budget_range,
+                "timeline": requirement.timeline,
+                "required_products": requirement.required_products,
+                "notes": requirement.notes,
+            },
+            "appointments": [
+                {
+                    "id": item.id,
+                    "appointment_time": item.appointment_time.isoformat() if item.appointment_time else None,
+                    "status": item.status,
+                    "notes": item.notes,
+                    "meeting_link": item.meeting_link,
+                    "calendar_event_id": item.calendar_event_id,
+                }
+                for item in appointments
+            ],
+        }
+
+    return await _run(user_id, _q)
+
+
+@mcp.tool()
 async def send_communication(
     lead_id: int,
     channels: list[str],
@@ -529,6 +628,51 @@ async def book_meeting(
 
 
 @mcp.tool()
+async def schedule_demo(
+    lead_id: int,
+    requested_time: str,
+    products: str,
+    user_id: int,
+    demo_type: str = "Online",
+    duration_minutes: int = 30,
+    provider: str | None = None,
+    notes: str | None = None,
+) -> dict[str, Any]:
+    """Authoritatively schedule a demo through any connected provider.
+
+    The requested time is lead-local natural language or a lead-local ISO
+    wall-clock value. This creates one appointment, routes meeting creation
+    through the connected provider priority, sends one confirmation, and
+    returns the persisted appointment. Do not send another confirmation after
+    this tool succeeds.
+    """
+    with Session(engine) as session:
+        company_id, actor_user_id = _resolve_user_context(session, user_id)
+        if not company_id or not actor_user_id:
+            return {"success": False, "error": "User context not found"}
+        lead = session.exec(
+            select(Lead).where(Lead.id == lead_id, Lead.company_id == company_id)
+        ).first()
+        if not lead:
+            return {"success": False, "error": f"Lead {lead_id} was not found"}
+        return await service_book_demo(
+            session=session,
+            company_id=company_id,
+            actor_user_id=actor_user_id,
+            lead_id=lead_id,
+            name=lead.name or "",
+            phone=lead.normalized_phone or "",
+            demo_date=requested_time,
+            products=products,
+            demo_type=demo_type,
+            duration_minutes=duration_minutes,
+            provider=provider,
+            email=lead.email,
+            notes=notes,
+        )
+
+
+@mcp.tool()
 async def book_demo(
     lead_id: int,
     name: str,
@@ -542,6 +686,7 @@ async def book_demo(
     pincode: str | None = None,
     email: str | None = None,
     notes: str | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """
     Schedule a product demo (offline or online) with a lead.
@@ -574,6 +719,7 @@ async def book_demo(
             pincode=pincode,
             email=email,
             notes=notes,
+            provider=provider,
         )
 
 

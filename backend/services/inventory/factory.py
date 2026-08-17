@@ -22,7 +22,12 @@ def _make_provider(source: InventorySource, session: Session, company_id: int) -
     if source.source_type == "csv":
         from services.inventory.csv_provider import CsvInventoryProvider
         return CsvInventoryProvider(config=source.config_json, priority=source.priority)
-    if source.source_type == "google_sheets":
+    if source.source_type in {"google_sheets", "microsoft_excel", "zoho_sheet"}:
+        from urllib.parse import urlparse
+        source_url = str(source.config_json.get("url") or "")
+        if source.source_type != "google_sheets" or urlparse(source_url).netloc.lower() not in {"docs.google.com", "sheets.google.com"}:
+            from services.inventory.remote_spreadsheet_provider import RemoteSpreadsheetProvider
+            return RemoteSpreadsheetProvider(source.config_json, source.priority, session=session, company_id=company_id)
         from services.inventory.google_sheets_provider import GoogleSheetsProvider
         logger.info(
             "[inventory_factory] google_sheets config source_id=%s name=%r gid=%r sheet_name=%r has_url=%s",
@@ -33,6 +38,9 @@ def _make_provider(source: InventorySource, session: Session, company_id: int) -
             bool(source.config_json.get("url")),
         )
         return GoogleSheetsProvider(config=source.config_json, priority=source.priority)
+    if source.source_type == "zoho_books":
+        from services.inventory.zoho_books_provider import ZohoBooksProvider
+        return ZohoBooksProvider(config=source.config_json, priority=source.priority, session=session, company_id=company_id)
     logger.warning("[inventory_factory] Unsupported source_type '%s' (id=%s) — skipped", source.source_type, source.id)
     return None
 

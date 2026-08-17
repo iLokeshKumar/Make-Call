@@ -6,6 +6,7 @@ from database import get_session
 from models.models import CompanySetting, CompanySettingsBulkUpsert, User, utc_now, CompanySettingAudit, CompanyPrompt
 from utils.encryption import decrypt_value, encrypt_value
 from utils import settings_cache as _sc
+from mcp_tools.tool_catalog import invalidate_connections_cache as _invalidate_tool_cache
 
 router = APIRouter(prefix="/crm", tags=["CRM"])
 
@@ -330,6 +331,11 @@ async def upsert_company_settings(
 
     session.commit()
     _sc.invalidate_user(current_user.company_id)
+    try:
+        from mcp_tools.tool_catalog import invalidate_connections_cache
+        invalidate_connections_cache(current_user.company_id)
+    except Exception:
+        pass
 
     _PROVIDER_MAPPING = {
         "LLM_PROVIDER": "llm_provider",
@@ -474,6 +480,13 @@ async def update_company_integrations(
 
     session.commit()
     _sc.invalidate_user(current_user.company_id)
+    # SMTP / telephony / WhatsApp credentials feed the communication tool group —
+    # drop the connections cache so send_communication unlocks immediately.
+    try:
+        from mcp_tools.tool_catalog import invalidate_connections_cache
+        invalidate_connections_cache(current_user.company_id)
+    except Exception:
+        pass
     return {"message": "Company integrations updated"}
 
 
@@ -533,6 +546,9 @@ async def save_my_email_settings(
         if key in _USER_EMAIL_KEYS and isinstance(value, str) and value and not value.startswith("***"):
             save_user_setting(session, current_user.id, key, value)
     session.commit()
+    # Personal SMTP can unlock the communication tool group — refresh the
+    # connection-derived tool set so the LLM sees send_communication.
+    _invalidate_tool_cache(current_user.company_id)
     return {"status": "saved"}
 
 

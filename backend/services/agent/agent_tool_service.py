@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -17,6 +18,7 @@ from utils.phone import normalize_phone
 from utils.timezone_utils import (
     format_datetime_for_timezone,
     localize_datetime,
+    parse_datetime_for_timezone,
     resolve_lead_timezone,
 )
 
@@ -99,6 +101,79 @@ def get_lead_or_404(session: Session, company_id: int, lead_id: int) -> Lead:
     return lead
 
 
+def meeting_provider_display(provider: str | None, meet_link: str | None) -> str:
+    """Return a human-friendly meeting provider label for emails/messages.
+
+    Prefers the explicitly recorded provider (from appointment notes), falling
+    back to a link-based inference for legacy bookings.
+    """
+    key = (provider or "").strip().lower()
+    if key in ("google_meet", "google"):
+        return "Google Meet"
+    if key in ("zoom", "microsoft", "microsoft_teams", "teams", "calcom", "calendly"):
+        return {
+            "zoom": "Zoom",
+            "microsoft": "Microsoft Teams",
+            "microsoft_teams": "Microsoft Teams",
+            "teams": "Microsoft Teams",
+            "calcom": "Cal.com",
+            "calendly": "Calendly",
+        }[key]
+    if meet_link:
+        lower = meet_link.lower()
+        if "zoom.us" in lower or "zoom.com" in lower:
+            return "Zoom"
+        if "meet.google.com" in lower or "meet.google" in lower:
+            return "Google Meet"
+        if "teams.microsoft.com" in lower or "teams.live.com" in lower:
+            return "Microsoft Teams"
+        if "cal.com" in lower:
+            return "Cal.com"
+        if "calendly.com" in lower:
+            return "Calendly"
+    return "online"
+
+
+def _has_recent_demo_confirmation(
+    session: Session,
+    *,
+    company_id: int,
+    lead_id: int,
+    content: str,
+) -> bool:
+    """Detect a second send of the same booking confirmation in one call."""
+    if not content:
+        return False
+    recent_cutoff = utc_now() - timedelta(minutes=10)
+    appointment = session.exec(
+        select(Appointment)
+        .where(
+            Appointment.company_id == company_id,
+            Appointment.lead_id == lead_id,
+            Appointment.status == "scheduled",
+            Appointment.created_at >= recent_cutoff,
+        )
+        .order_by(Appointment.created_at.desc())
+    ).first()
+    if not appointment or not appointment.meeting_link or appointment.meeting_link not in content:
+        return False
+
+    prior = session.exec(
+        select(Interaction)
+        .where(
+            Interaction.company_id == company_id,
+            Interaction.lead_id == lead_id,
+            Interaction.channel == "email",
+            Interaction.created_at >= recent_cutoff,
+        )
+        .order_by(Interaction.created_at.desc())
+    ).all()
+    return any(
+        (item.content or "").lower() in {"online demo scheduled", "demo scheduled", "demo confirmation"}
+        for item in prior
+    )
+
+
 def _parse_iso_datetime(value: str) -> datetime | None:
     if not value:
         return None
@@ -113,12 +188,15 @@ def _parse_iso_datetime(value: str) -> datetime | None:
 
 
 async def resolve_meeting_time(raw_value: str) -> datetime:
-    parsed = _parse_iso_datetime(raw_value)
     timezone_str = os.getenv("DEFAULT_TIMEZONE", "Asia/Kolkata")
-    if parsed:
-        return localize_datetime(parsed, timezone_str)
+    if raw_value and "T" in raw_value:
+        return parse_datetime_for_timezone(
+            raw_value,
+            timezone_str,
+            require_local_wall_clock=True,
+        )
     if normalize_date_ai:
-        normalized = await normalize_date_ai(raw_value)
+        normalized = await normalize_date_ai(raw_value, timezone_str=timezone_str)
         if normalized:
             return localize_datetime(normalized, timezone_str)
     return localize_datetime(datetime.now(), timezone_str) + timedelta(days=1)
@@ -131,11 +209,16 @@ async def resolve_meeting_time_for_lead(
     raw_value: str,
 ) -> datetime:
     timezone_str = resolve_lead_timezone(lead, session=session, company_id=company_id)
-    parsed = _parse_iso_datetime(raw_value)
-    if parsed:
-        return localize_datetime(parsed, timezone_str)
+    if raw_value and "T" in raw_value:
+        # book_demo's public contract is a lead-local wall-clock time. Do not
+        # let an LLM-produced trailing Z turn 10:00 IST into 15:30 IST.
+        return parse_datetime_for_timezone(
+            raw_value,
+            timezone_str,
+            require_local_wall_clock=True,
+        )
     if normalize_date_ai:
-        normalized = await normalize_date_ai(raw_value)
+        normalized = await normalize_date_ai(raw_value, timezone_str=timezone_str)
         if normalized:
             return localize_datetime(normalized, timezone_str)
     fallback_local = localize_datetime(datetime.now(), timezone_str) + timedelta(days=1)
@@ -294,10 +377,29 @@ def get_or_create_lead(
             "message": "Existing lead identified.",
         }
 
+    # Never persist a "headless" lead: a caller without a name or phone would
+    # create a row that only shows default status chips (New / Unqualified /
+    # None) on the pipeline page. Refuse to create and let the agent ask for
+    # the missing identity instead. Existing-lead lookup/update above is
+    # unaffected (it intentionally tolerates an empty name on update).
+    clean_name = (name or "").strip()
+    if not clean_name:
+        return {
+            "error": "The caller's name is required before creating a lead record.",
+            "status": "needs_name",
+            "next_suggestion": "Ask the caller for their name, then call get_or_create_lead again with the name.",
+        }
+    if not normalized_phone:
+        return {
+            "error": "A phone number is required before creating a lead record.",
+            "status": "needs_phone",
+            "next_suggestion": "Confirm the caller's phone number, then call get_or_create_lead again.",
+        }
+
     lead = Lead(
         company_id=company_id,
         owner_user_id=actor_user_id,
-        name=name.strip(),
+        name=clean_name,
         normalized_phone=normalized_phone,
         email=email.strip().lower() if email else None,
         status="new",
@@ -316,6 +418,221 @@ def get_or_create_lead(
         "created": True,
         "message": "New lead created.",
     }
+
+
+def _create_calendar_event_with_meet(
+    session: Session,
+    company_id: int,
+    summary: str,
+    description: str,
+    start_time: datetime,
+    duration_minutes: int = 30,
+    attendee_email: str | None = None,
+) -> tuple[str | None, str | None]:
+    """Create a Google Calendar event with a Google Meet link for a company.
+
+    Returns ``(meet_link, calendar_event_id)`` on success, or ``(None, None)``
+    when Google Calendar is not connected or creation fails — never raises.
+    This is the single Meet-link creation path shared by book_meeting and
+    book_demo (online demos).
+    """
+    try:
+        from routes.calendar import get_company_calendar_credentials
+        from googleapiclient.discovery import build as _gcal_build
+        import uuid as _uuid
+
+        gcal_creds = get_company_calendar_credentials(session, company_id)
+        if not gcal_creds:
+            return None, None
+
+        service = _gcal_build("calendar", "v3", credentials=gcal_creds, cache_discovery=False)
+        if start_time.tzinfo is None:
+            raise ValueError("Calendar booking requires a timezone-aware start time")
+        start_utc = start_time.astimezone(timezone.utc)
+        end_utc = start_utc + timedelta(minutes=duration_minutes)
+        start_iso = start_utc.isoformat()
+        end_iso = end_utc.isoformat()
+        event_body: dict = {
+            "summary": summary,
+            "description": description,
+            "start": {"dateTime": start_iso, "timeZone": "UTC"},
+            "end": {"dateTime": end_iso, "timeZone": "UTC"},
+            "conferenceData": {
+                "createRequest": {
+                    "requestId": str(_uuid.uuid4()),
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
+            },
+        }
+        if attendee_email:
+            event_body["attendees"] = [{"email": attendee_email}]
+        created = service.events().insert(
+            calendarId="primary",
+            body=event_body,
+            conferenceDataVersion=1,
+            sendUpdates="all",
+        ).execute()
+        meet_link = (
+            created.get("conferenceData", {})
+            .get("entryPoints", [{}])[0]
+            .get("uri")
+        )
+        return meet_link, created.get("id")
+    except Exception as _exc:
+        logger.warning("[calendar] Google Meet event creation failed for company %s: %s", company_id, _exc)
+        return None, None
+
+
+async def _create_zoom_meeting_link(
+    session: Session,
+    company_id: int,
+    topic: str,
+    start_time: datetime,
+    duration_minutes: int = 30,
+    attendee_email: str | None = None,
+) -> tuple[str | None, str | None, str | None]:
+    """Create a Zoom meeting via the REST API; return ``(join_url, meeting_id, link_hint)``.
+
+    Used as the auto-fallback when Google Calendar is not connected: bookings
+    prefer a Google Meet link, then fall back to a Zoom link. ``link_hint``
+    explains why no link could be created (e.g. the meeting:write scope hint) so
+    callers can surface it in the agent's booking summary. Returns ``(None, None,
+    hint)`` when Zoom is not connected or creation fails — never raises.
+    """
+    generic_failure_hint = "Could not create a Zoom meeting link — the booking was saved without a join link."
+    try:
+        # Same gate as the create_meeting tool: skip the doomed API call when the
+        # stored Zoom scopes definitively lack meeting:write. Unknown (legacy)
+        # falls through to the runtime executor, which returns the clear scope
+        # error if Zoom rejects the call.
+        from routes.zoom_oauth import MEETING_WRITE_HINT, zoom_meeting_write_granted
+        if zoom_meeting_write_granted(session, company_id) is False:
+            logger.warning(
+                "[book_meeting] Zoom fallback skipped for company %s — missing meeting:write scope",
+                company_id,
+            )
+            return None, None, MEETING_WRITE_HINT
+    except Exception:
+        pass
+
+    try:
+        from mcp_tools.executors.zoom_rest import zoom_create_meeting
+        result = await zoom_create_meeting(
+            company_id=company_id,
+            topic=topic,
+            start_time=start_time.isoformat(),
+            duration_minutes=duration_minutes,
+            attendee_email=attendee_email or "",
+        )
+        if result.get("error"):
+            logger.warning("[book_meeting] Zoom fallback failed for company %s: %s", company_id, result["error"])
+            combined = f"{result.get('error') or ''} {result.get('next_suggestion') or ''}"
+            if "meeting:write" in combined:
+                hint = result.get("next_suggestion") or result["error"]
+            else:
+                hint = generic_failure_hint
+            return None, None, hint
+        # zoom_create_meeting returns ToolResult.ok(data).model_dump() — the join
+        # URL lives under 'data'. Accept both shapes defensively.
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+        return payload.get("join_url"), payload.get("meeting_id"), None
+    except Exception as exc:
+        logger.warning("[book_meeting] Zoom fallback unavailable for company %s: %s", company_id, exc)
+        return None, None, generic_failure_hint
+
+
+async def _create_teams_meeting_link(
+    session: Session,
+    company_id: int,
+    subject: str,
+    start_time: datetime,
+    duration_minutes: int = 30,
+    attendee_email: str | None = None,
+    attendee_name: str | None = None,
+    description: str = "",
+) -> tuple[str | None, str | None, str | None]:
+    """Create a Microsoft 365 calendar event with a Teams join link.
+
+    This is an optional fallback. An unconnected Microsoft account is treated
+    as a normal miss so booking can continue to Zoom.
+    """
+    try:
+        from routes.microsoft_oauth import get_company_microsoft_token
+        if not get_company_microsoft_token(session, company_id):
+            return None, None, None
+
+        from mcp_tools.executors.microsoft import ms_create_event
+        result = await ms_create_event(
+            company_id=company_id,
+            subject=subject,
+            start_time=start_time.isoformat(),
+            end_time=(start_time + timedelta(minutes=duration_minutes)).isoformat(),
+            invitee_email=attendee_email or "",
+            invitee_name=attendee_name or "",
+            notes=description,
+            create_online_meeting=True,
+        )
+        if result.get("error"):
+            logger.warning("[book_meeting] Microsoft Teams fallback failed for company %s: %s", company_id, result["error"])
+            return None, None, "Microsoft Teams meeting could not be created."
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+        join_url = payload.get("online_meeting_url")
+        return join_url, payload.get("event_id") if join_url else None, None
+    except Exception as exc:
+        logger.warning("[book_meeting] Microsoft Teams fallback unavailable for company %s: %s", company_id, exc)
+        return None, None, "Microsoft Teams meeting could not be created."
+
+
+async def _schedule_via_connected_provider(
+    *,
+    session: Session,
+    company_id: int,
+    subject: str,
+    description: str,
+    start_time: datetime,
+    duration_minutes: int,
+    attendee_email: str | None,
+    attendee_name: str | None,
+    preferred_provider: str | None = None,
+) -> tuple[str | None, str | None, str | None, str | None]:
+    """Schedule through the connected provider capability, independent of vendor."""
+    from services.mcp.capability_router import route_capability
+
+    if start_time.tzinfo is None:
+        raise ValueError("Provider scheduling requires a timezone-aware start time")
+    start_utc = start_time.astimezone(timezone.utc)
+    end_utc = start_utc + timedelta(minutes=duration_minutes)
+    result = await route_capability(
+        session=session,
+        company_id=company_id,
+        capability="schedule_meeting",
+        user_id=0,
+        arguments={
+            "provider": preferred_provider,
+            "subject": subject,
+            "start_time": start_utc.isoformat(),
+            "end_time": end_utc.isoformat(),
+            "invitee_email": attendee_email or "",
+            "invitee_name": attendee_name or "",
+            "notes": description,
+            "duration_minutes": duration_minutes,
+        },
+    )
+    if result.get("error") or result.get("success") is False:
+        raise RuntimeError(result.get("error") or "No connected scheduling provider could create the meeting")
+
+    payload = result.get("data") if isinstance(result.get("data"), dict) else result
+    meeting_link = (
+        payload.get("meeting_link")
+        or payload.get("meet_link")
+        or payload.get("online_meeting_url")
+        or payload.get("join_url")
+        or payload.get("booking_url")
+    )
+    event_id = payload.get("calendar_event_id") or payload.get("event_id") or payload.get("booking_id")
+    provider = payload.get("provider") or result.get("provider") or preferred_provider or "scheduling_provider"
+    calendar_link = payload.get("calendar_link")
+    return meeting_link, event_id, provider, calendar_link
 
 
 async def book_meeting(
@@ -362,43 +679,45 @@ async def book_meeting(
     # Try to create a Google Calendar event with Meet link
     meet_link: str | None = None
     calendar_event_id: str | None = None
-    try:
-        from routes.calendar import get_company_calendar_credentials
-        from googleapiclient.discovery import build as _gcal_build
-        import uuid as _uuid
-        gcal_creds = get_company_calendar_credentials(session, company_id)
-        if gcal_creds:
-            service = _gcal_build("calendar", "v3", credentials=gcal_creds, cache_discovery=False)
-            start_iso = appointment_time.strftime("%Y-%m-%dT%H:%M:%S")
-            end_iso = (appointment_time + timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%S")
-            event_body: dict = {
-                "summary": f"{meeting_type.title()} with {lead.name}",
-                "description": f"Rio Sales Assistant – {meeting_type.title()} Meeting\nLead: {lead.name}\nEmail: {lead.email or ''}",
-                "start": {"dateTime": start_iso, "timeZone": "UTC"},
-                "end": {"dateTime": end_iso, "timeZone": "UTC"},
-                "conferenceData": {
-                    "createRequest": {
-                        "requestId": str(_uuid.uuid4()),
-                        "conferenceSolutionKey": {"type": "hangoutsMeet"},
-                    }
-                },
-            }
-            if lead.email:
-                event_body["attendees"] = [{"email": lead.email}]
-            created = service.events().insert(
-                calendarId="primary",
-                body=event_body,
-                conferenceDataVersion=1,
-                sendUpdates="all",
-            ).execute()
-            meet_link = (
-                created.get("conferenceData", {})
-                .get("entryPoints", [{}])[0]
-                .get("uri")
-            )
-            calendar_event_id = created.get("id")
-    except Exception as _exc:
-        logger.warning("[book_meeting] Google Meet creation failed for company %s: %s", company_id, _exc)
+    meet_link, calendar_event_id = _create_calendar_event_with_meet(
+        session=session,
+        company_id=company_id,
+        summary=f"{meeting_type.title()} with {lead.name}",
+        description=(
+            f"Rio Sales Assistant – {meeting_type.title()} Meeting\n"
+            f"Lead: {lead.name}\nEmail: {lead.email or ''}"
+        ),
+        start_time=appointment_time,
+        duration_minutes=30,
+        attendee_email=lead.email,
+    )
+    # Fallback order: Google Meet → Microsoft Teams → Zoom.
+    meeting_provider: str | None = "google_meet" if meet_link else None
+    meeting_link_hint: str | None = None
+    if not meet_link:
+        meet_link, calendar_event_id, meeting_link_hint = await _create_teams_meeting_link(
+            session=session,
+            company_id=company_id,
+            subject=f"{meeting_type.title()} with {lead.name}",
+            start_time=appointment_time,
+            duration_minutes=30,
+            attendee_email=lead.email,
+            attendee_name=lead.name,
+            description=f"Rio Sales Assistant – {meeting_type.title()} Meeting\nLead: {lead.name}\nEmail: {lead.email or ''}",
+        )
+        if meet_link:
+            meeting_provider = "microsoft_teams"
+    if not meet_link:
+        meet_link, zoom_id, meeting_link_hint = await _create_zoom_meeting_link(
+            session=session,
+            company_id=company_id,
+            topic=f"{meeting_type.title()} with {lead.name}",
+            start_time=appointment_time,
+            duration_minutes=30,
+            attendee_email=lead.email,
+        )
+        if meet_link:
+            meeting_provider = "zoom"
 
     appointment = Appointment(
         company_id=company_id,
@@ -406,7 +725,7 @@ async def book_meeting(
         owner_user_id=lead.owner_user_id or actor_user_id,
         appointment_time=appointment_time,
         status="scheduled",
-        notes=f"demo type={meeting_type}; location=online",
+        notes=f"demo type={meeting_type}; location=online; meeting_provider={meeting_provider or 'none'}",
         meeting_link=meet_link,
         calendar_event_id=calendar_event_id,
         created_by=actor_user_id,
@@ -427,9 +746,10 @@ async def book_meeting(
         pass
 
     email_sent = False
+    provider_label = meeting_provider_display(meeting_provider, meet_link)
     if lead.email:
         try:
-            meet_line = f"\n\nJoin meeting: {meet_link}" if meet_link else ""
+            meet_line = f"\n\nJoin the {provider_label} meeting: {meet_link}" if meet_link else ""
             send_email_to_lead(
                 session=session,
                 company_id=company_id,
@@ -442,6 +762,14 @@ async def book_meeting(
         except Exception:
             email_sent = False
 
+    message = f"{meeting_type.title()} scheduled for {lead.name}."
+    if meet_link:
+        message += f" {provider_label}: {meet_link}"
+    if meeting_link_hint:
+        # Surfaces in the agent's booking summary why no join link exists (e.g.
+        # the meeting:write scope hint) so the rep/admin knows the next step.
+        message += f" Note: {meeting_link_hint}"
+
     return {
         "confirmed": True,
         "appointment_id": appointment.id,
@@ -450,9 +778,10 @@ async def book_meeting(
         "lead_email": lead.email,
         "appointment_time": appointment_time.isoformat(),
         "meeting_link": meet_link,
+        "meeting_provider": meeting_provider,
+        "meeting_link_hint": meeting_link_hint,
         "email_sent": email_sent,
-        "message": f"{meeting_type.title()} scheduled for {lead.name}."
-        + (f" Google Meet: {meet_link}" if meet_link else ""),
+        "message": message,
     }
 
 
@@ -471,6 +800,8 @@ async def book_demo(
     pincode: str | None = None,
     email: str | None = None,
     notes: str | None = None,
+    duration_minutes: int = 30,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     lead_info = get_or_create_lead(
         session=session,
@@ -503,6 +834,14 @@ async def book_demo(
         session.commit()
         session.refresh(lead)
 
+    if not lead.email:
+        return {
+            "success": False,
+            "lead_id": lead.id,
+            "error": "A confirmation email address is required before scheduling this demo.",
+            "next_suggestion": "Collect and verify the lead's email address, then retry schedule_demo.",
+        }
+
     # Dedup: if a scheduled appointment with overlapping products already exists, return it
     existing = _find_existing_appointment(session, company_id, lead.id, products=products)
     if existing:
@@ -518,7 +857,11 @@ async def book_demo(
             "appointment_id": existing.id,
             "demo_type": demo_type,
             "products": existing_products,
+            "requested_time": None,
             "appointment_time": existing.appointment_time.isoformat(),
+            "timezone": resolve_lead_timezone(lead, session=session, company_id=company_id),
+            "meeting_link": existing.meeting_link,
+            "calendar_event_id": existing.calendar_event_id,
             "email_sent": False,
             "message": f"Demo already scheduled for {lead.name} — returning existing booking.",
             "duplicate": True,
@@ -529,19 +872,78 @@ async def book_demo(
     appointment_time_text = format_datetime_for_timezone(appointment_time, timezone_str)
     location_parts = [part for part in [city, state, pincode] if part]
     location_text = ", ".join(location_parts) if location_parts else "online"
+
+    # Persist the canonical appointment before contacting an external provider.
+    # The provider is a later side effect; the database record remains the
+    # source of truth even if the provider is temporarily unavailable.
+    meet_link: str | None = None
+    calendar_event_id: str | None = None
+    meeting_provider: str | None = None
+    meeting_link_hint: str | None = None
     appointment = Appointment(
         company_id=company_id,
         lead_id=lead.id,
         owner_user_id=lead.owner_user_id or actor_user_id,
         appointment_time=appointment_time,
         status="scheduled",
-        notes=f"Demo type={demo_type}; products={products}; location={location_text}; notes={notes or ''}".strip(),
+        notes=(
+            f"Demo type={demo_type}; products={products}; location={location_text}; "
+            f"notes={notes or ''}; meeting_provider=none"
+        ).strip(),
         created_by=actor_user_id,
         updated_by=actor_user_id,
     )
     session.add(appointment)
     session.commit()
     session.refresh(appointment)
+
+    provider_error: str | None = None
+    if str(demo_type or "").strip().lower() == "online":
+        try:
+            meet_link, calendar_event_id, meeting_provider, _calendar_link = await _schedule_via_connected_provider(
+                session=session,
+                company_id=company_id,
+                subject=f"Online Demo: {products or 'Products'} with {lead.name}",
+                description=(
+                    f"Online demo scheduled by Rio Sales Assistant.\n"
+                    f"Lead: {lead.name}\nProducts: {products}"
+                ),
+                start_time=appointment_time,
+                duration_minutes=duration_minutes,
+                attendee_email=lead.email,
+                attendee_name=lead.name,
+                preferred_provider=provider,
+            )
+        except Exception as exc:
+            meeting_link_hint = str(exc)
+            provider_error = meeting_link_hint
+
+    appointment.meeting_link = meet_link
+    appointment.calendar_event_id = calendar_event_id
+    appointment.notes = (
+        f"Demo type={demo_type}; products={products}; location={location_text}; "
+        f"notes={notes or ''}; meeting_provider={meeting_provider or 'none'}"
+    ).strip()
+    appointment.updated_by = actor_user_id
+    appointment.updated_at = utc_now()
+    session.add(appointment)
+    session.commit()
+    session.refresh(appointment)
+
+    if provider_error:
+        return {
+            "success": False,
+            "lead_id": lead.id,
+            "appointment_id": appointment.id,
+            "requested_time": demo_date,
+            "appointment_time": appointment_time.isoformat(),
+            "timezone": timezone_str,
+            "provider": None,
+            "meeting_link": None,
+            "email_sent": False,
+            "error": f"Appointment saved, but no connected meeting provider could create the meeting: {provider_error}",
+            "next_suggestion": "Connect a scheduling provider or retry the booking; do not send a manual confirmation.",
+        }
 
     # Advance ISM stage to "engaged" — they agreed to a demo
     try:
@@ -566,6 +968,9 @@ async def book_demo(
         metadata_json={
             "demo_type": demo_type,
             "products": products,
+            "requested_demo_date": demo_date,
+            "resolved_appointment_time": appointment_time.isoformat(),
+            "lead_timezone": timezone_str,
             "city": city,
             "state": state,
             "pincode": pincode,
@@ -581,8 +986,10 @@ async def book_demo(
     session.commit()
 
     email_sent = False
+    provider_label = meeting_provider_display(meeting_provider, meet_link)
     if lead.email:
         try:
+            meet_line = f"\n\nJoin the {provider_label} demo here: {meet_link}" if meet_link else ""
             send_email_to_lead(
                 session=session,
                 company_id=company_id,
@@ -591,12 +998,36 @@ async def book_demo(
                 subject=f"{demo_type} demo scheduled",
                 body=(
                     f"Your {demo_type.lower()} demo for {products} is scheduled for "
-                    f"{appointment_time_text}."
+                    f"{appointment_time_text}.{meet_line}"
                 ),
             )
             email_sent = True
         except Exception:
             email_sent = False
+
+    if lead.email and not email_sent:
+        return {
+            "success": False,
+            "lead_id": lead.id,
+            "appointment_id": appointment.id,
+            "requested_time": demo_date,
+            "appointment_time": appointment_time.isoformat(),
+            "timezone": timezone_str,
+            "meeting_link": meet_link,
+            "calendar_event_id": calendar_event_id,
+            "meeting_provider": meeting_provider,
+            "email_sent": False,
+            "error": "Appointment and provider meeting were created, but confirmation email failed.",
+            "next_suggestion": "Retry confirmation delivery using the saved appointment; do not create another appointment.",
+        }
+
+    message = f"{demo_type} demo scheduled for {lead.name}."
+    if meet_link:
+        message += f" {provider_label}: {meet_link}"
+    if meeting_link_hint:
+        # Surfaces in the agent's booking summary why no join link exists (e.g.
+        # the meeting:write scope hint) so the rep/admin knows the next step.
+        message += f" Note: {meeting_link_hint}"
 
     return {
         "success": True,
@@ -604,9 +1035,15 @@ async def book_demo(
         "appointment_id": appointment.id,
         "demo_type": demo_type,
         "products": products,
+        "requested_time": demo_date,
         "appointment_time": appointment_time.isoformat(),
+        "timezone": timezone_str,
+        "meeting_link": meet_link,
+        "calendar_event_id": calendar_event_id,
+        "meeting_provider": meeting_provider,
+        "meeting_link_hint": meeting_link_hint,
         "email_sent": email_sent,
-        "message": f"{demo_type} demo scheduled for {lead.name}.",
+        "message": message,
     }
 
 
@@ -638,6 +1075,20 @@ def send_communication(
         session.add(lead)
         session.commit()
         session.refresh(lead)
+
+    if "email" in normalized_channels and _has_recent_demo_confirmation(
+        session,
+        company_id=company_id,
+        lead_id=lead_id,
+        content=content,
+    ):
+        return {
+            "success": True,
+            "deduplicated": True,
+            "message": "Duplicate demo confirmation suppressed; the booking email was already sent.",
+            "channel_status": {"email": "deduplicated"},
+            "results": [],
+        }
 
     results: list[dict[str, Any]] = []
     missing_info: list[dict[str, str]] = []

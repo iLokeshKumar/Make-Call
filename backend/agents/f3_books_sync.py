@@ -94,34 +94,42 @@ _TALLY_TYPE_MAP: dict[str, str] = {
 # Zoho Books helpers
 # ---------------------------------------------------------------------------
 
-def _get_books_token(session: Session, company_id: int) -> str:
+def _get_books_token(session: Session, company_id: int, force_refresh: bool = False) -> str:
     """Return the Zoho OAuth access token stored for this company.
 
     Books and CRM share the same Zoho OAuth app.
     We look for provider="zoho_books" first (future dedicated Books connection),
     then fall back to provider="zoho" (CRM token which also works for Books
-    if the Books scope was included in the OAuth consent).
+    if the Books scope was included in the OAuth consent). The shared Zoho
+    token is auto-refreshed when expired (or when ``force_refresh`` is True,
+    e.g. after a 401) via routes.zoho_oauth.get_or_refresh_zoho_token.
     """
     from sqlmodel import select as _select
     from models.models import ProviderCredential
     from utils.encryption import decrypt_value
 
-    for provider in ("zoho_books", "zoho"):
-        cred = session.exec(
-            _select(ProviderCredential).where(
-                ProviderCredential.company_id == company_id,
-                ProviderCredential.provider == provider,
-                ProviderCredential.key_name == "access_token",
-                ProviderCredential.is_active == True,
-            )
-        ).first()
-        if cred:
-            try:
-                token = decrypt_value(cred.value_encrypted)
-                if token:
-                    return token
-            except Exception:
-                pass
+    # 1) Dedicated Books connection (no auto-refresh today).
+    cred = session.exec(
+        _select(ProviderCredential).where(
+            ProviderCredential.company_id == company_id,
+            ProviderCredential.provider == "zoho_books",
+            ProviderCredential.key_name == "access_token",
+            ProviderCredential.is_active == True,
+        )
+    ).first()
+    if cred:
+        try:
+            token = decrypt_value(cred.value_encrypted)
+            if token:
+                return token
+        except Exception:
+            pass
+
+    # 2) Shared Zoho (CRM) token — auto-refresh when expired/close to expiry.
+    from routes.zoho_oauth import get_or_refresh_zoho_token
+    token = get_or_refresh_zoho_token(session, company_id, force=force_refresh)
+    if token:
+        return token
 
     raise ValueError(
         "Zoho Books not connected. Add ZohoBooks.fullaccess.all scope and reconnect "

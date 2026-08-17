@@ -46,6 +46,47 @@ def connect_server(server: MCPServer, token: Optional[str] = None) -> MCPClient 
     return MCPClient(url=server.url, headers=_build_headers(server, token))
 
 
+# async def discover_and_cache_tools(
+#     session: Session,
+#     server: MCPServer,
+#     token: Optional[str] = None,
+# ) -> int:
+#     """Fetch all tools from the server and save them to MCPToolCache. Returns tool count."""
+#     client = connect_server(server, token)
+#     try:
+#         tools = await client.list_tools()
+#         upsert_tool_cache(session, server.id, tools)
+#         mark_health(session, server.id, "healthy")
+#         return len(tools)
+#     except Exception as exc:
+#         # Provide clearer diagnostics for common HTTP failures from MCP endpoints.
+#         try:
+#             if isinstance(exc, httpx.HTTPStatusError):
+#                 status = exc.response.status_code
+#                 if status == 401:
+#                     logger.error(
+#                         "[connection_service] discover_tools(%s) failed: %s (401 Unauthorized). Check auth token/header for server id=%s url=%s",
+#                         server.name, exc, server.id, server.url,
+#                     )
+#                 elif status == 404:
+#                     logger.error(
+#                         "[connection_service] discover_tools(%s) failed: %s (404 Not Found). Endpoint may not support MCP; verify URL for server id=%s url=%s",
+#                         server.name, exc, server.id, server.url,
+#                     )
+#                 else:
+#                     logger.error(
+#                         "[connection_service] discover_tools(%s) failed: %s (status=%s)", server.name, exc, status
+#                     )
+#             else:
+#                 logger.error("[connection_service] discover_tools(%s) failed: %s", server.name, exc)
+#         except Exception:
+#             logger.error("[connection_service] discover_tools(%s) failed: %s", server.name, exc)
+#         mark_health(session, server.id, "unhealthy")
+#         return 0
+#     finally:
+#         if hasattr(client, "close"):
+#             await client.close()
+
 async def discover_and_cache_tools(
     session: Session,
     server: MCPServer,
@@ -59,29 +100,82 @@ async def discover_and_cache_tools(
         mark_health(session, server.id, "healthy")
         return len(tools)
     except Exception as exc:
-        # Provide clearer diagnostics for common HTTP failures from MCP endpoints.
+        # ── Auto-refresh Calendly token on 401 ─────────────────────────────
+        refreshed = False
         try:
-            if isinstance(exc, httpx.HTTPStatusError):
-                status = exc.response.status_code
-                if status == 401:
-                    logger.error(
-                        "[connection_service] discover_tools(%s) failed: %s (401 Unauthorized). Check auth token/header for server id=%s url=%s",
-                        server.name, exc, server.id, server.url,
-                    )
-                elif status == 404:
-                    logger.error(
-                        "[connection_service] discover_tools(%s) failed: %s (404 Not Found). Endpoint may not support MCP; verify URL for server id=%s url=%s",
-                        server.name, exc, server.id, server.url,
-                    )
+            if isinstance(exc, httpx.HTTPStatusError) and exc.response.status_code == 401:
+                if server.provider == "calendly":
+                    from routes.calendly_connector import refresh_token as _cal_refresh
+                    # We need a request context for refresh_token — call the helper directly
+                    from routes.calendly_connector import _get, _save
+                    from services.mcp.provider_adapters.calendly import get_token as _get_cal_token
+                    rt = _get(session, server.company_id, "refresh_token")
+                    if rt:
+                        from services.mcp.dcr_client import refresh_access_token
+                        client_id = _get(session, server.company_id, "dcr_client_id")
+                        if client_id:
+                            tokens = await refresh_access_token(
+                                token_endpoint="https://calendly.com/oauth/token",
+                                refresh_token=rt,
+                                client_id=client_id,
+                            )
+                            new_at = tokens.get("access_token")
+                            if new_at:
+                                _save(session, server.company_id, "access_token", new_at)
+                                if tokens.get("refresh_token"):
+                                    _save(session, server.company_id, "refresh_token", tokens["refresh_token"])
+                                # Retry with new token
+                                client2 = connect_server(server, new_at)
+                                tools = await client2.list_tools()
+                                upsert_tool_cache(session, server.id, tools)
+                                mark_health(session, server.id, "healthy")
+                                refreshed = True
+                                if hasattr(client2, "close"):
+                                    await client2.close()
+                elif server.provider == "zoom":
+                    from routes.zoom_oauth import _save as _zoom_save
+                    from routes.zoom_oauth import refresh_token as _zoom_refresh
+                    tokens = await _zoom_refresh(session, server.company_id)
+                    new_at = tokens.get("access_token")
+                    if new_at:
+                        _zoom_save(session, server.company_id, "access_token", new_at)
+                        if tokens.get("refresh_token"):
+                            _zoom_save(session, server.company_id, "refresh_token", tokens["refresh_token"])
+                        client2 = connect_server(server, new_at)
+                        tools = await client2.list_tools()
+                        upsert_tool_cache(session, server.id, tools)
+                        mark_health(session, server.id, "healthy")
+                        refreshed = True
+                        if hasattr(client2, "close"):
+                            await client2.close()
+        except Exception as refresh_exc:
+            logger.warning("[connection_service] Provider token refresh failed: %s", refresh_exc)
+        # ────────────────────────────────────────────────────────────────────
+        
+        if not refreshed:
+            # ... existing error logging unchanged ...
+            try:
+                if isinstance(exc, httpx.HTTPStatusError):
+                    status = exc.response.status_code
+                    if status == 401:
+                        logger.error(
+                            "[connection_service] discover_tools(%s) failed: %s (401 Unauthorized). Check auth token/header for server id=%s url=%s",
+                            server.name, exc, server.id, server.url,
+                        )
+                    elif status == 404:
+                        logger.error(
+                            "[connection_service] discover_tools(%s) failed: %s (404 Not Found). Endpoint may not support MCP; verify URL for server id=%s url=%s",
+                            server.name, exc, server.id, server.url,
+                        )
+                    else:
+                        logger.error(
+                            "[connection_service] discover_tools(%s) failed: %s (status=%s)", server.name, exc, status
+                        )
                 else:
-                    logger.error(
-                        "[connection_service] discover_tools(%s) failed: %s (status=%s)", server.name, exc, status
-                    )
-            else:
+                    logger.error("[connection_service] discover_tools(%s) failed: %s", server.name, exc)
+            except Exception:
                 logger.error("[connection_service] discover_tools(%s) failed: %s", server.name, exc)
-        except Exception:
-            logger.error("[connection_service] discover_tools(%s) failed: %s", server.name, exc)
-        mark_health(session, server.id, "unhealthy")
+            mark_health(session, server.id, "unhealthy")
         return 0
     finally:
         if hasattr(client, "close"):

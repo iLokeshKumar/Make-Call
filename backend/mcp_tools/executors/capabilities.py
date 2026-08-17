@@ -93,3 +93,11 @@ async def reschedule_meeting(company_id: int, actor_user_id: int = 0, **argument
 
 async def cancel_meeting(company_id: int, actor_user_id: int = 0, **arguments) -> dict:
     return await _route_capability("cancel_meeting", company_id, actor_user_id, arguments)
+
+
+async def send_microsoft_email(company_id: int, actor_user_id: int = 0, **arguments) -> dict:
+    return await _route_capability("send_microsoft_email", company_id, actor_user_id, arguments)
+
+
+async def create_meeting(company_id: int, actor_user_id: int = 0, **arguments) -> dict:
+    return await _route_capability("create_meeting", company_id, actor_user_id, arguments)

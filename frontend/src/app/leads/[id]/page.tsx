@@ -150,6 +150,7 @@ type DealEvent =
       location: string | null;
       notes: string | null;
       meeting_link: string | null;
+      meeting_provider?: string | null;
     }
   | {
       kind: "quote";
@@ -167,6 +168,25 @@ type DealEvent =
       notes: string | null;
       items: { product_name: string; sku: string | null; quantity: number; unit_price: string; discount_percent: string; line_total: string }[];
     };
+
+function meetingProviderLabel(provider: string | null | undefined, link: string | null | undefined): string | null {
+  const key = (provider || "").toLowerCase();
+  if (key === "google_meet" || key === "google") return "Google Meet";
+  if (key === "zoom") return "Zoom";
+  if (key === "microsoft" || key === "teams") return "Microsoft Teams";
+  if (key === "calcom") return "Cal.com";
+  if (key === "calendly") return "Calendly";
+  // Fall back to inferring from the link for legacy bookings without a stored provider
+  if (link) {
+    const lower = link.toLowerCase();
+    if (lower.includes("zoom.us") || lower.includes("zoom.com")) return "Zoom";
+    if (lower.includes("meet.google.com") || lower.includes("meet.google")) return "Google Meet";
+    if (lower.includes("teams.microsoft.com") || lower.includes("teams.live.com")) return "Microsoft Teams";
+    if (lower.includes("cal.com")) return "Cal.com";
+    if (lower.includes("calendly.com")) return "Calendly";
+  }
+  return null;
+}
 
 // Collapsible section wrapper with built-in toggle and header styling
 
@@ -1176,10 +1196,21 @@ export default function LeadDetailPage() {
                         </div>
                       )}
                       {ev.meeting_link && (
-                        <a href={ev.meeting_link} target="_blank" rel="noreferrer"
-                          className="inline-block text-xs text-violet-600 hover:underline dark:text-violet-400">
-                          Join meeting →
-                        </a>
+                        <div className="flex flex-wrap items-center gap-2">
+                          {(() => {
+                            const pLabel = meetingProviderLabel(ev.meeting_provider, ev.meeting_link);
+                            return pLabel ? (
+                              <span className="inline-flex items-center gap-1 rounded-full bg-slate-100 dark:bg-slate-800 px-2 py-0.5 text-[10px] font-semibold text-slate-600 dark:text-slate-300">
+                                <span className="h-1.5 w-1.5 rounded-full bg-violet-500" />
+                                {pLabel}
+                              </span>
+                            ) : null;
+                          })()}
+                          <a href={ev.meeting_link} target="_blank" rel="noreferrer"
+                            className="inline-block text-xs text-violet-600 hover:underline dark:text-violet-400">
+                            Join meeting →
+                          </a>
+                        </div>
                       )}
                       {ev.date && (
                         <div className="text-xs text-slate-400 dark:text-slate-500">

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from utils.timezone_utils import (
     format_datetime_for_timezone,
     localize_datetime,
+    parse_datetime_for_timezone,
     resolve_lead_timezone,
 )
 
@@ -55,3 +56,23 @@ def test_format_datetime_for_timezone_renders_local_human_time():
 
     assert "5:00 PM" in rendered
     assert "IST" in rendered
+
+
+def test_parse_datetime_for_timezone_treats_naive_booking_time_as_lead_local():
+    parsed = parse_datetime_for_timezone("2026-08-14T10:00:00", "Asia/Kolkata")
+
+    assert parsed.isoformat() == "2026-08-14T10:00:00+05:30"
+
+
+def test_parse_datetime_for_timezone_rejects_mismatched_offset_for_local_booking_input():
+    # A model that appends Z would otherwise turn 10:00 IST into 15:30 IST.
+    try:
+        parse_datetime_for_timezone(
+            "2026-08-14T10:00:00Z",
+            "Asia/Kolkata",
+            require_local_wall_clock=True,
+        )
+    except ValueError as exc:
+        assert "lead timezone" in str(exc)
+    else:
+        raise AssertionError("UTC timestamp must not be silently accepted for a local booking")

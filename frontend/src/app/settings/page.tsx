@@ -1,13 +1,21 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useSearchParams, useRouter } from "next/navigation";
-import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw, Calendar, Link2, Link2Off, Gauge, Webhook, Server, Database, ShieldCheck, Layers, Plus, Trash2, Play, RotateCcw, Clock, CheckCircle, XCircle, ExternalLink, Copy, Sparkles, Network, Package } from "lucide-react";
+import { Save, Brain, Bell, Zap, Sun, Moon, Monitor, Loader2, CheckCircle2, PhoneForwarded, KeyRound, Settings, Eye, EyeOff, Mail, RefreshCw, Calendar, Link2, Link2Off, Gauge, Webhook, Server, Database, ShieldCheck, Layers, Plus, Trash2, Play, RotateCcw, Clock, CheckCircle, XCircle, ExternalLink, Copy, Sparkles, Network, Package, Plug } from "lucide-react";
 import { useTheme } from "@/components/ThemeProvider";
 import { useAuth } from "@/context/AuthContext";
 
 import { apiFetch } from "@/utils/apiFetch";
 import { API_BASE, CRM_BASE } from "@/lib/api";
+
+// Link to the Google Cloud console page for enabling the Drive API, pointing
+// at the project that issued the OAuth client. Configurable via env so it
+// doesn't hardcode one deployment's project; without it, Google shows a
+// project picker instead of guessing wrong.
+const GOOGLE_DRIVE_API_LINK = process.env.NEXT_PUBLIC_GOOGLE_PROJECT_ID
+  ? `https://console.developers.google.com/apis/api/drive.googleapis.com/overview?project=${encodeURIComponent(process.env.NEXT_PUBLIC_GOOGLE_PROJECT_ID)}`
+  : "https://console.developers.google.com/apis/api/drive.googleapis.com/overview";
 import { useRecentlyViewed } from "@/hooks/useRecentlyViewed";
 import SettingsHome from "@/components/settings/SettingsHome";
 import SectionHeader from "@/components/settings/SectionHeader";
@@ -226,13 +234,122 @@ export default function SettingsPage() {
     // Inventory Sources tab
     type InvSource = { id: number; name: string; source_type: string; priority: number; enabled: boolean; last_sync_at: string | null; created_at: string; config_json: Record<string, unknown> };
     type InvSheetTab = { name: string; gid: string };
+    const inventorySourceLabel = (sourceType: string) => ({
+        google_sheets: "Google Sheets",
+        microsoft_excel: "Microsoft Excel",
+        zoho_sheet: "Zoho Sheet",
+        zoho_books: "Zoho Books",
+        csv: "CSV",
+    } as Record<string, string>)[sourceType] ?? sourceType;
+    // Mirrors backend routes/inventory_sources.py:_spreadsheet_source_type —
+    // pasting a URL auto-selects the matching source type.
+    const detectInventorySourceType = (url: string): string | null => {
+        const host = url.toLowerCase();
+        if (/(?:docs\.google\.com|sheets\.google\.com)/i.test(host)) return "google_sheets";
+        if (/(?:excel\.cloud\.microsoft|onedrive|sharepoint|1drv\.ms)/i.test(host)) return "microsoft_excel";
+        if (/(?:zohopublic\.com|sheet\.zoho\.com)/i.test(host)) return "zoho_sheet";
+        return null;
+    };
+    // Display label for the auto-detection confirmation chip (matches the
+    // source-type card wording).
+    const inventorySourceDetectLabel = (key: string) => ({
+        google_sheets: "Google Sheets",
+        microsoft_excel: "Microsoft Excel / OneDrive",
+        zoho_sheet: "Zoho Sheet",
+    } as Record<string, string>)[key] ?? key;
     const [invSources, setInvSources] = useState<InvSource[]>([]);
     const [invModal, setInvModal] = useState<InvSource | "new" | null>(null);
-    const [invForm, setInvForm] = useState({ name: "", source_type: "google_sheets", priority: 80, sheet_url: "", sheet_name: "", sheet_gid: "", csv_path: "", config_json: "{}", enabled: true });
+    const [invForm, setInvForm] = useState({ name: "", source_type: "google_sheets", priority: 80, sheet_url: "", sheet_name: "", sheet_gid: "", csv_path: "", zoho_books_org_id: "", config_json: "{}", enabled: true });
     const [invSheetTabs, setInvSheetTabs] = useState<InvSheetTab[]>([]);
     const [invSheetLoading, setInvSheetLoading] = useState(false);
     const [invSaving, setInvSaving] = useState(false);
     const [invError, setInvError] = useState<string | null>(null);
+    const [invZohoTesting, setInvZohoTesting] = useState(false);
+    const [invZohoTestResult, setInvZohoTestResult] = useState<{ ok: boolean; message: string } | null>(null);
+    // Workbook name returned by the tabs endpoint (for the confirmation chip).
+    const [invWorkbookName, setInvWorkbookName] = useState<string | null>(null);
+    // Debounce auto-loading worksheet tabs as the URL is typed/pasted.
+    const invTabDebounceRef = useRef<number | null>(null);
+    useEffect(() => () => { if (invTabDebounceRef.current !== null) window.clearTimeout(invTabDebounceRef.current); }, []);
+    type DriveSpreadsheet = { id: string; name: string; url: string };
+    const [driveSheets, setDriveSheets] = useState<DriveSpreadsheet[]>([]);
+    const [driveConnected, setDriveConnected] = useState<boolean>(false);
+    const [driveLoading, setDriveLoading] = useState(false);
+    const [driveError, setDriveError] = useState<string | null>(null);
+    const [driveAccountEmail, setDriveAccountEmail] = useState<string | null>(null);
+    // The picked option id — keeps the select showing the chosen file instead
+    // of snapping back to the placeholder.
+    const [driveSelectedId, setDriveSelectedId] = useState<string>("");
+    // Browse-connected-account picker for Microsoft Excel / Zoho Sheet.
+    const [browseFiles, setBrowseFiles] = useState<DriveSpreadsheet[]>([]);
+    const [browseConnected, setBrowseConnected] = useState<boolean>(false);
+    const [browseLoading, setBrowseLoading] = useState(false);
+    const [browseError, setBrowseError] = useState<string | null>(null);
+    const [browseLoadedFor, setBrowseLoadedFor] = useState<string | null>(null);
+    const [browseSelectedId, setBrowseSelectedId] = useState<string>("");
+
+    const fetchDriveSpreadsheets = useCallback(async (refresh = false) => {
+        setDriveLoading(true);
+        setDriveError(null);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/inventory-sources/google-drive/spreadsheets${refresh ? "?refresh=1" : ""}`);
+            if (res.ok) {
+                const data = await res.json();
+                setDriveConnected(data.connected ?? false);
+                setDriveSheets(data.spreadsheets ?? []);
+                setDriveError(data.error ?? null);
+                setDriveAccountEmail(data.account_email ?? null);
+            }
+        } catch {
+            setDriveConnected(false);
+            setDriveSheets([]);
+            setDriveError(null);
+        } finally {
+            setDriveLoading(false);
+        }
+    }, []);
+
+    const fetchBrowseFiles = useCallback(async (provider: string, refresh = false) => {
+        setBrowseLoading(true);
+        setBrowseError(null);
+        try {
+            const res = await apiFetch(`${CRM_BASE}/inventory-sources/browse?provider=${encodeURIComponent(provider)}${refresh ? "&refresh=1" : ""}`);
+            if (res.ok) {
+                const data = await res.json();
+                setBrowseConnected(data.connected ?? false);
+                setBrowseFiles(data.files ?? []);
+                setBrowseError(data.error ?? null);
+                setBrowseLoadedFor(provider);
+            } else {
+                let detail = "Could not load your files from this account.";
+                try { detail = (await res.json()).detail ?? detail; } catch { /* ignore */ }
+                setBrowseConnected(false);
+                setBrowseFiles([]);
+                setBrowseError(detail);
+            }
+        } catch {
+            setBrowseConnected(false);
+            setBrowseFiles([]);
+            setBrowseError("Could not reach the server to list your files.");
+        } finally {
+            setBrowseLoading(false);
+        }
+    }, []);
+
+    // Auto-load the connected-account picker when the modal opens on a
+    // spreadsheet source type (or the user switches to one) — no clicks needed.
+    useEffect(() => {
+        if (!invModal) return;
+        const t = invForm.source_type;
+        if (t === "google_sheets") {
+            void fetchDriveSpreadsheets();
+            return;
+        }
+        if (t !== "microsoft_excel" && t !== "zoho_sheet") return;
+        if (browseLoadedFor === t && !browseLoading) return;
+        void fetchBrowseFiles(t);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [invModal, invForm.source_type]);
 
     const inspectInventorySheetTabs = async (sheetUrl = invForm.sheet_url) => {
         const trimmedUrl = sheetUrl.trim();
@@ -240,26 +357,41 @@ export default function SettingsPage() {
         setInvSheetLoading(true);
         setInvError(null);
         try {
-            const res = await apiFetch(`${CRM_BASE}/inventory-sources/google-sheets/tabs?url=${encodeURIComponent(trimmedUrl)}`);
+            const match = trimmedUrl.match(/\/spreadsheets\/d\/([a-zA-Z0-9_-]+)/);
+            const sheetId = match ? match[1] : null;
+            const isGoogle = /(?:docs\.google\.com|sheets\.google\.com)/i.test(trimmedUrl);
+            const apiUrl = sheetId
+                ? `${CRM_BASE}/inventory-sources/google-drive/tabs?sheet_id=${sheetId}`
+                : `${CRM_BASE}/inventory-sources/${isGoogle ? "google-sheets" : "spreadsheet"}/tabs?url=${encodeURIComponent(trimmedUrl)}`;
+            const res = await apiFetch(apiUrl);
             const body = await res.json();
             if (!res.ok) {
                 setInvSheetTabs([]);
-                setInvError(body.detail ?? "Could not load worksheets from this Google Sheet.");
+                setInvError(body.detail ?? "Could not load worksheets from this workbook.");
                 return;
             }
 
             const tabs = (body.tabs ?? []) as InvSheetTab[];
             setInvSheetTabs(tabs);
             if (tabs.length > 0) {
+                // Auto-fill the source Name from the workbook (only if the user
+                // hasn't typed one) and pick the preferred tab.
+                const workbookName = typeof body.name === "string" && body.name.trim() ? body.name.trim() : "";
+                setInvWorkbookName(workbookName || null);
                 setInvForm(p => {
                     if (p.sheet_gid && tabs.some(tab => tab.gid === p.sheet_gid)) return p;
                     const preferred = tabs.find(tab => tab.name.toLowerCase() === "inventory") ?? tabs[0];
-                    return { ...p, sheet_name: preferred.name, sheet_gid: preferred.gid };
+                    return {
+                        ...p,
+                        name: p.name.trim() ? p.name : workbookName,
+                        sheet_name: preferred.name,
+                        sheet_gid: preferred.gid,
+                    };
                 });
             }
         } catch {
             setInvSheetTabs([]);
-            setInvError("Could not load worksheets from this Google Sheet.");
+            setInvError("Could not load worksheets from this workbook.");
         } finally {
             setInvSheetLoading(false);
         }
@@ -1629,7 +1761,7 @@ export default function SettingsPage() {
                     
 
                 {/* Google Calendar Integration */}
-                {hasAdminAccess && (
+                {/* {hasAdminAccess && (
                     <div className="mt-6 rounded-2xl border border-slate-200 dark:border-slate-800 bg-white/40 dark:bg-slate-900/40 p-6">
                         <div className="flex items-center justify-between">
                             <div className="flex items-center space-x-3">
@@ -1672,7 +1804,7 @@ export default function SettingsPage() {
                             </div>
                         </div>
                     </div>
-                )}
+                )} */}
                     </div>
                 )}
 
@@ -2629,7 +2761,7 @@ export default function SettingsPage() {
                                         <p className="text-sm text-slate-500 dark:text-slate-400">Configure ongoing sync sources — Google Sheets, ERP API, CSV file paths. For one-time uploads use Import on the Inventory page.</p>
                                     </div>
                                 </div>
-                                <button onClick={() => { setInvError(null); setInvSheetTabs([]); setInvForm({ name: "", source_type: "google_sheets", priority: 80, sheet_url: "", sheet_name: "", sheet_gid: "", csv_path: "", config_json: "{}", enabled: true }); setInvModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors">
+                                <button onClick={() => { setInvError(null); setInvZohoTestResult(null); setInvSheetTabs([]); setInvWorkbookName(null); setBrowseFiles([]); setBrowseConnected(false); setBrowseError(null); setBrowseLoadedFor(null); setBrowseSelectedId(""); setDriveSelectedId(""); setInvForm({ name: "", source_type: "google_sheets", priority: 80, sheet_url: "", sheet_name: "", sheet_gid: "", csv_path: "", zoho_books_org_id: "", config_json: "{}", enabled: true }); setInvModal("new"); }} className="flex items-center gap-2 px-3 py-2 rounded-lg bg-green-600 text-white text-sm font-semibold hover:bg-green-700 transition-colors">
                                     <Plus className="h-4 w-4" /> Add Source
                                 </button>
                             </div>
@@ -2653,13 +2785,13 @@ export default function SettingsPage() {
                                             {invSources.map(s => (
                                                 <tr key={s.id}>
                                                     <td className="py-3 pr-4 font-medium text-slate-900 dark:text-slate-100">{s.name}</td>
-                                                    <td className="py-3 pr-4"><span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300">{s.source_type}</span></td>
+                                                    <td className="py-3 pr-4"><span className="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300">{inventorySourceLabel(s.source_type)}</span></td>
                                                     <td className="py-3 pr-4 text-slate-600 dark:text-slate-300">{s.priority}</td>
                                                     <td className="py-3 pr-4 text-xs text-slate-400">{s.last_sync_at ? new Date(s.last_sync_at).toLocaleString() : "—"}</td>
                                                     <td className="py-3">
                                                         <div className="flex items-center gap-1">
                                                             <button title="Sync now" onClick={async () => { await apiFetch(`${CRM_BASE}/inventory-sources/${s.id}/sync`, { method: "POST" }).catch(() => {}); apiFetch(`${CRM_BASE}/inventory-sources`).then(r => r.ok ? r.json() : []).then(d => setInvSources(d as InvSource[])).catch(() => {}); }} className="p-1.5 rounded-lg text-slate-400 hover:text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 transition-colors"><RotateCcw className="h-4 w-4" /></button>
-                                                            <button title="Edit" onClick={() => { setInvError(null); setInvSheetTabs([]); setInvForm({ name: s.name, source_type: s.source_type, priority: s.priority, sheet_url: (s.config_json?.url as string) ?? "", sheet_name: (s.config_json?.sheet_name as string) ?? "", sheet_gid: (s.config_json?.gid as string) ?? "", csv_path: (s.config_json?.file_path as string) ?? "", config_json: JSON.stringify(s.config_json ?? {}), enabled: s.enabled }); setInvModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
+                                                            <button title="Edit" onClick={() => { setInvError(null); setInvZohoTestResult(null); setInvSheetTabs([]); setInvWorkbookName(null); setBrowseFiles([]); setBrowseConnected(false); setBrowseError(null); setBrowseLoadedFor(null); setBrowseSelectedId(""); setDriveSelectedId(""); setInvForm({ name: s.name, source_type: s.source_type, priority: s.priority, sheet_url: (s.config_json?.url as string) ?? "", sheet_name: (s.config_json?.sheet_name as string) ?? "", sheet_gid: (s.config_json?.gid as string) ?? "", csv_path: (s.config_json?.file_path as string) ?? "", zoho_books_org_id: (s.config_json?.organization_id as string) ?? (s.config_json?.org_id as string) ?? "", config_json: JSON.stringify(s.config_json ?? {}), enabled: s.enabled }); setInvModal(s); }} className="p-1.5 rounded-lg text-slate-400 hover:text-blue-600 hover:bg-blue-50 dark:hover:bg-blue-900/20 transition-colors"><Settings className="h-4 w-4" /></button>
                                                             <button title="Delete" onClick={async () => { if (!confirm(`Delete "${s.name}"?`)) return; await apiFetch(`${CRM_BASE}/inventory-sources/${s.id}`, { method: "DELETE" }); setInvSources(p => p.filter(x => x.id !== s.id)); }} className="p-1.5 rounded-lg text-slate-400 hover:text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors"><Trash2 className="h-4 w-4" /></button>
                                                         </div>
                                                     </td>
@@ -2728,6 +2860,9 @@ export default function SettingsPage() {
                                 <div className="grid grid-cols-1 gap-2">
                                     {([
                                         { value: "google_sheets", label: "Google Sheets", desc: "Paste a public Google Sheet link. The AI reads it live — no uploads needed.", available: true },
+                                        { value: "microsoft_excel", label: "Microsoft Excel / OneDrive", desc: "Paste an Excel workbook link from OneDrive or SharePoint.", available: true },
+                                        { value: "zoho_sheet", label: "Zoho Sheet", desc: "Paste a public Zoho Sheet or WorkDrive workbook link.", available: true },
+                                        { value: "zoho_books", label: "Zoho Books", desc: "Read items, prices, and stock from your connected Zoho Books account.", available: true },
                                         { value: "csv", label: "CSV File (server path)", desc: "A CSV file that lives on the backend server. For automated nightly exports from another system.", available: true },
                                         { value: "erp_api", label: "ERP / Accounting Software", desc: "Connect Tally, Zoho Inventory, SAP, or similar via API.", available: false },
                                     ] as { value: string; label: string; desc: string; available: boolean }[]).map(opt => (
@@ -2754,55 +2889,233 @@ export default function SettingsPage() {
                                     ))}
                                 </div>
                             </div>
-                            {invForm.source_type === "google_sheets" && (
-                                <div className="col-span-2 space-y-1.5">
-                                    <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Google Sheet URL</label>
-                                    <input
-                                        type="url"
-                                        value={invForm.sheet_url}
-                                        onChange={e => { setInvSheetTabs([]); setInvForm(p => ({ ...p, sheet_url: e.target.value, sheet_name: "", sheet_gid: "" })); }}
-                                        onBlur={() => { if (invForm.sheet_url.trim()) void inspectInventorySheetTabs(); }}
-                                        placeholder="https://docs.google.com/spreadsheets/d/…/edit"
-                                        className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                    />
-                                    <div className="flex items-center justify-between pt-2">
-                                        <label className="text-xs font-semibold text-slate-500 uppercase block">Worksheet</label>
-                                        <button
-                                            type="button"
-                                            disabled={!invForm.sheet_url.trim() || invSheetLoading}
-                                            onClick={() => void inspectInventorySheetTabs()}
-                                            className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-semibold text-violet-600 hover:bg-violet-50 dark:text-violet-400 dark:hover:bg-violet-900/20 disabled:opacity-50"
-                                        >
-                                            {invSheetLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                                            Load tabs
-                                        </button>
-                                    </div>
-                                    {invSheetTabs.length > 1 ? (
-                                        <select
-                                            value={invForm.sheet_gid}
-                                            onChange={e => {
-                                                const tab = invSheetTabs.find(t => t.gid === e.target.value);
-                                                setInvForm(p => ({ ...p, sheet_gid: tab?.gid ?? "", sheet_name: tab?.name ?? "" }));
-                                            }}
-                                            className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
-                                        >
-                                            {invSheetTabs.map(tab => (
-                                                <option key={tab.gid} value={tab.gid}>{tab.name}</option>
-                                            ))}
-                                        </select>
-                                    ) : invSheetTabs.length === 1 ? (
-                                        <div className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100">
-                                            {invSheetTabs[0].name}
+                            {["google_sheets", "microsoft_excel", "zoho_sheet"].includes(invForm.source_type) && (
+                                <div className="col-span-2 space-y-3">
+                                    {invForm.source_type === "google_sheets" && (
+                                        <div className="p-3 rounded-xl border border-violet-200 dark:border-violet-800/60 bg-violet-50/50 dark:bg-violet-950/20 space-y-2">
+                                            <div className="flex items-center justify-between">
+                                                <label className="text-xs font-bold text-violet-700 dark:text-violet-300 uppercase tracking-wide flex items-center gap-1.5">
+                                                    {driveConnected ? (
+                                                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                                                    ) : (
+                                                        <Plug className="h-3.5 w-3.5 text-slate-400" />
+                                                    )}
+                                                    {driveConnected ? "Google Workspace Connected" : "Google Workspace"}
+                                                </label>
+                                                {driveConnected && driveAccountEmail && (
+                                                    <span className="text-[11px] text-slate-500 dark:text-slate-400 font-mono truncate ml-2" title={driveAccountEmail}>{driveAccountEmail}</span>
+                                                )}
+                                                <button
+                                                    type="button"
+                                                    disabled={driveLoading}
+                                                    onClick={() => void fetchDriveSpreadsheets(true)}
+                                                    className="text-[11px] text-violet-600 dark:text-violet-400 hover:underline flex items-center gap-1 cursor-pointer"
+                                                >
+                                                    {driveLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Refresh Drive
+                                                </button>
+                                            </div>
+
+                                            {!driveConnected ? (
+                                                <p className="text-xs text-amber-600 dark:text-amber-400">
+                                                    Connect Google Workspace in <span className="font-semibold">Settings → Connectors</span> to browse and pick your spreadsheets directly — no link pasting needed.
+                                                </p>
+                                            ) : driveError ? (
+                                                <div className="p-2.5 rounded-lg bg-amber-100/70 dark:bg-amber-900/30 border border-amber-300 dark:border-amber-700 text-xs text-amber-800 dark:text-amber-300 space-y-1">
+                                                    <p className="font-semibold">Google Drive API is disabled in your Google Cloud Console.</p>
+                                                    <p className="text-[11px]">To enable auto-picker, turn on <strong>Google Drive API</strong> & <strong>Google Sheets API</strong> in Google Cloud Console:</p>
+                                                    <a
+                                                        href={GOOGLE_DRIVE_API_LINK}
+                                                        target="_blank"
+                                                        rel="noreferrer"
+                                                        className="inline-flex items-center gap-1 font-bold text-violet-700 dark:text-violet-300 underline"
+                                                    >
+                                                        Enable Google Drive API <ExternalLink className="h-3 w-3" />
+                                                    </a>
+                                                </div>
+                                            ) : driveSheets.length > 0 ? (
+                                                <>
+                                                    <select
+                                                        value={driveSelectedId}
+                                                        onChange={e => {
+                                                            setDriveSelectedId(e.target.value);
+                                                            const s = driveSheets.find(item => item.id === e.target.value);
+                                                            if (s) {
+                                                                setInvForm(p => ({
+                                                                    ...p,
+                                                                    name: p.name.trim() ? p.name : s.name,
+                                                                    sheet_url: s.url,
+                                                                    sheet_name: "",
+                                                                    sheet_gid: "",
+                                                                }));
+                                                                void inspectInventorySheetTabs(s.url);
+                                                            }
+                                                        }}
+                                                        className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 cursor-pointer"
+                                                    >
+                                                        <option value="">— Pick a Spreadsheet from your Google Account —</option>
+                                                        {driveSheets.map(s => (
+                                                            <option key={s.id} value={s.id}>{s.name}</option>
+                                                        ))}
+                                                    </select>
+                                                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Picking a spreadsheet auto-fills the link and fetches tabs.</p>
+                                                </>
+                                            ) : (
+                                                <div className="space-y-1">
+                                                    <p className="text-xs text-slate-500 dark:text-slate-400">No spreadsheets found in this Google account.</p>
+                                                    <p className="text-[11px] text-amber-600 dark:text-amber-400">If you expected sheets to appear, reconnect Google in Settings → Connectors — the app recently added Drive listing permission, and existing connections need a one-time re-consent.</p>
+                                                </div>
+                                            )}
                                         </div>
-                                    ) : (
+                                    )}
+
+                                    {(invForm.source_type === "microsoft_excel" || invForm.source_type === "zoho_sheet") && (
+                                        <div className="p-3 rounded-xl border border-violet-200 dark:border-violet-800/60 bg-violet-50/50 dark:bg-violet-950/20 space-y-2">
+                                            <div className="flex items-center justify-between">
+                                                <label className="text-xs font-bold text-violet-700 dark:text-violet-300 uppercase tracking-wide flex items-center gap-1.5">
+                                                    {browseConnected ? (
+                                                        <CheckCircle2 className="h-3.5 w-3.5 text-emerald-500" />
+                                                    ) : (
+                                                        <Plug className="h-3.5 w-3.5 text-slate-400" />
+                                                    )}
+                                                    {invForm.source_type === "microsoft_excel" ? "Microsoft 365 Connected" : "Zoho Connected"}
+                                                </label>
+                                                <button
+                                                    type="button"
+                                                    disabled={browseLoading}
+                                                    onClick={() => void fetchBrowseFiles(invForm.source_type, true)}
+                                                    className="text-[11px] text-violet-600 dark:text-violet-400 hover:underline flex items-center gap-1 cursor-pointer"
+                                                >
+                                                    {browseLoading ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />} Refresh
+                                                </button>
+                                            </div>
+
+                                            {!browseConnected ? (
+                                                <p className="text-xs text-amber-600 dark:text-amber-400">
+                                                    Connect {invForm.source_type === "microsoft_excel" ? "Microsoft 365" : "Zoho"} in{" "}
+                                                    <span className="font-semibold">Settings → Connectors</span> to browse and pick your workbooks directly — no link pasting needed.
+                                                </p>
+                                            ) : browseError ? (
+                                                <p className="text-xs text-amber-700 dark:text-amber-300">{browseError}</p>
+                                            ) : browseFiles.length > 0 ? (
+                                                <>
+                                                    <select
+                                                        value={browseSelectedId}
+                                                        onChange={e => {
+                                                            setBrowseSelectedId(e.target.value);
+                                                            const f = browseFiles.find(item => item.id === e.target.value);
+                                                            if (f) {
+                                                                setInvForm(p => ({
+                                                                    ...p,
+                                                                    name: p.name.trim() ? p.name : f.name,
+                                                                    sheet_url: f.url,
+                                                                    sheet_name: "",
+                                                                    sheet_gid: "",
+                                                                }));
+                                                                setInvSheetTabs([]);
+                                                                setInvWorkbookName(null);
+                                                                void inspectInventorySheetTabs(f.url);
+                                                            }
+                                                        }}
+                                                        className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 text-sm font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500 cursor-pointer"
+                                                    >
+                                                        <option value="">— Pick a Workbook from your {invForm.source_type === "microsoft_excel" ? "OneDrive" : "Zoho"} account —</option>
+                                                        {browseFiles.map(f => (
+                                                            <option key={f.id} value={f.id}>{f.name}</option>
+                                                        ))}
+                                                    </select>
+                                                    <p className="text-[11px] text-slate-500 dark:text-slate-400">Picking a workbook auto-fills the link, the source name, and fetches tabs.</p>
+                                                </>
+                                            ) : (
+                                                <p className="text-xs text-slate-500 dark:text-slate-400">No spreadsheets found in your connected account.</p>
+                                            )}
+                                        </div>
+                                    )}
+
+                                    <div className="space-y-1.5">
+                                        <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">{inventorySourceLabel(invForm.source_type)} URL</label>
                                         <input
-                                            value={invForm.sheet_name}
-                                            onChange={e => setInvForm(p => ({ ...p, sheet_name: e.target.value, sheet_gid: "" }))}
-                                            placeholder="Inventory"
+                                            type="url"
+                                            value={invForm.sheet_url}
+                                            onChange={e => {
+                                                setInvSheetTabs([]);
+                                                setInvWorkbookName(null);
+                                                const sheet_url = e.target.value;
+                                                setInvForm(p => {
+                                                    const detected = detectInventorySourceType(sheet_url);
+                                                    return { ...p, sheet_url, sheet_name: "", sheet_gid: "", source_type: detected && detected !== p.source_type ? detected : p.source_type };
+                                                });
+                                                if (invTabDebounceRef.current !== null) window.clearTimeout(invTabDebounceRef.current);
+                                                const trimmed = sheet_url.trim();
+                                                if (trimmed && detectInventorySourceType(trimmed)) {
+                                                    invTabDebounceRef.current = window.setTimeout(() => void inspectInventorySheetTabs(trimmed), 600);
+                                                }
+                                            }}
+                                            onBlur={() => {
+                                                setInvForm(p => {
+                                                    const detected = detectInventorySourceType(p.sheet_url);
+                                                    return detected && detected !== p.source_type ? { ...p, source_type: detected } : p;
+                                                });
+                                                if (invForm.sheet_url.trim()) void inspectInventorySheetTabs();
+                                            }}
+                                            placeholder="https://docs.google.com/spreadsheets/d/…/edit"
                                             className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
                                         />
-                                    )}
-                                    <p className="text-xs text-amber-600 dark:text-amber-400">The sheet must be set to <strong>Anyone with the link can view</strong> in Google Sheets sharing settings.</p>
+                                        {(() => {
+                                            const detected = invForm.sheet_url.trim() ? detectInventorySourceType(invForm.sheet_url) : null;
+                                            if (!detected) return null;
+                                            return (
+                                                <div className="flex items-center gap-2 pt-1.5">
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/30 text-emerald-700 dark:text-emerald-300 text-xs font-semibold">
+                                                        <CheckCircle2 className="h-3 w-3" /> {inventorySourceDetectLabel(detected)}
+                                                    </span>
+                                                    {invWorkbookName && (
+                                                        <span className="text-xs text-slate-500 dark:text-slate-400 font-mono truncate" title={invWorkbookName}>{invWorkbookName}</span>
+                                                    )}
+                                                </div>
+                                            );
+                                        })()}
+                                        <div className="flex items-center justify-between pt-2">
+                                            <label className="text-xs font-semibold text-slate-500 uppercase block">Worksheet / Tab</label>
+                                            <button
+                                                type="button"
+                                                disabled={!invForm.sheet_url.trim() || invSheetLoading}
+                                                onClick={() => void inspectInventorySheetTabs()}
+                                                className="flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-semibold text-violet-600 hover:bg-violet-50 dark:text-violet-400 dark:hover:bg-violet-900/20 disabled:opacity-50"
+                                            >
+                                                {invSheetLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                                                Load tabs
+                                            </button>
+                                        </div>
+                                        {invSheetTabs.length > 1 ? (
+                                            <select
+                                                value={invForm.sheet_gid}
+                                                onChange={e => {
+                                                    const tab = invSheetTabs.find(t => t.gid === e.target.value);
+                                                    setInvForm(p => ({ ...p, sheet_gid: tab?.gid ?? "", sheet_name: tab?.name ?? "" }));
+                                                }}
+                                                className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-semibold text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                            >
+                                                {invSheetTabs.map(tab => (
+                                                    <option key={tab.gid} value={tab.gid}>{tab.name}</option>
+                                                ))}
+                                            </select>
+                                        ) : invSheetTabs.length === 1 ? (
+                                            <div className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 font-semibold flex items-center justify-between">
+                                                <span>{invSheetTabs[0].name}</span>
+                                                <span className="text-xs text-slate-400 font-mono">gid: {invSheetTabs[0].gid}</span>
+                                            </div>
+                                        ) : (
+                                            <input
+                                                value={invForm.sheet_name}
+                                                onChange={e => setInvForm(p => ({ ...p, sheet_name: e.target.value, sheet_gid: "" }))}
+                                                placeholder="Inventory"
+                                                className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500"
+                                            />
+                                        )}
+                                        {!driveConnected && (
+                                            <p className="text-xs text-amber-600 dark:text-amber-400">Public link sharing: The sheet must be set to <strong>Anyone with the link can view</strong> in Google Sheets sharing settings, or connect Google Workspace in Settings &gt; Connectors.</p>
+                                        )}
+                                    </div>
                                 </div>
                             )}
                             {invForm.source_type === "csv" && (
@@ -2810,6 +3123,40 @@ export default function SettingsPage() {
                                     <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">File Path on Server</label>
                                     <input value={invForm.csv_path} onChange={e => setInvForm(p => ({ ...p, csv_path: e.target.value }))} placeholder="/data/inventory.csv" className="w-full p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
                                     <p className="text-xs text-slate-500 dark:text-slate-400">This is the full path to a CSV file on the machine running the backend — not a file on your computer.</p>
+                                </div>
+                            )}
+                            {invForm.source_type === "zoho_books" && (
+                                <div className="col-span-2 space-y-1.5">
+                                    <label className="text-xs font-semibold text-slate-500 uppercase mb-1 block">Zoho Books Organization ID</label>
+                                    <div className="flex gap-2">
+                                        <input value={invForm.zoho_books_org_id} onChange={e => { setInvZohoTestResult(null); setInvForm(p => ({ ...p, zoho_books_org_id: e.target.value })); }} placeholder="e.g. 60012345678" className="flex-1 p-2.5 rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm font-mono text-slate-900 dark:text-slate-100 focus:outline-none focus:ring-2 focus:ring-violet-500" />
+                                        <button type="button" disabled={invZohoTesting || !invForm.zoho_books_org_id.trim()} onClick={async () => {
+                                            setInvZohoTesting(true); setInvZohoTestResult(null); setInvError(null);
+                                            try {
+                                                const orgId = invForm.zoho_books_org_id.trim();
+                                                const res = await apiFetch(`${CRM_BASE}/inventory-sources/zoho-books/test?organization_id=${encodeURIComponent(orgId)}`);
+                                                if (res.ok) {
+                                                    const data = await res.json();
+                                                    setInvZohoTestResult({ ok: true, message: `Connected — ${data.item_count} item(s) found${data.has_more_page ? " (more pages)" : ""}.` });
+                                                } else {
+                                                    setInvZohoTestResult({ ok: false, message: ((await res.json()) as { detail?: string }).detail ?? "Test failed" });
+                                                }
+                                            } catch {
+                                                setInvZohoTestResult({ ok: false, message: "Network error while testing the connection." });
+                                            } finally {
+                                                setInvZohoTesting(false);
+                                            }
+                                        }} className="flex items-center gap-1.5 px-3 py-2 rounded-lg border border-violet-300 dark:border-violet-700 text-violet-700 dark:text-violet-300 text-sm font-semibold hover:bg-violet-50 dark:hover:bg-violet-900/20 disabled:opacity-50 transition-colors whitespace-nowrap">
+                                            {invZohoTesting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Zap className="h-4 w-4" />} Test Connection
+                                        </button>
+                                    </div>
+                                    {invZohoTestResult && (
+                                        <p className={`text-xs rounded-lg px-3 py-2 ${invZohoTestResult.ok ? "text-emerald-700 dark:text-emerald-400 bg-emerald-50 dark:bg-emerald-900/20" : "text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-950/30"}`}>
+                                            {invZohoTestResult.ok ? <CheckCircle2 className="h-3.5 w-3.5 inline mr-1" /> : <XCircle className="h-3.5 w-3.5 inline mr-1" />}
+                                            {invZohoTestResult.message}
+                                        </p>
+                                    )}
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">Find it in Zoho Books → Settings → Organization Profile. First connect or reconnect Zoho in Settings → Connectors.</p>
                                 </div>
                             )}
                             <div className="col-span-2">
@@ -2828,13 +3175,16 @@ export default function SettingsPage() {
                                 setInvSaving(true); setInvError(null);
                                 try {
                                     let cfg: Record<string, unknown> = {};
-                                    if (invForm.source_type === "google_sheets") {
-                                        if (!invForm.sheet_url.trim()) { setInvError("Please paste the Google Sheet URL."); setInvSaving(false); return; }
+                                    if (["google_sheets", "microsoft_excel", "zoho_sheet"].includes(invForm.source_type)) {
+                                        if (!invForm.sheet_url.trim()) { setInvError(`Please paste the ${inventorySourceLabel(invForm.source_type)} URL.`); setInvSaving(false); return; }
                                         cfg = { url: invForm.sheet_url.trim() };
                                         if (invForm.sheet_gid.trim()) cfg.gid = invForm.sheet_gid.trim();
                                         if (invForm.sheet_name.trim()) cfg.sheet_name = invForm.sheet_name.trim();
                                     } else if (invForm.source_type === "csv") {
                                         cfg = { file_path: invForm.csv_path.trim() };
+                                    } else if (invForm.source_type === "zoho_books") {
+                                        if (!invForm.zoho_books_org_id.trim()) { setInvError("Please enter the Zoho Books organization ID."); setInvSaving(false); return; }
+                                        cfg = { organization_id: invForm.zoho_books_org_id.trim() };
                                     } else {
                                         try { cfg = JSON.parse(invForm.config_json); } catch { setInvError("Config must be valid JSON"); setInvSaving(false); return; }
                                     }
