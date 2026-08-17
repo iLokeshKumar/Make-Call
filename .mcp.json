@@ -1,0 +1,24 @@
+{
+  "mcpServers": {
+    "voicebox": {
+      "url": "http://127.0.0.1:17493/mcp",
+      "headers": {
+        "X-Voicebox-Client-Id": "rio-crm"
+      }
+    },
+    "apollo": {
+      "url": "https://mcp.apollo.io/mcp"
+    },
+    "sarvam": {
+      "command": "uvx",
+      "args": ["sarvam-mcp"],
+      "env": {
+        "SARVAM_API_KEY": "sk_6k9xhssq_qgM0zhXpTpHo2Y0v4ZLCFF2O"
+      }
+    },
+    "firecrawl": {
+      "type": "remote",
+      "url": "https://mcp.firecrawl.dev/v2/mcp-oauth"
+    }
+  }
+}

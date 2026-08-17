@@ -1,1655 +1,1284 @@
 import os
-import json
-import asyncio
-import base64
 import sys
-import uuid
-import audioop
-import re
-import pandas as pd
-import io
-import logging
 import time
-from datetime import datetime, timezone, timedelta
-from typing import Optional, List, Dict, Any
+import asyncio
 
-from fastapi import FastAPI, WebSocket, Request, HTTPException, Depends, WebSocketDisconnect, UploadFile, File, status
-from fastapi.responses import HTMLResponse, JSONResponse
-from twilio.twiml.voice_response import VoiceResponse, Connect
-from twilio.twiml.messaging_response import MessagingResponse
-from twilio.rest import Client
+# if sys.platform.startswith("win"):
+#     try:
+#         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+#     except Exception as _e:
+
+#         import sys as _sys
+#         print(
+#             f"[startup] WARN: failed to set WindowsSelectorEventLoopPolicy: {_e!r}",
+#             file=_sys.stderr,
+#         )
+
+from win_async_fix import apply_windows_async_fix
+apply_windows_async_fix()
+
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from dotenv import load_dotenv
-import requests
-from google import genai
-from google.genai import types
-from mistralai import Mistral as MistralClient
 
-# ENHANCED LOGGING SETUP
+_env_path = Path(__file__).parent / ".env"
+load_dotenv(_env_path, override=False)
 
-logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s - [%(levelname)s] [%(name)s] %(message)s'
-)
-logger = logging.getLogger(__name__)
-try:
-    from deepgram import DeepgramClient
-    # v5 SDK locations
-    from deepgram.listen.live.v1 import LiveOptions
-    try:
-        from deepgram import LiveTranscriptionEvents
-    except Exception:
-        LiveTranscriptionEvents = None
-except ImportError:
-    try:
-        from deepgram import DeepgramClient
-        # Older SDKs
-        from deepgram.options import LiveOptions
-        try:
-            from deepgram import LiveTranscriptionEvents
-        except Exception:
-            LiveTranscriptionEvents = None
-    except ImportError:
-        DeepgramClient = globals().get('DeepgramClient')
-        LiveOptions = None
-        LiveTranscriptionEvents = None
-import aiohttp
-from database import (
-    init_db, get_session, Lead, LeadCreate, engine, Interaction, 
-    Product, SystemSettings, Appointment, Outcome, User, UserCreate
-)
-from sqlmodel import Session, select, func, text, col, SQLModel
-from rag_service import search_knowledge_base
-from enrichment_service import enrich_lead_cascade
-from email_service import send_smtp_email, get_styled_html
-from tool_adapter import get_mistral_tools, execute_mcp_tool
-from fastapi.security import OAuth2PasswordRequestForm
-from auth import (
-    Token, get_current_user, get_current_active_user, create_access_token, 
-    get_password_hash, verify_password, ACCESS_TOKEN_EXPIRE_MINUTES,
-    RoleChecker, generate_mfa_secret, verify_mfa_token, 
-    get_mfa_provisioning_uri, generate_mfa_qr_base64
-)
-
-# Initialize DB on startup
-init_db()
-
+from fastapi import FastAPI, Request, WebSocket
+from fastapi import WebSocketDisconnect
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from sqlmodel import Session, select
+from starlette.middleware.base import BaseHTTPMiddleware
 
-# RIO PERSONA & SYSTEM PROMPT (2026 RACE Framework)
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
-RIO_PERSONA_PROMPT = """
-You are Rio, a Senior Sales Consultant at [Your Company]. You are NOT a bot; you are a professional sales representative.
+from config import settings as app_settings
+from database import engine, init_db, rls_company_id
+from models.models import BackgroundJob, CallStatusEvent, CallTask, Company, Interaction, IsmActivityEvent, Lead, SentimentEvent, User, utc_now
+from pipelines.voice_pipeline import VoicePipeline
+from routes import admin, analytics, auth, automation, call_task, campaign, evals, feedback, proposal, quote, requirement, templates, telephony, tracking
+from routes import accounts, coach, competitors, interactions, lead_import, leads, objections, products, settings as crm_settings
+from routes import knowledge
+from routes import voice_agents as voice_agents_routes
+from routes import sub_accounts as sub_accounts_routes
+from routes import sip_trunks as sip_trunks_routes
+from routes import compliance as compliance_routes
+from routes import agents as agent_routes
+from routes import agent_tasks as agent_tasks_routes
+from routes import metrics as metrics_routes
+from routes import observability_metrics as observability_metrics_routes
+from routes import ism_rules as ism_rules_routes
+from routes import phone_numbers as phone_numbers_routes
+from routes import calendar as calendar_routes
+from routes import webhooks as webhook_router
+from routes import dispositions as dispositions_router
+from routes import events as events_router
+from routes import mark_tracking as mark_tracking_router
+from routes import agent_templates as agent_templates_router
+from routes import provider_credentials as provider_credentials_router
+from routes import cost as cost_router
+from routes import integrations as integrations_router
+from routes import mcp_connections as mcp_connections_router
+from routes import apollo_oauth as apollo_oauth_router
+from routes import zoho_oauth as zoho_oauth_router
+from routes import hubspot_oauth as hubspot_oauth_router
+from routes import linkedin_oauth as linkedin_oauth_router
+from routes import salesforce_oauth as salesforce_oauth_router
+from routes import instantly_oauth as instantly_oauth_router
+from routes import microsoft_oauth as microsoft_oauth_router
+from routes import tool_logs as tool_logs_router
+from routes import inventory_sources as inventory_sources_router
+from routes import orders as orders_router
+from routes import invoices as invoices_router
+from routes import payments as payments_router
+from routes import tickets as tickets_router
+from routes import installations as installations_router
+from routes import contacts as contacts_router
+from routes import tts as tts_router
+from routes import agent_chat as agent_chat_router
+from auth import ALGORITHM, SECRET_KEY
+import jwt
+from routes import collections as collections_router
+from routes import books_sync as books_sync_router
+from routes import scheme_claims as scheme_claims_router
+from routes import purchase_suite as purchase_suite_router
+from routes import rocketreach_oauth as rocketreach_oauth_router
+from routes import tally_connector as tally_connector_router
+from routes import calcom_connector as calcom_connector_router
+from routes import calendly_connector as calendly_connector_router
+from routes import rocketreach_mcp_connector as rocketreach_mcp_connector_router
+from routes import zoom_oauth as zoom_oauth_router
+from services.call.outcome_service import apply_call_outcome, classify_outcome_from_transcript
+from utils.lead_utils import get_comprehensive_lead_context
+from utils.logger import generate_request_id, request_id_var, setup_logger
+from utils.tracing import configure_tracing
+from services.call import call_status_broadcaster, sentiment_broadcaster
+from services.voice_agent_runtime_service import log_voice_agent_event, resolve_agent_for_call
 
-**ROLE**: Senior Sales Consultant
-- Your tone is professional, empathetic, and knowledgeable.
-- You are speaking to a prospect who called or was called regarding [Product/Service].
-- Your goal is to qualify them and schedule a demo if they are a good fit.
+logger = setup_logger(__name__)
 
-**CONTEXT**: 
-- Use BANT framework to qualify: Budget, Authority, Need, Timeline
-- Always prioritize understanding the prospect's pain points before offering solutions.
-- If you don't know something, be honest—don't make up information.
 
-**CRITICAL GUARDRAILS** (You MUST follow these):
-1. **Pricing**: ALWAYS use the `get_product_info()` tool before quoting any price. Never hallucinate prices.
-2. **Discounts**: NEVER offer discounts >10% without using `check_guardrails()` tool first. If >10%, tell prospect manager approval is needed.
-3. **ICP Check**: Use `check_icp_qualification()` early in call to determine if prospect meets our Ideal Customer Profile.
-4. **Booking**: Only call `book_meeting()` AFTER prospect confirms they want a demo and agrees to a time.
-
-**TASK - BANT QUALIFICATION SEQUENCE**:
-1. **NEED**: "What challenges are you currently facing? What would a solution look like for you?"
-2. **AUTHORITY**: "Are you the primary decision-maker, or will others be involved in this decision?"
-3. **TIMELINE**: "When are you looking to implement a solution? This year? Next quarter?"
-4. **BUDGET**: "Does your team have a budget allocated for this category?"
-
-**ACTION BASED ON RESULTS**:
-- ✓ If QUALIFIED (meets ICP + positive BANT): "I'd love to show you a demo tailored to your needs. How does [day/time] work?"
-- ✗ If NOT QUALIFIED (doesn't meet ICP or BANT incomplete): "Thank you for your time. A specialist will follow up with resources via email that may help."
-
-**RESPONSE BEHAVIOR**:
-- Speak naturally—use contractions, short sentences, natural pauses.
-- Listen more than you talk. Ask follow-up questions based on prospect responses.
-- Show empathy: "That sounds like a real challenge. Many of our customers faced the same issue."
-- Be direct: Get to the point; respect prospect's time.
-
-**DO NOT** (Strict Rules):
-- Do NOT offer pricing without `get_product_info()` tool.
-- Do NOT promise discounts without `check_guardrails()` tool.
-- Do NOT book a demo without explicit prospect agreement.
-"""
-
-app = FastAPI()
-
-@app.post("/token", response_model=Token)
-async def login_for_access_token(
-    form_data: OAuth2PasswordRequestForm = Depends(), 
-    mfa_token: Optional[str] = None, # Optional mfa token
-    session: Session = Depends(get_session)
-):
-    user = session.exec(select(User).where(User.username == form_data.username)).first()
-    if not user or not verify_password(form_data.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Incorrect username or password",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    if not user.email_verified:
-         raise HTTPException(
-             status_code=status.HTTP_403_FORBIDDEN,
-             detail="EMAIL_UNVERIFIED"
-         )
-    
-    # MFA Logic
-    if user.mfa_enabled:
-        if not mfa_token:
-             return JSONResponse(status_code=403, content={"detail": "MFA_REQUIRED"})
-        if not verify_mfa_token(user.mfa_secret, mfa_token):
-             raise HTTPException(status_code=401, detail="Invalid MFA token")
-
-    access_token_expires = timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    access_token = create_access_token(
-        data={"sub": user.username, "role": user.role}, expires_delta=access_token_expires
-    )
-    return {"access_token": access_token, "token_type": "bearer"}
-
-@app.post("/auth/mfa/setup")
-async def setup_mfa(current_user: User = Depends(get_current_active_user), session: Session = Depends(get_session)):
-    """Generate MFA secret and QR code for the user."""
-    if current_user.mfa_enabled:
-        raise HTTPException(status_code=400, detail="MFA already enabled")
-    
-    secret = generate_mfa_secret()
-    current_user.mfa_secret = secret
-    session.add(current_user)
-    session.commit()
-    
-    uri = get_mfa_provisioning_uri(current_user.username, secret)
-    qr_code = generate_mfa_qr_base64(uri)
-    
-    return {"secret": secret, "qr_code": qr_code}
-
-class MFAVerify(SQLModel):
-    token: str
-
-@app.post("/auth/mfa/enable")
-async def enable_mfa(verify: MFAVerify, current_user: User = Depends(get_current_active_user), session: Session = Depends(get_session)):
-    """Verify first token and enable MFA."""
-    if not current_user.mfa_secret:
-        raise HTTPException(status_code=400, detail="MFA not set up")
-    
-    if verify_mfa_token(current_user.mfa_secret, verify.token):
-        current_user.mfa_enabled = True
-        session.add(current_user)
-        session.commit()
-        return {"message": "MFA enabled successfully"}
-    else:
-        raise HTTPException(status_code=400, detail="Invalid token")
-
-@app.post("/register", response_model=User)
-async def register_user(user: UserCreate, session: Session = Depends(get_session)):
-    existing_user_name = session.exec(select(User).where(User.username == user.username)).first()
-    if existing_user_name:
-        raise HTTPException(status_code=400, detail="Username already registered")
-    
-    existing_user_email = session.exec(select(User).where(User.email == user.email)).first()
-    if existing_user_email:
-        raise HTTPException(status_code=400, detail="Email already registered")
-    
-    verification_token = str(uuid.uuid4())
-    db_user = User(
-        username=user.username,
-        email=user.email,
-        hashed_password=get_password_hash(user.password),
-        is_active=True,
-        email_verified=False,
-        verification_token=verification_token
-    )
-    session.add(db_user)
-    session.commit()
-    session.refresh(db_user)
-
-    # Send Verification Email
-    verify_link = f"http://localhost:3006/verify?token={verification_token}"
-    email_body = f"Welcome to Rio CRM! Please verify your email by clicking the link below:\n\n{verify_link}"
-    styled_html = get_styled_html("Verify Your Email", f"Please click the button below to verify your account and get started with Rio CRM.<br><br><a href='{verify_link}' class='btn' style='color: white;'>Verify Email</a>", db_user.username)
-    
-    send_smtp_email(db_user.email, "Verify Your Rio CRM Account", email_body, styled_html)
-
-    return db_user
-
-@app.get("/verify")
-async def verify_email(token: str, session: Session = Depends(get_session)):
-    user = session.exec(select(User).where(User.verification_token == token)).first()
-    if not user:
-        raise HTTPException(status_code=400, detail="Invalid or expired verification token")
-    
-    user.email_verified = True
-    user.verification_token = None # Clear token after use
-    session.add(user)
-    session.commit()
-    return {"message": "Email verified successfully. You can now log in."}
-
-class ResendVerification(SQLModel):
-    email: Optional[str] = None
-    username: Optional[str] = None
-
-@app.post("/auth/resend-verification")
-async def resend_verification(data: ResendVerification, session: Session = Depends(get_session)):
-    user = None
-    if data.email:
-        user = session.exec(select(User).where(User.email == data.email)).first()
-    elif data.username:
-        user = session.exec(select(User).where(User.username == data.username)).first()
-    
-    if not user:
-        return {"message": "If the account exists, a new link has been sent."}
-    
-    if user.email_verified:
-        return {"message": "Email is already verified."}
-    
-    # Generate new token
-    verification_token = str(uuid.uuid4())
-    user.verification_token = verification_token
-    session.add(user)
-    session.commit()
-
-    # Send Email
-    verify_link = f"http://localhost:3006/verify?token={verification_token}"
-    email_body = f"Click here to verify your account: {verify_link}"
-    styled_html = get_styled_html("Verify Your Email", f"You requested a new verification link. Please click below to confirm your account.<br><br><a href='{verify_link}' class='btn' style='color: white;'>Verify Email</a>", user.username)
-    
-    send_smtp_email(user.email, "New Verification Link - Rio CRM", email_body, styled_html)
-    
-    return {"message": "New verification link sent."}
-
-@app.get("/users/me", response_model=User)
-async def read_users_me(current_user: User = Depends(get_current_active_user)):
-    return current_user
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[
-        "http://localhost:3006",
-        "http://127.0.0.1:3006"
-    ],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# CRM API Endpoints
-@app.get("/leads", response_model=list[Lead])
-async def get_leads(session: Session = Depends(get_session)):
-    """Fetch all leads from the database."""
-    leads = session.exec(select(Lead).order_by(Lead.created_at.desc())).all()
-    return leads
-
-@app.post("/leads", response_model=Lead)
-async def create_lead(lead: LeadCreate, session: Session = Depends(get_session)):
-    """Create a new lead."""
-    db_lead = Lead.model_validate(lead)
-    session.add(db_lead)
-    session.commit()
-    session.refresh(db_lead)
-    return db_lead
-
-@app.delete("/leads/{lead_id}", dependencies=[Depends(RoleChecker(["admin"]))])
-async def delete_lead(lead_id: int, session: Session = Depends(get_session)):
-    """Delete a lead."""
-    db_lead = session.get(Lead, lead_id)
-    if not db_lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    session.delete(db_lead)
-    session.commit()
-    return {"message": "Lead deleted"}
-
-@app.put("/leads/{lead_id}", response_model=Lead)
-async def update_lead(lead_id: int, lead: LeadCreate, session: Session = Depends(get_session)):
-    """Update a lead."""
-    db_lead = session.get(Lead, lead_id)
-    if not db_lead:
-        raise HTTPException(status_code=404, detail="Lead not found")
-    
-    lead_data = lead.dict(exclude_unset=True)
-    for key, value in lead_data.items():
-        setattr(db_lead, key, value)
-        
-    session.add(db_lead)
-    session.commit()
-    session.refresh(db_lead)
-    return db_lead
-
-class ApolloSearch(SQLModel):
-    keywords: str
-
-@app.post("/leads/fetch-apollo", dependencies=[Depends(RoleChecker(["admin"]))])
-async def fetch_apollo(search: ApolloSearch, session: Session = Depends(get_session)):
-    """Fetches leads from Apollo.io (Organizations) and adds them to DB."""
-    if not APOLLO_API_KEY:
-        raise HTTPException(status_code=500, detail="APOLLO_API_KEY not configured.")
-
-    url = "https://api.apollo.io/v1/organizations/search"
-    headers = {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": APOLLO_API_KEY
-    }
-    payload = {
-        "q_organization_name": search.keywords,
-        "page": 1,
-        "per_page": 10 
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        data = response.json()
-        
-        if response.status_code != 200:
-             raise HTTPException(status_code=response.status_code, detail=data.get("error", "Apollo API Error"))
-
-        organizations = data.get("organizations", [])
-        leads_added = 0
-        
-        for org in organizations:
-            # Map Organization to Lead
-            # Name -> Name, Phone -> Phone
-            name = org.get("name")
-            phone = org.get("phone_number") or "N/A" # Many orgs might miss phone
-            
-            if not name or phone == "N/A":
-                continue
-
-            # Basic Duplicate Check
-            existing = session.exec(select(Lead).where(Lead.phone == phone)).first()
-            if not existing:
-                new_lead = Lead(
-                    name=name,
-                    phone=phone,
-                    email=None, 
-                    # Store domain in notes for now
-                    notes=f"Apollo Import: {org.get('primary_domain', '')}",
-                    source="Apollo API",
-                    status="New"
-                )
-                session.add(new_lead)
-                leads_added += 1
-        
-        session.commit()
-        return {"message": f"Successfully imported {leads_added} leads from Apollo.", "total_found": len(organizations)}
-
-    except Exception as e:
-        print(f"Apollo Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/analytics/outcomes", dependencies=[Depends(RoleChecker(["admin"]))])
-async def get_outcome_analytics(session: Session = Depends(get_session)):
-    """Fetches Pipeline Value and outcome counts by stage."""
-    # Forecasted Revenue (Weighted Pipeline)
-    # Sum of (Potential Value * Probability)
-    forecast_query = text("SELECT SUM(potential_value * probability) FROM outcome")
-    forecasted_revenue = session.exec(forecast_query).one() or 0.0
-    
-    # Outcomes by Stage
-    stage_query = select(Outcome.stage, func.count(Outcome.id), func.sum(Outcome.potential_value * Outcome.probability)).group_by(Outcome.stage)
-    results = session.exec(stage_query).all()
-    
-    funnel_analytics = {}
-    for stage, count, weighted_val in results:
-        funnel_analytics[stage] = {
-            "count": count,
-            "weighted_pipeline_value": weighted_val or 0.0
-        }
-    
-    return {
-        "forecasted_revenue": forecasted_revenue,
-        "funnel_analytics": funnel_analytics,
-        "currency": "USD",
-        "model": "Probability-Weighted Pipeline"
-    }
-
-@app.post("/leads/{lead_id}/enrich")
-async def enrich_lead(lead_id: int):
-    """Triggers the waterfall enrichment for a specific lead."""
-    result = enrich_lead_cascade(lead_id)
-    if "error" in result:
-        raise HTTPException(status_code=404, detail=result["error"])
-    return result
-
-# Dashboard Stats Endpoint
-@app.get("/dashboard/stats", dependencies=[Depends(RoleChecker(["admin"]))])
-async def get_dashboard_stats(session: Session = Depends(get_session)):
-    """Fetch aggregated stats for the dashboard."""
-    total_leads = session.exec(select(func.count(Lead.id))).one()
-    
-    
-    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-    calls_today = session.exec(select(func.count(Interaction.id)).where(Interaction.type == "call").where(Interaction.timestamp >= today_start)).one()
-    
-    converted = session.exec(select(func.count(Lead.id)).where(Lead.status == "Converted")).one()
-    follow_up = session.exec(select(func.count(Lead.id)).where(Lead.status == "Follow-up")).one()
-    
-    return {
-        "total_leads": total_leads,
-        "calls_today": calls_today,
-        "converted": converted,
-        "follow_up": follow_up
-    }
-
-@app.get("/interactions")
-async def get_interactions(session: Session = Depends(get_session)):
-    """Fetch call history."""
-    interactions = session.exec(select(Interaction).order_by(Interaction.timestamp.desc())).all()
-    return interactions
-
-# AI Instructions and Configuration are now loaded dynamically from the database.
-# Check SystemSettings model in database.py.
-
-# Configuration
-TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
-TWILIO_AUTH_TOKEN = os.getenv("TWILIO_AUTH_TOKEN")
-PHONE_NUMBER_FROM = os.getenv("PHONE_NUMBER_FROM")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MISTRAL_API_KEY = os.getenv("MISTRAL_API_KEY")
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "CwhOLp6mAE7h9asvUURR")
-DEEPGRAM_API_KEY = os.getenv("DEEPGRAM_API_KEY")
-APOLLO_API_KEY = os.getenv("APOLLO_API_KEY")
-
-# EnableX Configuration
-ENABLEX_APP_ID = os.getenv("EnableX_App_ID")
-ENABLEX_APP_KEY = os.getenv("EnableX_App_Key")
-ENABLEX_FROM_NUMBER = os.getenv("ENABLEX_FROM_NUMBER")
-
-DOMAIN = os.getenv("DOMAIN")
-if DOMAIN:
-    DOMAIN = DOMAIN.replace("http://", "").replace("https://", "").replace("/", "")
-PORT = int(os.getenv("PORT", 6060))
-
-def check_inventory(product_name: str):
+class _RequestContextMiddleware(BaseHTTPMiddleware):
+    """Sets a short request ID on every HTTP request and WebSocket handshake.
+    The ID is stored in a ContextVar so every logger.* call in the same
+    async task automatically includes [req:<id>] without any extra plumbing.
+    Also logs a single summary line per HTTP request (method, path, status, ms).
+    WebSocket connections are logged on connect only — their lifetime spans
+    the full call, so the same req_id threads through all pipeline log lines.
     """
-    Checks the stock status and price of a product in the warehouse from the database.
-    """
-    print(f"Tool Triggered: check_inventory({product_name})")
-    
-    with Session(engine) as session:
-        # Simple ilike or substring search
-        search_term = f"%{product_name.lower()}%"
-        statement = select(Product).where(col(Product.name).ilike(search_term))
-        product = session.exec(statement).first()
-        
-        if product:
-            return json.dumps({
-                "product": product.name,
-                "stock": product.stock,
-                "price": product.price,
-                "note": product.note or ""
-            })
-            
-        # If not found, suggest available categories or items
-        all_products = session.exec(select(Product.name)).all()
-        return json.dumps({
-            "product": product_name, 
-            "status": "Not found in catalog", 
-            "available_items": all_products[:10] # limit to 10 for voice brevity
-        })
-
-def query_knowledge_base(query: str):
-    """
-    Searches the knowledge base for policies, warranty info, and general support questions.
-    
-    Args:
-        query: The user's question or search term (e.g., 'What is the warranty on VRF?', 'Return policy').
-    
-    Returns:
-        String containing relevant context/documents.
-    """
-    print(f"Tool Triggered: query_knowledge_base({query})")
-    results = search_knowledge_base(query)
-    if results:
-        return f"Context found: {results}"
-    if results:
-        return f"Context found: {results}"
-    return "No relevant info found in knowledge base."
-
-# Lead tool implementation
-from database import engine 
-
-def update_lead_tool(phone: str, notes: str, status: str = None):
-    """
-    Updates the CRM lead information for the given phone number.
-    """
-    print(f"Tool Triggered: update_lead_tool({phone})")
-    with Session(engine) as session:
-        statement = select(Lead).where(Lead.phone == phone)
-        lead = session.exec(statement).first()
-        
-        if lead:
-            if notes:
-                lead.notes = (lead.notes or "") + f"\n[AI]: {notes}"
-            if status:
-                lead.status = status
-            session.add(lead)
-            session.commit()
-            return f"Updated lead {lead.name}."
-        else:
-             # Create new lead if not exists? For now just report.
-            return "Lead not found for this number."
-
-def send_email_tool(phone: str, email: str, subject: str, body: str):
-    """
-    Sends an email to the lead. Update lead's email if provided.
-    """
-    print(f"Tool Triggered: send_email_tool({phone}, {email})")
-    with Session(engine) as session:
-        statement = select(Lead).where(Lead.phone == phone)
-        lead = session.exec(statement).first()
-        
-        # Priority: use provided email, fallback to DB
-        target_email = email or (lead.email if lead else None)
-        
-        if not target_email:
-            return "Error: No email address available for this lead. Please ask the user for their email."
-
-        # Update lead in DB if email was captured on call
-        if lead and email and lead.email != email:
-            lead.email = email
-            lead.notes = (lead.notes or "") + f"\n[AI]: Captured email address: {email}"
-            session.add(lead)
-            session.commit()
-            print(f"Updated lead {lead.name} with email {email}")
-
-        # Generate Premium HTML
-        html_content = get_styled_html(subject, body, lead.name if lead else "Valued Customer")
-        success = send_smtp_email(target_email, subject, body, html_body=html_content)
-        
-        if success:
-            # Log as interaction
-            interaction = Interaction(
-                lead_id=lead.id if lead else 0,
-                type="email",
-                content=f"Sent Email: {subject}",
-                timestamp=datetime.now(timezone.utc)
-            )
-            session.add(interaction)
-
-            # Record Outcome (Pipeline) - Stage: Interest
-            outcome = Outcome(
-                lead_id=lead.id if lead else 0,
-                type="EMAIL_SENT",
-                stage="Interest",
-                potential_value=1000.0, # Target deal size
-                probability=0.0 # 0% chance yet
-            )
-            session.add(outcome)
-            
-            session.commit()
-            return f"Successfully sent email to {target_email}."
-        else:
-            return "Failed to send email. Ensure SMTP settings are configured in .env."
-
-def book_demo_tool(phone: str, time_str: str, notes: str = None):
-    """
-    Books a demo/appointment for the lead.
-    time_str should be a natural language or ISO time.
-    """
-    print(f"Tool Triggered: book_demo_tool({phone}, {time_str})")
-    with Session(engine) as session:
-        statement = select(Lead).where(Lead.phone == phone)
-        lead = session.exec(statement).first()
-        
-        if not lead:
-            return "Error: Lead not found for this phone number."
+    async def dispatch(self, request: Request, call_next):
+        req_id = request.headers.get("X-Request-ID") or generate_request_id()
+        token = request_id_var.set(req_id)
+        start = time.monotonic()
+        try:
+            response = await call_next(request)
+        finally:
+            request_id_var.reset(token)
+        duration_ms = int((time.monotonic() - start) * 1000)
+        response.headers["X-Request-ID"] = req_id
 
         try:
-            # just use now + some logic or the raw string for demo
-            appt_time = datetime.now(timezone.utc) # Mocking the parse
-            new_appt = Appointment(
-                lead_id=lead.id,
-                appointment_time=appt_time,
-                notes=f"[AI booked for: {time_str}]: {notes or ''}"
+            from services.observability import record_response as _rec
+            _rec(request.method, response.status_code)
+        except Exception as e:  # noqa: BLE001
+            logger.warning(
+                "Observability recording failed: %s",
+                str(e),
+                extra={"method": request.method, "status": response.status_code}
             )
-            session.add(new_appt)
-            
-            # Update Lead status
-            lead.status = "Follow-up"
-            session.add(lead)
-            
-            # Log interaction
-            interaction = Interaction(
-                lead_id=lead.id,
-                type="appointment",
-                content=f"Booked Demo for {time_str}",
-                timestamp=datetime.now(timezone.utc)
+
+        if not request.url.path.startswith("/uploads"):
+            logger.info(
+                "%s %s → %d (%dms)",
+                request.method,
+                request.url.path,
+                response.status_code,
+                duration_ms,
             )
-            session.add(interaction)
+        return response
 
-            # Record Outcome (Pipeline) - Stage: Qualification
-            outcome = Outcome(
-                lead_id=lead.id,
-                type="DEMO_BOOKED",
-                stage="Qualification",
-                potential_value=1000.0,
-                probability=0.20 # 20% conversion probability
-            )
-            session.add(outcome)
 
-            session.commit()
-            return f"Successfully booked demo for {lead.name} at {time_str}."
-        except Exception as e:
-            return f"Error booking demo: {str(e)}"
-
-def query_mcp_resource(resource_uri: str):
+class _RLSMiddleware(BaseHTTPMiddleware):
     """
-    Retrieves data from MCP resources using URIs like crm://leads/summary or crm://inventory.
-    Use this to browse data dynamically without specific tools.
+    Extracts company_id from the Bearer JWT (without full auth validation —
+    that still happens in get_current_user) and stores it in the rls_company_id
+    ContextVar BEFORE any FastAPI dependency opens a DB session.
+
+    The after_begin listener in database.py reads this ContextVar and executes
+    SET LOCAL app.current_company_id = <id> so Postgres RLS policies filter rows.
+
+    Unauthenticated paths (health check, webhooks, public quote view) leave the
+    ContextVar as None, which the RLS policy treats as "bypass" — all rows visible.
     """
-    print(f"MCP Triggered: query_mcp_resource({resource_uri})")
-    with Session(engine) as session:
-        if resource_uri == "crm://leads/summary":
-            leads = session.exec(select(Lead)).all()
-            return [l.model_dump() for l in leads]
-        elif resource_uri == "crm://inventory":
-            prods = session.exec(select(Product)).all()
-            return [p.model_dump() for p in prods]
-        elif resource_uri == "crm://appointments":
-            appts = session.exec(select(Appointment)).all()
-            return [a.model_dump() for a in appts]
-        elif resource_uri.startswith("crm://interactions/"):
-            try:
-                lid = int(resource_uri.split("/")[-1])
-                ints = session.exec(select(Interaction).where(Interaction.lead_id == lid).limit(5)).all()
-                return [i.model_dump() for i in ints]
-            except:
-                return "Error: Invalid Lead ID in URI."
-        else:
-            return f"Error: MCP Resource '{resource_uri}' not found or permission denied."
-
-tools = [check_inventory, query_knowledge_base, update_lead_tool, send_email_tool, book_demo_tool, query_mcp_resource]
-
-# Emergency Safety Numbers just for safety or else Twilio will charge $75 as fine.
-BLOCKED_NUMBERS = {"911", "112", "999"}
 
 
+    _BYPASS_PREFIXES = ("/health", "/docs", "/openapi", "/redoc", "/uploads", "/static")
 
-if not (TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN and PHONE_NUMBER_FROM and GEMINI_API_KEY):
-    print("Error: Missing environment variables in .env")
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if any(path.startswith(p) for p in self._BYPASS_PREFIXES):
+            return await call_next(request)
 
-client = Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN)
-# AI Clients
-gemini_client = genai.Client(api_key=GEMINI_API_KEY, http_options={"api_version": "v1alpha"})
-mistral_client = MistralClient(api_key=MISTRAL_API_KEY)
-deepgram_client = DeepgramClient(api_key=DEEPGRAM_API_KEY) if DeepgramClient else None
+        cid = self._extract_company_id(request)
+        if cid is None:
+            return await call_next(request)
 
-from fastapi.middleware.cors import CORSMiddleware
-
-# Enable CORS for Dashboard
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-@app.get("/", response_class=HTMLResponse)
-async def index():
-    return "<h1>Twilio + Gemini Voice Agent</h1><p>Server is running.</p>"
-
-@app.post("/make-call")
-async def make_call(to: str, lead_id: int = None):
-    """Initiates an outbound call to the specified number."""
-    if not DOMAIN:
-        raise HTTPException(status_code=500, detail="DOMAIN environment variable not set")
-    
-    # Safety Check
-    cleaned_number = to.replace("+", "").strip()
-    if cleaned_number in BLOCKED_NUMBERS or to.strip() in BLOCKED_NUMBERS:
-        raise HTTPException(status_code=400, detail="Emergency numbers are blocked for safety.")
-    
-    
-    # Get active telephony engine
-    with Session(engine) as db_session:
-        telephony_setting = db_session.exec(select(SystemSettings).where(SystemSettings.key == "telephony_engine")).first()
-        active_telephony = telephony_setting.value if telephony_setting else "twilio"
-
-    try:
-        if active_telephony == "enablex":
-            # EnableX Outbound
-            print(f"Initiating EnableX Call to: {to}")
-            enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
-            headers = {
-                "Authorization": f"Basic {enablex_auth}",
-                "Content-Type": "application/json"
-            }
-            webhook_url = f"https://{DOMAIN}/enablex-event"
-            if lead_id:
-                 webhook_url += f"?lead_id={lead_id}"
-
-            payload = {
-                "name": "Rio-Assistant-Call",
-                "from": ENABLEX_FROM_NUMBER if ENABLEX_FROM_NUMBER else "917550131495", 
-                "to": to,
-                "event_url": webhook_url
-            }
-            
-            async with aiohttp.ClientSession() as http_session:
-                async with http_session.post("https://api.enablex.io/voice/v1/call", headers=headers, json=payload) as resp:
-                    result = await resp.json()
-                    if resp.status not in [200, 201]:
-                        raise Exception(f"EnableX API Error: {result}")
-                    # Create interaction record for Lead tracking
-                    with Session(engine) as db_session:
-                        interaction = Interaction(
-                            lead_id=lead_id if lead_id else 0,
-                            type="call",
-                            content="Outbound Call (EnableX)",
-                            timestamp=datetime.now(timezone.utc)
-                        )
-                        db_session.add(interaction)
-                        db_session.commit()
-                        db_session.refresh(interaction)
-                        interaction_id = interaction.id
-
-                    return {"message": "EnableX Call initiated", "voice_id": result.get("voice_id"), "interaction_id": interaction_id}
-        else:
-            # Twilio Outbound
-            webhook_url = f"https://{DOMAIN}/incoming-call"
-            if lead_id:
-                webhook_url += f"?lead_id={lead_id}"
-
-            call = client.calls.create(
-                to=to,
-                from_=PHONE_NUMBER_FROM,
-                url=webhook_url
-            )
-            return {"message": "Twilio Call initiated", "call_sid": call.sid}
-    except Exception as e:
-        print(f"Error making call: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/enablex-event")
-async def enablex_event(request: Request, lead_id: int = None):
-    """Handles EnableX call lifecycle events."""
-    data = await request.json()
-    # Log full payload for debugging
-    print(f"📞 EnableX Webhook Data: {json.dumps(data)}")
-    
-    # EnableX uses "state" for call lifecycle events
-    event_type = data.get("event") or data.get("state")
-    voice_id = data.get("voice_id")
-    print(f"📞 EnableX Event Key: {event_type} | Voice ID: {voice_id}")
-
-    if event_type == "connected":
-        # Initiation of media stream
-        enablex_auth = base64.b64encode(f"{ENABLEX_APP_ID}:{ENABLEX_APP_KEY}".encode()).decode()
-        headers = {
-            "Authorization": f"Basic {enablex_auth}",
-            "Content-Type": "application/json"
-        }
-        
-        # Clean domain for WebSocket (remove https://)
-        ws_domain = DOMAIN.replace("https://", "").replace("http://", "")
-        stream_payload = {
-            "wss_host": f"wss://{ws_domain}/enablex-media-stream?voice_id={voice_id}&lead_id={lead_id}",
-            "play_on_connect": True
-        }
-        async with aiohttp.ClientSession() as session:
-            # EnableX uses PUT for starting a stream
-            async with session.put(f"https://api.enablex.io/voice/v1/call/{voice_id}/stream", headers=headers, json=stream_payload) as resp:
-                print(f"🚀 EnableX Stream Request sent (PUT). Status: {resp.status}")
-                
-    return {"status": "ok"}
-
-@app.post("/incoming-call")
-async def incoming_call(request: Request, lead_id: int = None):
-    """Returns TwiML to connect the call to the WebSocket stream."""
-    response = VoiceResponse()
-
-    # Create an interaction record
-    with Session(engine) as session:
-        interaction = Interaction(
-            lead_id=lead_id if lead_id else 0, # 0 for unknown
-            type="call",
-            content="Incoming call",
-            timestamp=datetime.now(timezone.utc)
-        )
-        session.add(interaction)
-        session.commit()
-        session.refresh(interaction) # Get the ID
-        # Read active engine from settings to tailor the prompt
-        engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
-        active_engine = (engine_setting.value if engine_setting else "gemini").strip().lower()
-
-    # Announce based on engine
-    if active_engine == "mistral":
-        response.say("Connected to AI assistant from Yexis Electronics by Mistral. Please start speaking.")
-    elif active_engine == "gemini":
-        response.say("Connected to AI assistant from Yexis Electronics by Google. Please start speaking.")
-    else:
-        response.say("Connected to Yexis Electronics AI assistant. Please start speaking.")
-    connect = Connect()
-    stream = connect.stream(url=f'wss://{request.url.netloc}/media-stream')
-    stream.parameter(name="interaction_id", value=str(interaction.id))
-    response.append(connect)
-    return HTMLResponse(content=str(response), media_type="application/xml")
-
-@app.post("/send-sms")
-async def send_sms(to: str, message: str):
-    """Sends an outbound SMS."""
-    # Safety Check
-    cleaned_number = to.replace("+", "").strip()
-    if cleaned_number in BLOCKED_NUMBERS or to.strip() in BLOCKED_NUMBERS:
-        raise HTTPException(status_code=400, detail="Emergency numbers are blocked.")
-
-    try:
-        msg = client.messages.create(
-            to=to,
-            from_=PHONE_NUMBER_FROM,
-            body=message
-        )
-        return {"message": "SMS sent", "sid": msg.sid}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/incoming-sms")
-async def incoming_sms(request: Request):
-    """Handles incoming SMS webhooks from Twilio."""
-    form_data = await request.form()
-    sender = form_data.get("From")
-    body = form_data.get("Body")
-    
-    print(f"Received SMS from {sender}: {body}")
-    
-    # Simple Auto-Reply
-    response = MessagingResponse()
-    response.message(f"Thanks for your message: '{body}'. Gemini Voice Agent received it.")
-    
-    return HTMLResponse(content=str(response), media_type="application/xml")
-
-@app.post("/leads/upload")
-async def upload_leads(file: UploadFile = File(...), session: Session = Depends(get_session)):
-    """Uploads an Excel or CSV file of leads."""
-    contents = await file.read()
-    
-    try:
-        if file.filename.endswith('.csv'):
-            df = pd.read_csv(io.BytesIO(contents))
-        elif file.filename.endswith(('.xls', '.xlsx')):
-            df = pd.read_excel(io.BytesIO(contents))
-        else:
-            raise HTTPException(status_code=400, detail="Invalid file format. Please upload .csv or .xlsx")
-        
-        # Standardize columns (basic mapping)
-        df.columns = [c.lower().strip() for c in df.columns]
-        
-        leads_added = 0
-        errors = []
-        
-        for index, row in df.iterrows():
-            try:
-                # Basic validation
-                name = row.get("name")
-                phone = str(row.get("phone", "")).replace(".0", "").strip() 
-                email = row.get("email") if "email" in row else None
-                notes = row.get("notes") if "notes" in row else None
-                
-                if not name or not phone:
-                    continue
-                    
-                # Duplicate check
-                existing = session.exec(select(Lead).where(Lead.phone == phone)).first()
-                if not existing:
-                    new_lead = Lead(
-                        name=name,
-                        phone=phone,
-                        email=email,
-                        notes=notes,
-                        source="Excel Upload",
-                        status="New"
-                    )
-                    session.add(new_lead)
-                    leads_added += 1
-            except Exception as e:
-                errors.append(f"Row {index}: {e}")
-                
-        session.commit()
-        return {"message": f"Successfully added {leads_added} leads.", "errors": errors}
-
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error processing file: {str(e)}")
-
-class ApolloSearch(SQLModel):
-    keywords: str
-
-@app.post("/leads/fetch-apollo")
-async def fetch_apollo(search: ApolloSearch, session: Session = Depends(get_session)):
-    """Fetches leads from Apollo.io (Organizations) and adds them to DB."""
-    if not APOLLO_API_KEY:
-        raise HTTPException(status_code=500, detail="APOLLO_API_KEY not configured.")
-
-    url = "https://api.apollo.io/v1/organizations/search"
-    headers = {
-        "Content-Type": "application/json",
-        "Cache-Control": "no-cache",
-        "X-Api-Key": APOLLO_API_KEY
-    }
-    payload = {
-        "q_organization_name": search.keywords,
-        "page": 1,
-        "per_page": 10 
-    }
-
-    try:
-        response = requests.post(url, headers=headers, json=payload)
-        data = response.json()
-        
-        if response.status_code != 200:
-             raise HTTPException(status_code=response.status_code, detail=data.get("error", "Apollo API Error"))
-
-        organizations = data.get("organizations", [])
-        leads_added = 0
-        
-        for org in organizations:
-            # Map Organization to Lead
-            # Name -> Name, Phone -> Phone
-            name = org.get("name")
-            phone = org.get("phone_number") or "N/A" # Many orgs might miss phone
-            
-            if not name or phone == "N/A":
-                continue
-
-            # Basic Duplicate Check
-            existing = session.exec(select(Lead).where(Lead.phone == phone)).first()
-            if not existing:
-                new_lead = Lead(
-                    name=name,
-                    phone=phone,
-                    email=None,
-                    notes=f"Apollo Import: {org.get('primary_domain')}",
-                    source="Apollo API",
-                    status="New"
-                )
-                session.add(new_lead)
-                leads_added += 1
-        
-        session.commit()
-        return {"message": f"Successfully imported {leads_added} leads from Apollo.", "total_found": len(organizations)}
-
-    except Exception as e:
-        print(f"Apollo Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.get("/leads", response_model=list[Lead])
-async def get_leads(session: Session = Depends(get_session)):
-    """Fetch all leads."""
-    return session.exec(select(Lead)).all()
-
-@app.get("/inventory", response_model=list[Product])
-async def get_inventory(session: Session = Depends(get_session)):
-    """Fetch all products."""
-    return session.exec(select(Product)).all()
-
-@app.post("/inventory", response_model=Product, dependencies=[Depends(RoleChecker(["admin"]))])
-async def upsert_product(product: Product, session: Session = Depends(get_session)):
-    """Add or update a product."""
-    if product.id:
-        db_p = session.get(Product, product.id)
-        if db_p:
-            for k, v in product.dict(exclude_unset=True).items():
-                setattr(db_p, k, v)
-        else:
-            db_p = Product.model_validate(product)
-    else:
-        db_p = Product.model_validate(product)
-        
-    session.add(db_p)
-    session.commit()
-    session.refresh(db_p)
-    return db_p
-
-@app.delete("/inventory/{product_id}", dependencies=[Depends(RoleChecker(["admin"]))])
-async def delete_product(product_id: int, session: Session = Depends(get_session)):
-    """Delete a product."""
-    db_p = session.get(Product, product_id)
-    if not db_p:
-        raise HTTPException(status_code=404, detail="Product not found")
-    session.delete(db_p)
-    session.commit()
-    return {"message": "Product deleted"}
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize Rio's persona prompt in the database on startup."""
-    from sqlmodel import Session
-    session = Session(engine)
-    try:
-        # Check if Rio's system instruction already exists
-        existing = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
-        if not existing:
-            # Initialize with Rio's persona
-            db_setting = SystemSettings(key="system_instruction", value=RIO_PERSONA_PROMPT)
-            session.add(db_setting)
-            session.commit()
-            print("✓ Rio's system prompt initialized in database")
-        else:
-            print("✓ Rio's system prompt already exists in database")
-    except Exception as e:
-        print(f"⚠️ Startup initialization error: {e}")
-    finally:
-        session.close()
-
-@app.get("/settings")
-async def get_settings(session: Session = Depends(get_session)):
-    """Fetch system settings."""
-    instruction = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
-    engine = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
-    telephony = session.exec(select(SystemSettings).where(SystemSettings.key == "telephony_engine")).first()
-    verbosity = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
-    return {
-        "system_instruction": instruction.value if instruction else "",
-        "voice_engine": engine.value if engine else "gemini",
-        "telephony_engine": telephony.value if telephony else "twilio",
-        "ai_verbosity": verbosity.value if verbosity else "2"
-    }
-
-@app.patch("/settings", dependencies=[Depends(RoleChecker(["admin"]))])
-async def update_settings(data: dict, session: Session = Depends(get_session)):
-    """Update system settings."""
-    for key, value in data.items():
-        db_s = session.exec(select(SystemSettings).where(SystemSettings.key == key)).first()
-        if not db_s:
-            db_s = SystemSettings(key=key, value=str(value))
-        else:
-            db_s.value = str(value)
-        session.add(db_s)
-    
-    session.commit()
-    return {"message": "Settings updated"}
-
-
-class TelephonyCommunicator:
-    async def receive(self): pass
-    async def send_media(self, b64_audio): pass
-    async def clear_audio_buffer(self): pass
-
-class TwilioCommunicator(TelephonyCommunicator):
-    def __init__(self, websocket):
-        self.websocket = websocket
-        self.stream_sid = None
-    async def receive(self):
+        token = rls_company_id.set(cid)
         try:
-            async for message in self.websocket.iter_text():
-                data = json.loads(message)
-                yield data
+            return await call_next(request)
+        finally:
+            rls_company_id.reset(token)
+
+    @staticmethod
+    def _extract_company_id(request: Request) -> int | None:
+
+        from auth import SESSION_COOKIE_NAME
+        token = request.cookies.get(SESSION_COOKIE_NAME)
+        if not token:
+            auth = request.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth[7:]
+        if not token:
+            return None
+        try:
+            import jwt as _jwt
+            from auth import SECRET_KEY, ALGORITHM
+            payload = _jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+            cid = payload.get("company_id")
+            return int(cid) if cid else None
         except Exception:
-            yield {"event": "stop"}
-    async def send_media(self, b64_audio):
-        if self.stream_sid:
-            await self.websocket.send_json({"event": "media", "streamSid": self.stream_sid, "media": {"payload": b64_audio}})
-    
-    async def clear_audio_buffer(self):
-        if self.stream_sid:
-            logger.info(f"🚫 [Twilio] Clearing audio buffer for StreamSid: {self.stream_sid}")
-            await self.websocket.send_json({"event": "clear", "streamSid": self.stream_sid})
+            return None
 
-class EnableXCommunicator(TelephonyCommunicator):
-    def __init__(self, websocket):
-        self.websocket = websocket
-    async def receive(self):
-        try:
-            async for message in self.websocket.iter_text():
-                # EnableX often sends JSON with "data" key as base64
-                # We need to verify if it's text or binary. iter_text() works for text.
-                print(f"⏬ EnableX WS Received: {message[:100]}...")
-                try:
-                    data = json.loads(message)
-                    # Map to Twilio-like events for minimal pipeline change
-                    if "data" in data:
-                        yield {"event": "media", "media": {"payload": data["data"]}}
-                    elif data.get("event") == "stop" or data.get("state") == "disconnected":
-                        yield {"event": "stop"}
-                except json.JSONDecodeError:
-                    # If it's not JSON, maybe it's raw binary? But iter_text was used.
-                    print("⚠️ EnableX WS: Message is not valid JSON")
-                    yield {"event": "media", "media": {"payload": base64.b64encode(message.encode()).decode() if isinstance(message, str) else base64.b64encode(message).decode()}}
-        except Exception as e:
-            print(f"❌ EnableX WS Receive Error: {e}")
-            yield {"event": "stop"}
-    async def send_media(self, b64_audio):
-        # EnableX expects raw binary or JSON with data
-        # Verification: EnableX Voice Server Media Stream API docs
-        payload = {"event": "media", "data": b64_audio}
-        print(f"⏫ EnableX WS Sending Media: {len(b64_audio)} chars")
-        await self.websocket.send_json(payload)
 
-    async def clear_audio_buffer(self):
-        # EnableX equivalent for clear/flush. 
-        # Research needed for specific EnableX clear event if available.
-        # For now, we send a stop/clear event if supported.
-        payload = {"event": "clear"} 
-        print(f"🚫 EnableX WS Clearing Buffer")
-        await self.websocket.send_json(payload)
+class _CSRFMiddleware(BaseHTTPMiddleware):
+    """Double-submit-cookie CSRF protection for cookie-authenticated requests.
 
-async def gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
-    """Handles the Native Multimodal Live API logic for Gemini."""
-    
-    logger.info(f"🤖 [LLM] Selected: GEMINI 2.0 Flash")
-    logger.info(f"🤖 [LLM] Interaction ID: {interaction_id}")
-    
-    model = "models/gemini-2.0-flash-exp"
-    config = {
-        "response_modalities": ["AUDIO"],
-        "system_instruction": types.Content(parts=[types.Part(text=dynamic_instruction)]),
-        "speech_config": {
-            "voice_config": {"prebuilt_voice_config": {"voice_name": "Puck"}},
-        },
-        "tools": [check_inventory, query_knowledge_base, update_lead_tool, send_email_tool, book_demo_tool, query_mcp_resource]
-    }
+    The hard work is in `auth.verify_csrf_invariants` so the decision is pure
+    and unit-testable. This middleware is just a dispatcher that returns the
+    403 response when the invariants fail.
 
-    try:
-        async with gemini_client.aio.live.connect(model=model, config=config) as gemini_session:
-            async def receive_from_telephony():
-                nonlocal interaction_id
-                downstream_state = None 
-                async for data in communicator.receive():
-                    if data["event"] == "start":
-                        if isinstance(communicator, TwilioCommunicator):
-                            communicator.stream_sid = data["start"]["streamSid"]
-                            custom_params = data["start"].get("customParameters", {})
-                            if not interaction_id: interaction_id = custom_params.get("interaction_id")
-                    elif data["event"] == "media":
-                        media_payload = data["media"]["payload"]
-                        chunk = base64.b64decode(media_payload)
-                        pcm_8k = audioop.ulaw2lin(chunk, 2)
-                        pcm_16k, downstream_state = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, downstream_state)
-                        await gemini_session.send(input={"data": pcm_16k, "mime_type": "audio/pcm"}, end_of_turn=False)
-                    elif data["event"] == "stop":
-                        break
+    Layering (in the pure function):
+      1. Safe methods (GET/HEAD/OPTIONS) pass — no state change possible.
+      2. Paths in CSRF_BYPASS_PREFIXES pass (login, public token routes, webhooks).
+      3. No session cookie = bearer-only client = CSRF N/A (attacker can't set
+         Authorization header any more than X-CSRF-Token).
+      4. Otherwise: require header to match cookie via `secrets.compare_digest`.
+    """
 
-            async def send_to_telephony():
-                upstream_state = None
-                try:
-                    async for response in gemini_session.receive():
-                        if response.server_content:
-                            if response.server_content.interrupted:
-                                logger.info("🛑 [Gemini] User interrupted! Clearing telephony buffer.")
-                                await communicator.clear_audio_buffer()
-                                # Reset upstream state to avoid distortion on next turn
-                                upstream_state = None
-                                continue
+    async def dispatch(self, request: Request, call_next):
+        from csrf import (
+            CSRF_COOKIE_NAME,
+            CSRF_HEADER_NAME,
+            SESSION_COOKIE_NAME,
+            verify_csrf_invariants,
+        )
 
-                            if response.server_content.model_turn:
-                                for part in response.server_content.model_turn.parts:
-                                    if getattr(part, 'function_call', None):
-                                        fc = part.function_call
-                                        result = await run_tool(fc.name, fc.args, transcript_accumulator, interaction_id)
-                                        await gemini_session.send(input=types.LiveClientToolResponse(
-                                            function_responses=[types.FunctionResponse(name=fc.name, id=fc.id, response={"result": result})]
-                                        ))
-                                    
-                                    if getattr(part, 'inline_data', None):
-                                        audio_data = part.inline_data.data 
-                                        pcm_8k, upstream_state = audioop.ratecv(audio_data, 2, 1, 24000, 8000, upstream_state)
-                                        mulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                        b64_audio = base64.b64encode(mulaw_8k).decode("utf-8")
-                                        await communicator.send_media(b64_audio)
-                                    
-                                    if getattr(part, 'text', None):
-                                        transcript_accumulator.append(f"Rio: {part.text}")
-                                        save_transcript(interaction_id, transcript_accumulator)
-                except Exception as e:
-                    print(f"Telephony Send Error: {e}")
+        ok, reason = verify_csrf_invariants(
+            method=request.method,
+            path=request.url.path,
+            session_cookie=request.cookies.get(SESSION_COOKIE_NAME),
+            csrf_cookie=request.cookies.get(CSRF_COOKIE_NAME),
+            csrf_header=(
+                request.headers.get(CSRF_HEADER_NAME)
+                or request.headers.get(CSRF_HEADER_NAME.lower())
+            ),
+        )
+        if not ok:
+            from starlette.responses import JSONResponse
+            return JSONResponse(status_code=403, content={"detail": reason})
+        return await call_next(request)
 
-            await asyncio.gather(receive_from_telephony(), send_to_telephony())
-    except Exception as e:
-        print(f"Gemini Pipeline Error: {e}")
 
-def apply_verbosity_rules(instruction: str, verbosity: str) -> str:
-    """Modifies the instruction based on verbosity level."""
-    if verbosity == "1": # Ultra-Concise
-        return instruction + "\n\n**STRICT BREVITY RULE**: Reply in EXACTLY ONE SHORT SENTENCE OR EVEN ONE WORD IF POSSIBLE. Be extremely brief. For example, if asked for price, just say the price. If asked to confirm, just say 'Done' or 'Confirmed'. No fluff, no filler."
-    elif verbosity == "3": # Detailed
-        return instruction + "\n\n**VERBOSITY RULE**: Provide detailed and elaborated responses. Explain things thoroughly."
-    else: # Balanced (Default/2)
-        return instruction + "\n\n**VERBOSITY RULE**: Keep your responses concise (1-3 sentences)."
+def get_company_setting_value(session: Session, company_id: int, key: str) -> str | None:
+    from credentials_service import get_company_setting_value as _get_value
 
-@app.websocket("/enablex-media-stream")
-async def handle_enablex_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
-    """Handles EnableX WebSocket media stream."""
+    return _get_value(session, company_id, key)
+
+
+def resolve_call_context(session: Session, user_id: str | None, lead_id: str | None) -> tuple[User | None, Lead | None]:
+    """Resolve the User + Lead bound to a voice call.
+
+    Resolution order:
+      1. Explicit user_id wins.
+      2. Else fall back to the lead's owner_user_id (same tenant guaranteed).
+
+    Never picks an arbitrary first User — that would cross tenants.  Callers
+    are expected to reject the WebSocket when target_user is None.
+    """
+    target_user = None
+    lead = None
+
+    if user_id and user_id.isdigit() and int(user_id) != 0:
+        target_user = session.get(User, int(user_id))
+
+    if lead_id and lead_id.isdigit() and int(lead_id) != 0:
+        lead = session.get(Lead, int(lead_id))
+        if lead and not target_user and lead.owner_user_id:
+            target_user = session.get(User, lead.owner_user_id)
+
+
+    if target_user and lead and target_user.company_id != lead.company_id:
+        logger.warning(
+            "[Pipeline] tenant mismatch user.company=%s lead.company=%s — dropping lead",
+            target_user.company_id, lead.company_id,
+        )
+        lead = None
+
+    return target_user, lead
+
+
+def ensure_interaction(
+    session: Session,
+    target_user: User | None,
+    lead: Lead | None,
+    interaction_id: str | None,
+    source: str,
+) -> str:
+
+    if interaction_id and interaction_id.isdigit() and int(interaction_id) != 0:
+        existing = session.get(Interaction, int(interaction_id))
+        if existing:
+            return interaction_id
+
+
+    query = select(Interaction).where(
+        Interaction.type == "call",
+        Interaction.status == "active",
+    )
+    if target_user:
+        query = query.where(Interaction.user_id == target_user.id)
+    if lead:
+        query = query.where(Interaction.lead_id == lead.id)
+    recent = session.exec(query.order_by(Interaction.id.desc()).limit(1)).first()
+    if recent:
+        return str(recent.id)
+
+
+    interaction = Interaction(
+        company_id=target_user.company_id if target_user else (lead.company_id if lead else 0),
+        lead_id=lead.id if lead else None,
+        user_id=target_user.id if target_user else None,
+        type="call",
+        channel="call",
+        direction="outbound",
+        source=source,
+        content="Voice Call",
+        status="active",
+        session_id=interaction_id,
+        started_at=utc_now(),
+        created_by=target_user.id if target_user else None,
+        updated_by=target_user.id if target_user else None,
+    )
+    session.add(interaction)
+    session.commit()
+    session.refresh(interaction)
+    return str(interaction.id)
+
+
+def _parse_optional_int(value: str | None) -> int | None:
+    if value and value.isdigit() and int(value) != 0:
+        return int(value)
+    return None
+
+
+async def run_media_stream(websocket: WebSocket, source: str) -> None:
     await websocket.accept()
-    voice_id = websocket.query_params.get("voice_id")
+
+
+    req_id = websocket.headers.get("X-Request-ID") or generate_request_id()
+    request_id_var.set(req_id)
+    logger.info("WS connect [%s] source=%s", req_id, source)
+
+    user_id = websocket.query_params.get("user_id")
     lead_id = websocket.query_params.get("lead_id")
-    
-    # Find interaction_id for this voice_id/lead_id
-    interaction_id = None
-    if lead_id:
-        with Session(engine) as db_session:
-            # Get latest interaction for this lead
-            db_i = db_session.exec(select(Interaction).where(Interaction.lead_id == int(lead_id)).order_by(Interaction.timestamp.desc())).first()
-            if db_i: interaction_id = db_i.id
+    raw_interaction_id = websocket.query_params.get("interaction_id")
+    call_task_id = websocket.query_params.get("call_task_id")
+    agent_id = websocket.query_params.get("agent_id")
 
-    transcript_accumulator = []
-    
-    settings = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
-    dynamic_instruction = settings.value if settings else "You are a helpful assistant."
-    engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
-    active_engine = engine_setting.value if engine_setting else "gemini"
-    
-    verbosity_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
-    verbosity = verbosity_setting.value if verbosity_setting else "2"
-    dynamic_instruction = apply_verbosity_rules(dynamic_instruction, verbosity)
-    
-    print(f"EnableX connected to media-stream WS | Voice ID: {voice_id} | Interaction: {interaction_id} | Verbosity: {verbosity}")
-    
-    communicator = EnableXCommunicator(websocket)
-    if active_engine == "mistral":
-        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
-    else:
-        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
 
-def clean_voice_text(text: str, max_chars: int = 300) -> str:
-    """Removes markdown and truncates text for voice output."""
-    if not text:
-        return ""
-    
-    # Remove markdown bold/italic/headers
-    text = re.sub(r'[*#_~`>]', '', text)
-    
-    # Remove links
-    text = re.sub(r'\[.*?\]\(.*?\)', '', text)
-    
-    # Clean whitespace
-    text = " ".join(text.split())
-    
-    # Truncate
-    if len(text) > max_chars:
-        text = text[:max_chars].rsplit(' ', 1)[0] + "..."
-        
-    return text.strip()
-
-async def run_tool(name, args, transcript_accumulator, interaction_id):
-    """Shared tool runner - uses unified MCP tools for both Gemini and Mistral."""
-    
-    logger.info(f"📋 [MCP] Calling tool: {name}")
-    logger.debug(f"📋 [MCP] Arguments: {args}")
-    
-    # Use unified MCP tool executor
-    result = await execute_mcp_tool(name, args)
-    
-    logger.info(f"📋 [MCP] Tool result: {result}")
-    
-    if isinstance(result, dict) and "error" not in result:
-        transcript_accumulator.append(f"[System]: Executed {name} -> Success")
-    else:
-        transcript_accumulator.append(f"[System]: Executed {name} -> {result}")
-    
-    save_transcript(interaction_id, transcript_accumulator)
-    return result
-
-def save_transcript(interaction_id, transcript_accumulator):
-    """Saves transcript to DB."""
-    if interaction_id:
+    replayed_frames: list[str] = []
+    if any(v in (None, "", "0") for v in (user_id, lead_id, raw_interaction_id)):
+        import asyncio as _asyncio
+        import json as _json
         try:
-            with Session(engine) as db_session:
-                db_i = db_session.get(Interaction, int(interaction_id))
-                if db_i:
-                    transcript_text = "\n".join(transcript_accumulator)
-                    db_i.transcript = transcript_text
-                    db_session.add(db_i)
-                    db_session.commit()
-                    print(f"✅ Transcript saved for Interaction {interaction_id} ({len(transcript_accumulator)} lines, {len(transcript_text)} chars)")
-                else:
-                    print(f"⚠️ Interaction {interaction_id} not found in DB for transcript saving.")
-        except Exception as e:
-            print(f"❌ DB Error saving transcript: {e}")
+            for _ in range(5):
+                raw = await _asyncio.wait_for(websocket.receive_text(), timeout=5.0)
+                replayed_frames.append(raw)
+                try:
+                    data = _json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    continue
+                event = data.get("event")
+                if event == "start":
+                    custom = (data.get("start") or {}).get("customParameters") or {}
+                    user_id = user_id or str(custom.get("user_id") or "") or None
+                    lead_id = lead_id or str(custom.get("lead_id") or "") or None
+                    raw_interaction_id = raw_interaction_id or str(custom.get("interaction_id") or "") or None
+                    call_task_id = call_task_id or str(custom.get("call_task_id") or "") or None
+                    agent_id = agent_id or str(custom.get("agent_id") or "") or None
+                    break
+                if event == "media":
+                    # Already past start without seeing customParameters — shouldn't happen with current TwiML, but bail to avoid eating audio frames into the buffer.
+                    break
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[Pipeline] failed to read start event for context: %s", exc)
+
+    # Replay-aware wrapper so consumed frames still reach the pipeline in order.
+    if replayed_frames:
+        class _ReplayWS:
+            """Minimal proxy that yields buffered frames first, then delegates
+            to the real websocket.  Only iter_text() is overridden; everything
+            else (send_*, accept, close, query_params, headers, client_state,
+            application_state) passes through to the real ws.
+            """
+            def __init__(self, real, frames):
+                self._real = real
+                self._frames = list(frames)
+
+            async def iter_text(self):
+                while self._frames:
+                    yield self._frames.pop(0)
+                async for msg in self._real.iter_text():
+                    yield msg
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+        websocket = _ReplayWS(websocket, replayed_frames)
+
+    with Session(engine) as session:
+        target_user, lead = resolve_call_context(session, user_id, lead_id)
+        # If still no user but we have an interaction_id, recover from the already-persisted Interaction row (created by /make-call in an authenticated context — same-tenant guarantee).
+        if not target_user and raw_interaction_id and raw_interaction_id.isdigit() and int(raw_interaction_id) != 0:
+            db_interaction = session.get(Interaction, int(raw_interaction_id))
+            if db_interaction and db_interaction.user_id:
+                target_user = session.get(User, db_interaction.user_id)
+                if target_user and not lead and db_interaction.lead_id:
+                    lead = session.get(Lead, db_interaction.lead_id)
+
+        if not target_user:
+            logger.warning(
+                "[Pipeline] rejecting call: no target_user resolvable (user_id=%s lead_id=%s interaction_id=%s source=%s)",
+                user_id, lead_id, raw_interaction_id, source,
+            )
+            await websocket.close(code=4401)
+            return
+
+        interaction_id = ensure_interaction(session, target_user, lead, raw_interaction_id, source)
+        resolved_runtime = resolve_agent_for_call(
+            session=session,
+            company_id=target_user.company_id,
+            user=target_user,
+            agent_id=_parse_optional_int(agent_id),
+            interaction_id=_parse_optional_int(interaction_id),
+            call_task_id=_parse_optional_int(call_task_id),
+        )
+        log_voice_agent_event(
+            session=session,
+            company_id=target_user.company_id,
+            agent_id=resolved_runtime.agent.id,
+            interaction_id=_parse_optional_int(interaction_id),
+            call_task_id=_parse_optional_int(call_task_id),
+            event_type="call_started",
+            summary="Voice media stream connected",
+            payload={
+                "source": source,
+                "prompt_version_id": resolved_runtime.prompt_version.id,
+                "stt_provider": resolved_runtime.stt_provider,
+                "llm_provider": resolved_runtime.llm_provider,
+                "tts_provider": resolved_runtime.tts_provider,
+            },
+        )
+
+        # If lead wasn't resolved from WebSocket params (e.g., lead_id=0), fetch it from the reused outbound interaction so lead context and latency logging get the correct lead_id.
+        if not lead:
+            try:
+                db_interaction = session.get(Interaction, int(interaction_id))
+                if db_interaction and db_interaction.lead_id:
+                    lead = session.get(Lead, db_interaction.lead_id)
+            except (ValueError, TypeError) as _e:
+                # interaction_id wasn't an int - rare but possible from old
+                # webhook payloads. Lead context will be missing for this call.
+                logger.warning(
+                    "Could not resolve lead from interaction_id=%r: %s",
+                    interaction_id, _e,
+                )
+
+        lead_context = get_comprehensive_lead_context(session, lead.id) if lead else None
+
+        company = session.get(Company, target_user.company_id) if target_user else None
+        company_name = company.name if company else "Rio CRM"
+
+        system_prompt = resolved_runtime.system_prompt or "You are Rio, a concise inside-sales voice assistant."
+
+        # Append a standard closing instruction to every call so Rio always asks for verbal feedback before hanging up.
+        system_prompt += (
+            "\n\n### CALL CLOSING — FEEDBACK REQUEST\n"
+            "Near the end of every call where the customer is engaged, before saying goodbye, "
+            "ask for brief verbal feedback: "
+            "'Before we wrap up — on a scale of 1 to 5, how would you rate your experience speaking with me today?' "
+            "Wait for their response, thank them warmly, and then close the call naturally. "
+            "If they skip or don't give a number, don't push — simply say goodbye.\n\n"
+            "AMBIGUOUS RATING HANDLING: If the customer gives two numbers ('one or five'), "
+            "a range ('three to four'), or anything not a single integer, do NOT assume a value. "
+            "Politely ask them to pick one: 'Just to make sure I got it right — would that be a 1 or a 5?' "
+            "If they still don't give a single number, do not apologize or react as if you got a low score; "
+            "thank them and close the call. Their qualitative words alone are valuable."
+        )
+
+        system_prompt += (
+            "\n\n### COMMUNICATION TOOL GUARDRAILS\n"
+            "If the customer asks you to send details by email or WhatsApp, you must use the send_communication tool "
+            "before saying the message was sent, queued, shared, or scheduled.\n"
+            "Never claim that an email or WhatsApp was sent unless a tool result in this call confirms it.\n"
+            "If the customer asked for both email and WhatsApp, call send_communication with both channels. "
+            "Do not silently downgrade to one channel.\n"
+            "After the tool returns, describe only the channels that actually succeeded or were queued. "
+            "If one channel failed, say that plainly and do not imply both worked.\n"
+            "If the customer is still clarifying what to send, ask one short clarification question instead of promising delivery."
+        )
+        system_prompt += (
+            "\n\n### LIVE CALL BEHAVIOR\n"
+            "Respect the configured AI_VERBOSITY level for length. Even at the highest verbosity, keep spoken replies easy to follow.\n"
+            "Ask at most one question before pausing for the customer.\n"
+            "Do not speak in numbered menus, multi-option lists, or long branching choices unless the customer explicitly asks for options.\n"
+            "For simple confirmations, answer directly in one short sentence and stop.\n"
+            "If the customer interrupts, changes topic, says 'move on', 'other product', 'get to the point', or similar, acknowledge the switch and do not repeat the previous product summary.\n"
+            "If the customer asks whether you can be heard, whether you are there, or says the line dropped, answer that directly first.\n"
+            "When discussing appointments, reminders, or reschedules, use the lead's local timezone from system context. If tool output or stored data is in ISO/UTC form, translate it into the lead's local time before speaking.\n"
+            "Do not invent product specs, availability, comparisons, pricing, or version support from memory. Use get_product_info first when giving product details or comparing models. If the catalog does not confirm it, say you need to check.\n"
+            "Never continue speaking in long multi-part lists unless the customer explicitly asked for a detailed walkthrough.\n"
+            "If the customer uses slang, jokes, or off-topic phrases, do not mirror them. Reply professionally and either steer back to the request or close politely."
+        )
+        system_prompt += (
+            "\n\n### CONVERSATIONAL PACING\n"
+            "You must sound natural and unhurried. Speak at a calm, measured pace. "
+            "Do NOT deliver long blocks of text. If you have a lot of information, give a 1-sentence summary first and ask if the customer wants more details. "
+            "Always pause and listen after making a point. Give the customer space to speak. "
+            "Avoid being aggressive or pushy; your goal is a helpful, natural conversation."
+        )
+        system_prompt += (
+            "\n\n### FOLLOW-UP AND SCHEDULING\n"
+            "Do not promise that a follow-up call, reminder, or future outreach has been scheduled unless a booking or scheduling tool result in this call confirms it.\n"
+            "If no scheduling tool was used, say you can note the preference or that someone will follow up, but do not claim the event is already scheduled."
+        )
+        verbosity_level = resolved_runtime.ai_verbosity or "2"
+        verbosity_rules = {
+            "1": "ULTRA-CONCISE: Usually one short sentence. No lists, no multiple options, no filler, no repeated restatement.",
+            "2": "BALANCED: Usually 1-2 short sentences. Keep spoken replies compact, direct, and easy to interrupt.",
+            "3": "DETAILED: Up to 3 short sentences when needed. Still avoid rambling, menus, and long spoken lists unless explicitly requested.",
+        }
+        system_prompt += f"\n\n### VERBOSITY\n{verbosity_rules.get(str(verbosity_level), verbosity_rules['2'])}"
+
+        stt_provider = resolved_runtime.stt_provider
+        llm_provider = resolved_runtime.llm_provider
+        tts_provider = resolved_runtime.tts_provider
+
+        SARVAM_LANGUAGE_CODES = {
+            "hi": "hi-IN", "ta": "ta-IN", "te": "te-IN",
+            "kn": "kn-IN", "mr": "mr-IN", "gu": "gu-IN",
+            "bn": "bn-IN", "pa": "pa-IN", "ml": "ml-IN",
+            "en": "en-IN",
+        }
+        lead_language = (lead.preferred_language or "en").lower().split("-")[0] if lead else "en"
+        lead_language_code = SARVAM_LANGUAGE_CODES.get(lead_language, "en-IN")
+
+        if lead_language in SARVAM_LANGUAGE_CODES and lead_language != "en":
+            logger.info(
+                "[Pipeline] Language override: lead=%s lang=%s → switching STT+TTS to Sarvam",
+                lead.id if lead else "?", lead_language_code,
+            )
+            stt_provider = "sarvam"
+            tts_provider = "sarvam"
+            # Inject language into system prompt so LLM responds in the right language
+            system_prompt = (
+                f"[LANGUAGE INSTRUCTION: Respond exclusively in {lead_language_code.split('-')[0].upper()} "
+                f"(language code: {lead_language_code}). Do not switch to English unless the lead does.]\n\n"
+                + system_prompt
+            )
+
+        if tts_provider == "mistral":
+            system_prompt += (
+                "\n\n### VOICE-SAFE WORD CHOICE\n"
+                "When describing products, avoid superlatives and slang that a naive "
+                "content filter could misread as adult or aggressive: never use "
+                "'hot', 'hottest', 'sexy', 'steamy', 'juicy', 'fire', 'killer', "
+                "'sick', 'wild', 'crazy'. "
+                "Prefer: 'top-selling', 'popular', 'best-rated', 'most-loved', "
+                "'in-demand', 'trending', 'bestseller', 'flagship', 'standout'. "
+                "This keeps speech synthesis from being blocked mid-call."
+            )
+
+        communicator = telephony.get_communicator_for_source(source, websocket)
+        transcript_accumulator: list[str] = []
+        pipeline = VoicePipeline(
+            communicator=communicator,
+            interaction_id=interaction_id,
+            system_prompt=system_prompt,
+            transcript_accumulator=transcript_accumulator,
+            session=session,
+            stt_provider=stt_provider,
+            llm_provider=llm_provider,
+            tts_provider=tts_provider,
+            company_name=company_name,
+            user=target_user,
+            lead_context=lead_context,
+            lead_id=lead.id if lead else None,
+            lead_language=lead_language_code,
+            runtime_json=resolved_runtime.runtime.runtime_json if resolved_runtime.runtime else {},
+            agent_id=resolved_runtime.agent.id,
+            audio_encoding="linear16" if source == "browser" else "pcm_mulaw",
+            audio_sample_rate=16000 if source == "browser" else 8000,
+        )
+
+        try:
+            _ct_conn = (
+                session.get(CallTask, int(call_task_id))
+                if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0
+                else None
+            )
+            call_status_broadcaster.publish(
+                company_id=target_user.company_id if target_user else 0,
+                campaign_id=_ct_conn.campaign_id if _ct_conn else None,
+                call_task_id=int(call_task_id) if call_task_id and call_task_id.isdigit() else None,
+                interaction_id=interaction_id,
+                lead_id=lead.id if lead else None,
+                lead_name=lead.name if lead else None,
+                status="connected",
+            )
+        except Exception:
+            # Broadcasting is best-effort - the live dashboard will miss this
+            # status, but the call itself must not fail. Log the full stack
+            # so we know when the broadcaster is broken.
+            logger.exception("call_status_broadcaster.publish(connected) failed")
+
+        max_call_duration = app_settings.MAX_CALL_DURATION_SECONDS
+        _ended_outcome: str | None = None
+        call_status = "completed"
+        try:
+            await asyncio.wait_for(pipeline.run(), timeout=max_call_duration)
+        except asyncio.TimeoutError:
+            # Call exceeded max duration — treat as completed so transcript/outcome are saved normally
+            logger.warning(
+                "Call interaction %s exceeded max duration (%ds), terminating.",
+                interaction_id,
+                max_call_duration,
+            )
+        except Exception as exc:
+            call_status = "failed"
+            logger.error("Voice pipeline failed for interaction %s: %s", interaction_id, exc, exc_info=True)
+        finally:
+            pipeline.flush_transcript()
+            db_interaction = session.get(Interaction, int(interaction_id)) if interaction_id.isdigit() else None
+            if db_interaction:
+                db_interaction.status = "completed" if call_status == "completed" else "failed"
+                db_interaction.ended_at = utc_now()
+                db_interaction.updated_by = target_user.id if target_user else None
+                session.add(db_interaction)
+                session.commit()
+
+            # Skip task-update path when call_task_id is the sentinel "0" (no real CallTask — manual /make-call).  classify_outcome_from_transcript is sync (returns dict), do NOT await it.
+            if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and target_user:
+                try:
+                    transcript = db_interaction.transcript if db_interaction else None
+                    raw_status = "completed" if call_status == "completed" else "failed"
+                    outcome_confidence = None
+                    if call_status == "completed" and transcript:
+                        classification = classify_outcome_from_transcript(None, transcript)
+                        raw_status = classification["normalized_outcome"]
+                        outcome_confidence = classification.get("confidence")
+
+                    _ended_outcome = raw_status
+                    apply_call_outcome(
+                        session=session,
+                        company_id=target_user.company_id,
+                        actor_user_id=target_user.id,
+                        task_id=int(call_task_id),
+                        interaction_id=int(interaction_id) if interaction_id.isdigit() else None,
+                        raw_status=raw_status,
+                        transcript=transcript,
+                        confidence=outcome_confidence,
+                    )
+                except Exception as exc:
+                    logger.warning("Could not update CallTask %s: %s", call_task_id, exc)
+
+            log_voice_agent_event(
+                session=session,
+                company_id=target_user.company_id,
+                agent_id=resolved_runtime.agent.id,
+                interaction_id=_parse_optional_int(interaction_id),
+                call_task_id=_parse_optional_int(call_task_id),
+                event_type="call_ended",
+                summary=f"Call ended with status {call_status}",
+                payload={"status": call_status, "outcome": _ended_outcome},
+            )
+
+            try:
+                if call_task_id and call_task_id.isdigit() and int(call_task_id) != 0 and target_user:
+                    _ct_end = session.get(CallTask, int(call_task_id))
+                    call_status_broadcaster.publish(
+                        company_id=target_user.company_id,
+                        campaign_id=_ct_end.campaign_id if _ct_end else None,
+                        call_task_id=int(call_task_id),
+                        interaction_id=interaction_id,
+                        lead_id=lead.id if lead else None,
+                        lead_name=lead.name if lead else None,
+                        status="ended",
+                        outcome=_ended_outcome,
+                    )
+            except Exception:
+                # Best-effort broadcast - log so we know when the live feed
+                # is dropping "ended" events but don't fail the call cleanup.
+                logger.exception("call_status_broadcaster.publish(ended) failed")
+
+            # Enqueue post-call processing as a crash-safe background job. The automation worker picks this up and runs extract_and_save_requirements + dispatch_next_action. Writing the job row is synchronous and survives a FastAPI process restart — unlike an in-process asyncio.create_task.
+            if db_interaction and db_interaction.lead_id and db_interaction.transcript and target_user:
+                try:
+                    # Deduplicate: skip if a job for this interaction is already pending or running.
+                    # This prevents double-triggers (e.g. from both provider webhooks and client-side signals)
+                    # from hammering the LLM and causing duplicate downstream actions.
+                    from sqlalchemy import text
+                    duplicate = session.exec(
+                        select(BackgroundJob).where(
+                            BackgroundJob.company_id == target_user.company_id,
+                            BackgroundJob.job_type == "post_call_workflow",
+                            BackgroundJob.status.in_(["pending", "running"]),
+                        ).where(
+                            text("payload->>'interaction_id' = :id").bindparams(id=str(db_interaction.id))
+                        )
+                    ).first()
+
+                    if duplicate:
+                        logger.info(
+                            "[PostCall] Skipping duplicate background job for interaction %s (existing job id=%s status=%s)",
+                            db_interaction.id, duplicate.id, duplicate.status
+                        )
+                    else:
+                        job = BackgroundJob(
+                            company_id=target_user.company_id,
+                            job_type="post_call_workflow",
+                            payload={
+                                "interaction_id": db_interaction.id,
+                                "lead_id": db_interaction.lead_id,
+                                "actor_user_id": target_user.id,
+                            },
+                        )
+                        session.add(job)
+                        session.commit()
+                        logger.info(
+                            "[PostCall] Queued background_job id=%s for interaction %s lead %s",
+                            job.id, db_interaction.id, db_interaction.lead_id,
+                        )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to queue post-call background job for interaction %s: %s",
+                        interaction_id, exc,
+                    )
+
+
+def _log_startup_checks() -> None:
+    """Warn loudly at startup if critical API keys are missing."""
+    checks = {
+        "DEEPGRAM_API_KEY": "STT+TTS (Deepgram)",
+        "CARTESIA_API_KEY": "TTS+STT (Cartesia)",
+        "MISTRAL_API_KEY": "LLM+TTS (Mistral)",
+        "OPENAI_API_KEY": "LLM (OpenAI)",
+        "SARVAM_API_KEY": "STT+TTS+LLM (Sarvam)",
+    }
+    # LLM needs at least one key
+    llm_keys = {"MISTRAL_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GROQ_API_KEY"}
+    has_llm = any(os.getenv(k) for k in llm_keys)
+    if not has_llm:
+        logger.error(
+            "[Startup] No LLM API key found. Set at least one of: %s",
+            ", ".join(sorted(llm_keys)),
+        )
+    for env_var, label in checks.items():
+        if env_var in llm_keys:
+            continue
+        if not os.getenv(env_var):
+            logger.warning("[Startup] %s key not set (%s). Calls using this provider will fail.", label, env_var)
+
+    # LangSmith tracing
+    configure_tracing()
+
+    logger.info("[Startup] Key validation complete.")
+
+
+async def _mcp_refresh_loop() -> None:
+    """Background loop: refresh MCP tool caches + health for all companies.
+
+    Keeps the capability router's per-company tool caches fresh so connected
+    apps (Cal.com, Calendly, Apollo, RocketReach, Zoho) stay routable even if
+    their OAuth tokens are refreshed out-of-band or a server changes its tools.
+    """
+    import asyncio as _asyncio
+    from sqlmodel import Session as _Session, select as _select
+
+    interval = int(os.getenv("MCP_REFRESH_INTERVAL", "600"))
+    from models.mcp_server import MCPServer
+    from services.mcp.connection_service import refresh_company_servers
+
+    logger.info("[MCPRefresh] Loop started (interval=%ds)", interval)
+    while True:
+        try:
+            await _asyncio.sleep(interval)
+            with _Session(engine) as session:
+                company_ids = sorted({
+                    s.company_id for s in session.exec(
+                        _select(MCPServer).where(MCPServer.enabled == True)  # noqa: E712
+                    ).all()
+                })
+            for cid in company_ids:
+                try:
+                    refreshed = await refresh_company_servers(cid)
+                    if refreshed:
+                        logger.info("[MCPRefresh] company=%s refreshed servers: %s", cid, refreshed)
+                except _asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("[MCPRefresh] company=%s refresh failed: %s", cid, exc)
+        except _asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.exception("[MCPRefresh] Tick error: %s", exc)
+
+
+async def _campaign_schedule_loop() -> None:
+    """Background loop: tick campaign schedules every 60 seconds."""
+    import asyncio as _asyncio
+    poll_interval = int(os.getenv("CAMPAIGN_SCHEDULE_POLL_INTERVAL", "60"))
+    from sqlmodel import Session as _Session
+    from services.campaign.dialer_service import process_campaign_schedule_tick
+    logger.info("[CampaignScheduler] Loop started (interval=%ds)", poll_interval)
+    while True:
+        try:
+            await _asyncio.sleep(poll_interval)
+            with _Session(engine) as session:
+                fired = process_campaign_schedule_tick(session)
+                if fired:
+                    logger.info("[CampaignScheduler] Fired %d schedule(s)", len(fired))
+        except _asyncio.CancelledError:
+            break
+        except Exception as exc:
+            logger.exception("[CampaignScheduler] Tick error: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import asyncio as _asyncio
+    from services.communication.email_outbox_service import email_outbox_loop
+    from services.communication.imap_poller_service import imap_poll_loop
+    from utils.async_bridge import cleanup_bridge_executor
+
+    _log_startup_checks()
+    init_db()
+    enable_bg_workers = app_settings.ENABLE_BACKGROUND_WORKERS
+    imap_task = None
+    outbox_task = None
+    schedule_task = None
+    asr_task = None
+    mcp_task = None
+    if enable_bg_workers:
+        imap_task = _asyncio.create_task(imap_poll_loop())
+        outbox_task = _asyncio.create_task(email_outbox_loop())
+        schedule_task = _asyncio.create_task(_campaign_schedule_loop())
+        mcp_task = _asyncio.create_task(_mcp_refresh_loop())
+        # ASR cleanup loop (in-process). If you prefer cron/Task Scheduler, use scripts/asr_cleanup_runner.py as a fallback.
+        try:
+            from services.asr_maintenance import asr_cleanup_loop
+            asr_enabled = os.getenv("ENABLE_ASR_CLEANUP", "1") == "1"
+            if asr_enabled:
+                asr_task = _asyncio.create_task(asr_cleanup_loop())
+        except Exception as _exc:
+            logger.exception("Failed to start ASR cleanup loop: %s", _exc)
     else:
-        print("⚠️ No interaction_id provided to save_transcript")
+        logger.warning("Background workers disabled via ENABLE_BACKGROUND_WORKERS=0")
+    try:
+        yield
+    finally:
+        for task in (imap_task, outbox_task, schedule_task, asr_task, mcp_task):
+            if task:
+                task.cancel()
+        cleanup_bridge_executor()
+
+
+app = FastAPI(title="Multi-Tenant CRM API", lifespan=lifespan)
+_process_start_time: float = time.time()
+
+
+# ── Exception handlers ─────────────────────────────────────────────────────────
+
+
+# Lazily import QuotaExceededError so circular deps don't block startup.
+_QuotaExceededError: type[Exception] | None = None
+def _get_quota_exceeded() -> type[Exception]:
+    global _QuotaExceededError
+    if _QuotaExceededError is None:
+        try:
+            from services.core.usage_service import QuotaExceededError as _Q
+            _QuotaExceededError = _Q
+        except ImportError:
+            _QuotaExceededError = type("QuotaExceededError", (Exception,), {})
+    return _QuotaExceededError
+
+
+@app.exception_handler(_get_quota_exceeded())
+async def quota_exceeded_handler(request: Request, exc: Exception):
+    from fastapi.responses import JSONResponse
+    logger.warning(
+        "Quota exceeded: metric=%s",
+        getattr(exc, "metric", "?"),
+    )
+    return JSONResponse(
+        status_code=429,
+        content={
+            "detail": getattr(exc, "message", str(exc)),
+            "metric": getattr(exc, "metric", None),
+            "used": getattr(exc, "used", None),
+            "limit": getattr(exc, "limit", None),
+            "tier": getattr(exc, "tier", None),
+        },
+    )
+
+
+app.add_middleware(_RLSMiddleware)
+app.add_middleware(_CSRFMiddleware)
+app.add_middleware(_RequestContextMiddleware)
+
+
+def _parse_allowed_origins() -> list[str]:
+    """ALLOWED_ORIGINS is a comma-separated allowlist.
+
+    Browsers refuse to send credentials (cookies) to a wildcard origin, so we
+    must enumerate the exact origins that are allowed to call the API.
+    Default: localhost:3006 (frontend dev server) so local dev still works
+    out of the box.
+    """
+    raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:3006")
+    origins = [o.strip() for o in raw.split(",") if o.strip()]
+    return origins or ["http://localhost:3006"]
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_parse_allowed_origins(),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+app.include_router(auth.router)
+app.include_router(analytics.router)
+app.include_router(admin.router)
+app.include_router(automation.router)
+app.include_router(accounts.router)
+app.include_router(leads.router)
+app.include_router(lead_import.router)
+app.include_router(products.router)
+app.include_router(interactions.router)
+app.include_router(crm_settings.router)
+app.include_router(objections.router)
+app.include_router(competitors.router)
+app.include_router(coach.router)
+app.include_router(campaign.router)
+app.include_router(proposal.router)
+app.include_router(quote.router)
+app.include_router(requirement.router)
+app.include_router(call_task.router)
+app.include_router(templates.router)
+app.include_router(telephony.router)
+app.include_router(tracking.router)
+app.include_router(evals.router)
+app.include_router(feedback.router)
+app.include_router(knowledge.router)
+app.include_router(agent_routes.router)
+app.include_router(agent_tasks_routes.router, prefix="/crm")
+app.include_router(voice_agents_routes.router)
+app.include_router(metrics_routes.router)
+app.include_router(observability_metrics_routes.router)
+app.include_router(ism_rules_routes.router, prefix="/crm")
+app.include_router(phone_numbers_routes.router, prefix="/crm")
+app.include_router(sub_accounts_routes.router)
+app.include_router(sip_trunks_routes.router)
+app.include_router(compliance_routes.router)
+app.include_router(calendar_routes.router)
+app.include_router(webhook_router.router, prefix="/crm", tags=["webhooks"])
+from routes import agent_analytics as agent_analytics_routes
+app.include_router(agent_analytics_routes.router, prefix="/crm")
+app.include_router(dispositions_router.router)
+app.include_router(events_router.router)
+app.include_router(mark_tracking_router.router)
+app.include_router(agent_templates_router.router)
+app.include_router(provider_credentials_router.router)
+app.include_router(cost_router.router)
+app.include_router(integrations_router.router)
+app.include_router(mcp_connections_router.router)
+app.include_router(apollo_oauth_router.router)
+app.include_router(zoho_oauth_router.router)
+app.include_router(hubspot_oauth_router.router)
+app.include_router(linkedin_oauth_router.router)
+app.include_router(salesforce_oauth_router.router)
+app.include_router(instantly_oauth_router.router)
+app.include_router(microsoft_oauth_router.router)
+app.include_router(tool_logs_router.router)
+app.include_router(inventory_sources_router.router, prefix="/crm")
+app.include_router(orders_router.router, prefix="/crm")
+app.include_router(invoices_router.router, prefix="/crm")
+app.include_router(payments_router.router, prefix="/crm")
+app.include_router(tickets_router.router, prefix="/crm")
+app.include_router(installations_router.router, prefix="/crm")
+app.include_router(contacts_router.router, prefix="/crm")
+app.include_router(collections_router.router, prefix="/crm")
+app.include_router(books_sync_router.router, prefix="/crm")
+app.include_router(scheme_claims_router.router, prefix="/crm")
+app.include_router(purchase_suite_router.router, prefix="/crm")
+app.include_router(rocketreach_oauth_router.router)
+app.include_router(tally_connector_router.router)
+app.include_router(calcom_connector_router.router)
+app.include_router(calendly_connector_router.router)
+app.include_router(rocketreach_mcp_connector_router.router)
+app.include_router(zoom_oauth_router.router)
+app.include_router(tts_router.router)
+app.include_router(agent_chat_router.router)
+
+try:
+    from mcp_server import get_mcp_asgi_app
+    _mcp_app = get_mcp_asgi_app()
+    if _mcp_app is not None:
+        app.mount("/mcp", _mcp_app)
+        logger.info("[MCP] Server mounted at /mcp (SSE transport)")
+    else:
+        logger.info("[MCP] SSE app not available — run mcp_server.py separately")
+except Exception as _mcp_err:
+    logger.warning("[MCP] Could not mount MCP server: %s", _mcp_err)
+
+uploads_path = os.path.join(os.getcwd(), "uploads")
+os.makedirs(uploads_path, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=uploads_path), name="uploads")
+
+
+@app.get("/")
+async def root():
+    return {"message": "API is running"}
+
+
+@app.get("/health")
+async def health_check():
+    
+    from fastapi.responses import JSONResponse
+    from database import engine
+    from services.automation_worker_service import get_worker_health
+    import datetime
+
+    result: dict = {}
+    degraded = False
+
+
+    try:
+        with Session(engine) as s:
+            s.exec(select(1))
+        result["db"] = "ok"
+    except Exception as exc:
+        result["db"] = f"error:{exc}"
+        degraded = True
+
+    # Worker health
+    wh = get_worker_health()
+    result.update({
+        "worker_last_cycle_at":              wh.get("last_cycle_at"),
+        "worker_last_cycle_status":          wh.get("last_cycle_status"),
+        "worker_last_cycle_duration_seconds": wh.get("last_cycle_duration_seconds"),
+        "worker_total_cycles":               wh.get("total_cycles"),
+        "worker_total_failed_cycles":        wh.get("total_failed_cycles"),
+        "worker_paused":                     wh.get("paused"),
+    })
+
+
+    if wh.get("last_cycle_status") in ("never", None) and _process_start_time and \
+            time.time() - _process_start_time > 300:
+        degraded = True
+    if wh.get("last_cycle_status") == "partial_failure":
+        # partial_failure is a warning, not hard degraded — leave status as healthy
+        pass
+
+    try:
+        from services.observability import get_rate_limit_hits_last_15min
+        result["mistral_429_last_15min"] = get_rate_limit_hits_last_15min()
+    except Exception as exc:  # noqa: BLE001
+        result["mistral_429_last_15min"] = f"error:{exc}"
+
+    try:
+        from services.rag.collections import get_or_create_collection  # noqa: F401
+        # Lightweight: list collections via the in-process client.
+        import chromadb
+        chroma_client = chromadb.PersistentClient(path="./knowledge_base")
+        chroma_client.list_collections()
+        result["chroma_ok"] = True
+    except Exception as exc:  # noqa: BLE001
+        result["chroma_ok"] = False
+        result["chroma_error"] = str(exc)[:120]
+
+    # Process uptime
+    uptime = round(time.time() - _process_start_time) if _process_start_time else None
+    result["uptime_seconds"] = uptime
+
+    result["status"] = "degraded" if degraded else "healthy"
+    result["timestamp"] = datetime.datetime.utcnow().isoformat() + "Z"
+
+    return JSONResponse(content=result, status_code=503 if degraded else 200)
+
 
 @app.websocket("/media-stream")
-async def handle_media_stream(websocket: WebSocket, session: Session = Depends(get_session)):
-    """Handles the WebSocket connection and dispatches to the correct voice engine."""
+async def media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "twilio")
+
+
+@app.websocket("/exotel-media-stream")
+async def exotel_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "exotel")
+
+
+@app.websocket("/plivo-media-stream")
+async def plivo_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "plivo")
+
+
+@app.websocket("/vobiz-media-stream")
+async def vobiz_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "vobiz")
+
+
+@app.websocket("/enablex-media-stream")
+async def enablex_media_stream(websocket: WebSocket):
+    await run_media_stream(websocket, "enablex")
+
+
+@app.websocket("/ws/web-call")
+async def browser_web_call(websocket: WebSocket):
+    """Authenticated browser voice transport over the shared VoicePipeline."""
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=4401)
+        return
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("typ") != "web_call" or not payload.get("user_id") or not payload.get("company_id"):
+            raise ValueError("invalid web-call token")
+        with Session(engine) as check_session:
+            user = check_session.get(User, int(payload["user_id"]))
+            if not user or user.company_id != int(payload["company_id"]) or user.token_version != payload.get("token_version"):
+                raise ValueError("invalid web-call user")
+    except Exception:
+        await websocket.close(code=4401)
+        return
+    # run_media_stream resolves the already-authenticated user from these
+    # server-validated query values and keeps all existing tenant checks.
+    from starlette.datastructures import QueryParams
+    query = QueryParams({
+        "user_id": str(payload["user_id"]),
+        "company_id": str(payload["company_id"]),
+        "agent_id": str(payload.get("agent_id") or "0"),
+        "lead_id": str(payload.get("lead_id") or "0"),
+        "call_task_id": "0",
+    })
+
+    class _AuthenticatedBrowserSocket:
+        def __init__(self, real, params):
+            self._real = real
+            self.query_params = params
+
+        def __getattr__(self, name):
+            return getattr(self._real, name)
+
+    await run_media_stream(_AuthenticatedBrowserSocket(websocket, query), "browser")
+
+
+@app.websocket("/ws/sentiment/{interaction_id}")
+async def live_sentiment(websocket: WebSocket, interaction_id: str):
+    """
+    Dashboard WebSocket: streams real-time sentiment updates for an active call.
+    Polls the sentiment_events table every 200ms using a cursor (last_id) so
+    events are visible across all uvicorn workers.
+    Sends a keep-alive ping every ~30s when no new events arrive.
+    """
     await websocket.accept()
-    
-
-    interaction_id = websocket.query_params.get("interaction_id")
-    transcript_accumulator = []
-    
-    settings = session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first()
-    dynamic_instruction = settings.value if settings else "You are a helpful assistant."
-    
-    engine_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "voice_engine")).first()
-    active_engine = engine_setting.value if engine_setting else "gemini"
-    
-    verbosity_setting = session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first()
-    verbosity = verbosity_setting.value if verbosity_setting else "2"
-    dynamic_instruction = apply_verbosity_rules(dynamic_instruction, verbosity)
-    
-    print(f"Twilio connected to media-stream WS (Engine: {active_engine.upper()}) | Interaction ID: {interaction_id} | Verbosity: {verbosity}")
-
-    if interaction_id:
-        try:
-            db_interaction = session.get(Interaction, int(interaction_id))
-            if db_interaction and db_interaction.lead_id:
-                lead = session.get(Lead, db_interaction.lead_id)
-                if lead:
-                    context_note = f"\n\n**CURRENT CALL CONTEXT**\nSpeak with {lead.name}. Status: {lead.status}. Goal: Update them."
-                    dynamic_instruction += context_note
-        except Exception as e:
-            print(f"Error loading context: {e}")
-
-    communicator = TwilioCommunicator(websocket)
-    if active_engine == "mistral":
-        await mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
-    else:
-        await gemini_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator)
-
-async def mistral_voice_pipeline(communicator, interaction_id, dynamic_instruction, transcript_accumulator):
-    """Orchestrates Deepgram (STT), Mistral (LLM with MCP tools), and ElevenLabs (TTS)."""
-    
-    
-    logger.info(f"🤖 [LLM] Selected: MISTRAL Large")
-    logger.info(f"🤖 [LLM] Interaction ID: {interaction_id}")
-    
-    # Use unified MCP tools for Mistral
-    mistral_tools = get_mistral_tools()
-    logger.debug(f"🤖 [LLM] Mistral tools loaded: {len(mistral_tools)} tools")
-
-    # Safety and brevity controls (aggressive)
-    MAX_VOICE_CHARS = int(os.getenv("MAX_VOICE_CHARS", "140"))
-    MISTRAL_MAX_TOKENS = int(os.getenv("MISTRAL_MAX_TOKENS", "120"))
-    MISTRAL_TEMPERATURE = float(os.getenv("MISTRAL_TEMPERATURE", "0.2"))
-    MAX_TTS_SECONDS = int(os.getenv("MAX_TTS_SECONDS", "12"))
-
-    # Barge-in and task handles
-    is_rio_speaking = False
-    current_tts_task = None
-    current_mistral_task = None
-
-    # Encourage minimal/concise replies via system prompt (very aggressive)
-    brevity_instruction = (
-        "You are Rio, a concise sales assistant. Answer in 1-2 short sentences (max 20-30 words). "
-        "Do NOT wander or add unnecessary details. If an action is required, call the appropriate tool instead of explaining how to do it. "
-        "Only ask a single clarifying question when necessary. Be polite but terse."
-    )
-
-    messages = [
-        {"role": "system", "content": brevity_instruction},
-        {"role": "system", "content": dynamic_instruction}
-    ]
-
-    async def speak(text):
-        """Streaming TTS from ElevenLabs to Twilio. Cancellable for barge-in."""
-        nonlocal is_rio_speaking, current_tts_task
-        if not text or not text.strip():
-            return
-        # Voice Performance Tuning: Strip Markdown & Truncate (aggressively)
-        clean_text = clean_voice_text(text, max_chars=MAX_VOICE_CHARS)
-
-        url = f"wss://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE_ID}/stream-input?model_id=eleven_turbo_v2_5&output_format=pcm_16000"
-        logger.info(f"🔊 [ElevenLabs] TTS starting (len={len(clean_text)}): {clean_text[:60]}...")
-        print(f"Connecting to ElevenLabs TTS (PCM 16k) using Voice: {ELEVENLABS_VOICE_ID}... Text len: {len(clean_text)}")
-        is_rio_speaking = True
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(url) as el_ws:
-                    logger.info(f"🔊 [ElevenLabs] WebSocket connected")
-                    print("ElevenLabs WebSocket Connected.")
-
-                    # Send API preamble and the text
-                    await el_ws.send_json({
-                        "text": " ",
-                        "voice_settings": {"stability": 0.5, "similarity_boost": 0.8},
-                        "xi_api_key": ELEVENLABS_API_KEY
-                    })
-
-                    # Send text
-                    print(f"Sending text to ElevenLabs: {clean_text[:30]}...")
-                    await el_ws.send_json({"text": clean_text, "try_trigger_generation": True})
-                    await el_ws.send_json({"text": ""}) # EOS
-
-                    async for message in el_ws:
-                        # Allow cancellation to interrupt the stream
-                        try:
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                data = json.loads(message.data)
-
-                                if data.get("audio"):
-                                    pcm_16k = base64.b64decode(data["audio"])
-                                    pcm_8k, _ = audioop.ratecv(pcm_16k, 2, 1, 16000, 8000, None)
-                                    ulaw_8k = audioop.lin2ulaw(pcm_8k, 2)
-                                    payload = base64.b64encode(ulaw_8k).decode("utf-8")
-                                    if payload:
-                                        await communicator.send_media(payload)
-
-                                if data.get("isFinal"):
-                                    print("ElevenLabs isFinal received.")
-                                    break
-
-                                if "error" in data or "message" in data:
-                                    print(f"ElevenLabs API Message: {data}")
-
-                            elif message.type == aiohttp.WSMsgType.CLOSED:
-                                break
-                            elif message.type == aiohttp.WSMsgType.ERROR:
-                                break
-
-                        except asyncio.CancelledError:
-                            # Interrupt received via task cancellation (barge-in)
-                            print("ElevenLabs TTS stream cancelled (barge-in).")
-                            try:
-                                await el_ws.close()
-                            except Exception:
-                                pass
-                            raise
-        except asyncio.CancelledError:
-            # Bubble up cancellation so caller can handle it
-            raise
-        except WebSocketDisconnect:
-            print("Twilio WebSocket disconnected (Client hung up).")
-        except Exception as e:
-            if "ConnectionClosed" in str(e):
-                print("Connection closed during TTS playback.")
+    last_id = 0
+    idle_ticks = 0  # 200ms ticks with no new events
+    try:
+        while True:
+            with Session(engine) as s:
+                rows = s.exec(
+                    select(SentimentEvent)
+                    .where(SentimentEvent.interaction_id == str(interaction_id))
+                    .where(SentimentEvent.id > last_id)
+                    .order_by(SentimentEvent.id)
+                    .limit(20)
+                ).all()
+            if rows:
+                for row in rows:
+                    await websocket.send_json(row.payload)
+                    last_id = row.id
+                idle_ticks = 0
             else:
-                print(f"ElevenLabs Exception in speak(): {e}")
-        finally:
-            is_rio_speaking = False
-            current_tts_task = None
+                idle_ticks += 1
+                if idle_ticks % 150 == 0:  # ~30s: 150 × 200ms
+                    await websocket.send_json({"type": "ping"})
+            await asyncio.sleep(0.2)
+    except WebSocketDisconnect:
+        # Normal client disconnect - quiet path.
+        logger.debug("live_sentiment ws disconnected interaction_id=%s", interaction_id)
+    except Exception:
+        # Anything else is a real bug; surface it.
+        logger.exception("live_sentiment ws crashed interaction_id=%s", interaction_id)
 
-    async def process_mistral(user_input):
-        nonlocal current_mistral_task, current_tts_task
-        print(f"Processing Mistral Input: {user_input}")
-        messages.append({"role": "user", "content": user_input})
-        try:
-            print("Sending request to Mistral...")
-            # Run Mistral call as a cancellable task
-            start_time = time.time()
-            current_mistral_task = asyncio.create_task(
-                mistral_client.chat.complete_async(
-                    model="mistral-large-latest",
-                    messages=messages,
-                    tools=mistral_tools,
-                    max_tokens=MISTRAL_MAX_TOKENS,
-                    temperature=MISTRAL_TEMPERATURE
+
+@app.websocket("/ws/call-monitor/{company_id}")
+async def call_monitor(
+    websocket: WebSocket,
+    company_id: int,
+    campaign_id: int | None = None,
+):
+    """
+    Dashboard WebSocket: live call-status feed for a company.
+    Streams CallStatusEvent rows (ringing → connected → ended) scoped to
+    company_id, with an optional ?campaign_id=X filter.
+    Polls every 500ms using a cursor (last_id) — works across all uvicorn workers.
+    Sends {"type":"ping"} every ~30s when idle.
+    """
+    await websocket.accept()
+    last_id = 0
+    idle_ticks = 0  # 500ms ticks with no new events
+    try:
+        while True:
+            with Session(engine) as s:
+                q = (
+                    select(CallStatusEvent)
+                    .where(CallStatusEvent.company_id == company_id)
+                    .where(CallStatusEvent.id > last_id)
                 )
-            )
-            response = await current_mistral_task
-            elapsed = time.time() - start_time
-            logger.info(f"[Mistral] initial generation time: {elapsed:.2f}s")
-            print("Mistral response received.")
-            current_mistral_task = None
-
-            choice = response.choices[0].message
-            if choice.tool_calls:
-                # Short filler while tools run
-                filler_msg = "One sec, checking that for you."
-                # Start filler but do not await (it can be interrupted)
-                asyncio.create_task(speak(filler_msg))
-
-                # Mistral requires the assistant message containing tool_calls 
-                # to be in the history BEFORE the tool results.
-                messages.append(choice)
-
-                for tc in choice.tool_calls:
-                    args = json.loads(tc.function.arguments)
-                    print(f"Tool Triggered: {tc.function.name}({args})")
-                    result = await run_tool(tc.function.name, args, transcript_accumulator, interaction_id)
-                    messages.append({
-                        "role": "tool",
-                        "name": tc.function.name,
-                        "content": str(result),
-                        "tool_call_id": tc.id
+                if campaign_id is not None:
+                    q = q.where(CallStatusEvent.campaign_id == campaign_id)
+                rows = s.exec(q.order_by(CallStatusEvent.id).limit(20)).all()
+            if rows:
+                for row in rows:
+                    await websocket.send_json({
+                        "type": "call_status",
+                        "call_task_id": row.call_task_id,
+                        "interaction_id": row.interaction_id,
+                        "campaign_id": row.campaign_id,
+                        "lead_id": row.lead_id,
+                        "lead_name": row.lead_name,
+                        "status": row.status,
+                        "outcome": row.outcome,
+                        "ts": row.created_at.isoformat(),
                     })
-
-                print("Sending tool results back to Mistral...")
-                # Run final Mistral call as cancellable task
-                current_mistral_task = asyncio.create_task(
-                    mistral_client.chat.complete_async(
-                        model="mistral-large-latest",
-                        messages=messages,
-                        max_tokens=MISTRAL_MAX_TOKENS,
-                        temperature=MISTRAL_TEMPERATURE
-                    )
-                )
-                final_response = await current_mistral_task
-                choice = final_response.choices[0].message
-                current_mistral_task = None
-
-            if choice.content:
-                print(f"Mistral Reply: {choice.content}")
-                messages.append({"role": "assistant", "content": choice.content})
-                transcript_accumulator.append(f"Rio: {choice.content}")
-                save_transcript(interaction_id, transcript_accumulator)
-
-                # Speak using a cancellable task so barge-in can cancel it
-                start_tts = time.time()
-                current_tts_task = asyncio.create_task(speak(choice.content))
-                try:
-                    # Enforce an upper limit on speaking time to keep replies short
-                    await asyncio.wait_for(current_tts_task, timeout=MAX_TTS_SECONDS)
-                    logger.info(f"[TTS] playback time: {time.time() - start_tts:.2f}s")
-                except asyncio.TimeoutError:
-                    logger.info(f"[TTS] playback timed out after {MAX_TTS_SECONDS}s - cancelling.")
-                    current_tts_task.cancel()
-                except asyncio.CancelledError:
-                    logger.info("TTS cancelled due to barge-in/interrupt.")
-                finally:
-                    current_tts_task = None
+                    last_id = row.id
+                idle_ticks = 0
             else:
-                print("Mistral returned empty content.")
-        except asyncio.CancelledError:
-            print("Mistral generation cancelled (barge-in).")
-            current_mistral_task = None
-        except Exception as e:
-            print(f"Mistral API Error detailed: {e}")
-            import traceback
-            traceback.print_exc()
+                idle_ticks += 1
+                if idle_ticks % 60 == 0:  # ~30s: 60 × 500ms
+                    await websocket.send_json({"type": "ping"})
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        logger.debug("call_monitor ws disconnected company_id=%s", company_id)
+    except Exception:
+        logger.exception("call_monitor ws crashed company_id=%s", company_id)
 
-    # Deepgram Callback Bridge
-    loop = asyncio.get_event_loop()
 
-    def on_message(self, result, **kwargs):
-        try:
-            sentence = result.channel.alternatives[0].transcript
-            if sentence.strip() and result.is_final:
-                print(f"User (Deepgram): {sentence}")
-                transcript_accumulator.append(f"User: {sentence}")
-                save_transcript(interaction_id, transcript_accumulator)
-                loop.create_task(process_mistral(sentence))
-        except Exception as e:
-            print(f"Deepgram Parse Error: {e}")
-    # --- DEEPGRAM RAW WEBSOCKET IMPLEMENTATION ---
-    # Bypassing the SDK completely to avoid version conflicts
-    
-    # WebSocket URL for Deepgram (Mulaw 8kHz matches Twilio)
-    dg_url = f"wss://api.deepgram.com/v1/listen?model=nova-2&encoding=mulaw&sample_rate=8000"
-    headers = {
-        "Authorization": f"Token {DEEPGRAM_API_KEY}"
-    }
+@app.websocket("/ws/ism-activity/{company_id}")
+async def ism_activity_monitor(
+    websocket: WebSocket,
+    company_id: int,
+):
+    """Live ISM agent activity feed for a company.
 
-    async with aiohttp.ClientSession() as session:
-        async with session.ws_connect(dg_url, headers=headers) as dg_ws:
-            
-            async def sender():
-                nonlocal interaction_id
-                try:
-                    async for data in communicator.receive():
-                        if data["event"] == "start":
-                            if isinstance(communicator, TwilioCommunicator):
-                                communicator.stream_sid = data["start"]["streamSid"]
-                                if not interaction_id: interaction_id = data["start"].get("customParameters", {}).get("interaction_id")
-                            print(f"Deepgram Sender: Stream Started | Interaction: {interaction_id}")
-                        elif data["event"] == "media":
-                            media_payload = data["media"]["payload"]
-                            raw_audio = base64.b64decode(media_payload)
-                            await dg_ws.send_bytes(raw_audio)
-                        elif data["event"] == "stop":
-                            await dg_ws.send_bytes(b"") # Close signal
-                            break
-                except Exception as e:
-                    print(f"Telephony Receiver Error: {e}")
-                finally:
-                    await dg_ws.close()
-
-            async def receiver():
-                try:
-                    async for msg in dg_ws:
-                        if msg.type == aiohttp.WSMsgType.TEXT:
-                            res = json.loads(msg.data)
-                            if "channel" in res:
-                                alt = res["channel"]["alternatives"][0]
-                                is_final = res.get("is_final", False)
-                                
-                                if alt["transcript"]:
-                                    if is_final:
-                                        logger.info(f"🎤 [Deepgram] FINAL: {alt['transcript']}")
-                                    else:
-                                        logger.debug(f"🎤 [Deepgram] interim: {alt['transcript']}")
-                                
-                                if alt["transcript"] and is_final:
-                                    transcript = alt["transcript"]
-                                    
-                                    # ✅ BARGE-IN DETECTION: Check if Rio is speaking
-                                    if is_rio_speaking:
-                                        logger.info("🛑 Barge-in detected! User interrupted Rio's response")
-                                        logger.info("   → Stopping TTS and clearing audio buffer...")
-                                        await communicator.clear_audio_buffer()
-                                    
-                                    print(f"User (Deepgram Raw): {transcript}")
-                                    transcript_accumulator.append(f"User: {transcript}")
-                                    save_transcript(interaction_id, transcript_accumulator)
-                                    # Barge-in detection: if Rio is speaking, interrupt
-                                    try:
-                                        if is_rio_speaking:
-                                            logger.info("🛑 Barge-in detected! User interrupted Rio's response")
-                                            # Cancel ongoing TTS
-                                            if current_tts_task and not current_tts_task.done():
-                                                current_tts_task.cancel()
-                                            # Cancel ongoing Mistral generation
-                                            if current_mistral_task and not current_mistral_task.done():
-                                                current_mistral_task.cancel()
-                                            # Clear any queued audio to avoid overlap
-                                            try:
-                                                await communicator.clear_audio_buffer()
-                                            except Exception:
-                                                logger.debug("communicator.clear_audio_buffer() not available or failed")
-                                    except NameError:
-                                        # If flags are not defined for some reason, ignore
-                                        pass
-                                    await process_mistral(transcript)
-                        elif msg.type == aiohttp.WSMsgType.CLOSED:
-                            break
-                        elif msg.type == aiohttp.WSMsgType.ERROR:
-                            print(f"Deepgram WS Error")
-                            break
-                except Exception as e:
-                    print(f"Deepgram Receiver Error: {e}")
-
-            await asyncio.gather(sender(), receiver())
-    
-    print("Mistral pipeline closed.")
-
-if __name__ == "__main__":
-    import uvicorn
-    # Twilio does not support WebSocket Ping/Pong, so we must disable it in Uvicorn to prevent "keepalive ping timeout" errors.
-    uvicorn.run(app, host="0.0.0.0", port=PORT, ws_ping_interval=None, ws_ping_timeout=None, timeout_keep_alive=60)
+    Streams IsmActivityEvent rows (dispatched_email / dispatched_whatsapp /
+    dispatched_call / handoff / auto_closed_won / auto_closed_lost / skipped)
+    scoped to company_id.  Cursor-based polling every 500ms for cross-worker
+    visibility — same pattern as /ws/call-monitor.
+    """
+    await websocket.accept()
+    last_id = 0
+    idle_ticks = 0
+    try:
+        while True:
+            with Session(engine) as s:
+                # LEFT JOIN Lead so soft-deleted leads' activity events
+                # don't surface in the live feed.  Allow null lead_id
+                # (system-level events without a lead).
+                rows = s.exec(
+                    select(IsmActivityEvent)
+                    .outerjoin(Lead, Lead.id == IsmActivityEvent.lead_id)
+                    .where(IsmActivityEvent.company_id == company_id)
+                    .where(IsmActivityEvent.id > last_id)
+                    .where((IsmActivityEvent.lead_id.is_(None)) | (Lead.deleted_at.is_(None)))
+                    .order_by(IsmActivityEvent.id)
+                    .limit(20)
+                ).all()
+            if rows:
+                for row in rows:
+                    await websocket.send_json({
+                        "type": "ism_activity",
+                        "lead_id": row.lead_id,
+                        "lead_name": row.lead_name,
+                        "stage": row.stage,
+                        "action": row.action,
+                        "reason": row.reason,
+                        "metadata": row.metadata_json or {},
+                        "ts": row.created_at.isoformat(),
+                    })
+                    last_id = row.id
+                idle_ticks = 0
+            else:
+                idle_ticks += 1
+                if idle_ticks % 60 == 0:  # ~30s
+                    await websocket.send_json({"type": "ping"})
+            await asyncio.sleep(0.5)
+    except WebSocketDisconnect:
+        logger.debug("ism_activity_monitor ws disconnected company_id=%s", company_id)
+    except Exception:
+        logger.exception("ism_activity_monitor ws crashed company_id=%s", company_id)

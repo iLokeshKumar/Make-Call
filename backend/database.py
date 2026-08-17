@@ -1,175 +1,239 @@
+import logging
 import os
-from sqlmodel import SQLModel, create_engine, Session, Field, select
-from typing import Optional, List, Generator
-from datetime import datetime, timezone
+from contextvars import ContextVar
+from typing import Generator, Optional
+
 from dotenv import load_dotenv
+from sqlalchemy import event, text as sa_text
+from sqlalchemy.orm import Session as _SASession
+from sqlmodel import SQLModel, Session, create_engine, select
 
-# Find .env in the same directory as this file
+from models.models import Permission, Role, RolePermission
+from models.mcp_server import MCPServer, MCPToolCache  # noqa: F401 — register tables with SQLModel metadata
+from models.inventory_source import InventorySource    # noqa: F401 — register tables with SQLModel metadata
+
+logger = logging.getLogger(__name__)
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
-env_path = os.path.join(current_dir, ".env")
-load_dotenv(env_path)
+load_dotenv(os.path.join(current_dir, ".env"))
 
-# Fallback to SQLite if DATABASE_URL is not set
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./crm.db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    # CI / unit-test fallback: use in-memory SQLite so test files that transitively import database (e.g. via agents.ism_orchestrator → services.communication.* → database) can collect without a real DB.
+    # Tests that genuinely need Postgres opt in via TEST_POSTGRES_URL.
+    DATABASE_URL = "sqlite://"
+    logger.warning(
+        "[database] DATABASE_URL unset — falling back to in-memory SQLite. "
+        "Set DATABASE_URL in .env for development/production."
+    )
 
-# Attempt to use PostgreSQL if configured, otherwise SQLite
-if "postgresql" in DATABASE_URL:
-    try:
-        engine = create_engine(DATABASE_URL, echo=True) # echo=True prints SQL to console for proof
-        # Test connection
-        with engine.connect() as conn:
-            pass
-        print("Connected to PostgreSQL successfully.")
-    except Exception as e:
-        print(f"Warning: Could not connect to PostgreSQL: {e}")
-        print("Falling back to SQLite (crm.db).")
-        DATABASE_URL = "sqlite:///./crm.db"
-        engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=True)
+# SQLite (in-memory or file) doesn't support pool_pre_ping or large pools; Postgres needs both for connection liveness + concurrency.
+_is_sqlite = DATABASE_URL.startswith("sqlite")
+_engine_kwargs: dict = {"echo": os.getenv("SQL_ECHO", "0") == "1"}
+if _is_sqlite:
+    from sqlalchemy.pool import StaticPool
+    _engine_kwargs["connect_args"] = {"check_same_thread": False}
+    if DATABASE_URL == "sqlite://":
+        _engine_kwargs["poolclass"] = StaticPool
 else:
-    engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False}, echo=True)
+    _engine_kwargs.update({
+        "pool_size": int(os.getenv("DB_POOL_SIZE", "20")),
+        "max_overflow": int(os.getenv("DB_MAX_OVERFLOW", "10")),
+        "pool_timeout": int(os.getenv("DB_POOL_TIMEOUT", "30")),
+        "pool_recycle": int(os.getenv("DB_POOL_RECYCLE", "3600")),
+        "pool_pre_ping": True,
+        "echo_pool": os.getenv("SQL_ECHO_POOL", "0") == "1",
+    })
+
+engine = create_engine(DATABASE_URL, **_engine_kwargs)
+
+rls_company_id: ContextVar[Optional[int]] = ContextVar("rls_company_id", default=None)
 
 
+_RLS_WARN_ENABLED = os.getenv("RLS_WARN_ON_MISSING", "1") == "1"
 
-class AuditMixin(SQLModel):
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-    updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc), sa_column_kwargs={"onupdate": lambda: datetime.now(timezone.utc)})
-    created_by: str = Field(default="System")
-    updated_by: Optional[str] = Field(default=None)
 
-class Lead(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str
-    phone: str = Field(unique=True, index=True)
-    email: Optional[str] = None
-    status: str = Field(default="New")
-    source: str = Field(default="Manual") 
-    notes: Optional[str] = None
-    enrichment_status: Optional[str] = Field(default="Not Enriched") # e.g. "Apollo Enriched", "Lusha Enriched"
-    # created_at handled by mixin
+@event.listens_for(_SASession, "after_begin", propagate=True)
+def _apply_rls_context(session: _SASession, transaction, connection) -> None:  # type: ignore[type-arg]
+    """
+    Fires once per transaction begin on every SQLAlchemy Session.
+    Injects SET LOCAL so the Postgres RLS policy can read it.
+    SET LOCAL is transaction-scoped — resets automatically on commit/rollback,
+    so pooled connections are never left with a stale company_id.
+    """
+    cid = rls_company_id.get()
+    if cid is not None:
+        connection.execute(
+            sa_text("SET LOCAL app.current_company_id = :cid"),
+            {"cid": int(cid)}
+        )
+    elif _RLS_WARN_ENABLED:
+        logger.warning(
+            "DB session opened without rls_company_id — RLS policies will "
+            "see all rows. This is expected for init/migrations but not for "
+            "request or worker code.",
+            stacklevel=2,
+        )
 
-class LeadCreate(SQLModel):
-    name: str
-    phone: str
-    email: Optional[str] = None
-    status: Optional[str] = "New"
-    notes: Optional[str] = None
-
-class Interaction(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lead_id: int
-    type: str  
-    content: str
-    transcript: Optional[str] = None
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc)) # Keep for specific event time
-    # created_at/updated_at/by handled by mixin
-
-class Product(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: str = Field(index=True)
-    stock: int = Field(default=0)
-    price: str
-    note: Optional[str] = None
-
-class SystemSettings(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    key: str = Field(unique=True, index=True)
-    value: str
-
-class Appointment(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lead_id: int = Field(index=True)
-    appointment_time: datetime
-    status: str = Field(default="Scheduled") # Scheduled, Completed, Cancelled
-    notes: Optional[str] = None
-    meeting_link: Optional[str] = None
-    calendar_event_id: Optional[str] = None
-
-class Outcome(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    lead_id: int = Field(index=True)
-    type: str  # e.g. "DEMO_BOOKED", "EMAIL_SENT"
-    stage: str = Field(default="Interest") # Interest, Qualification, Closed
-    potential_value: float = Field(default=0.0)
-    probability: float = Field(default=0.0) # 0.0 to 1.0
-    notes: Optional[str] = None
-
-class User(AuditMixin, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    username: str = Field(unique=True, index=True)
-    email: str = Field(unique=True, index=True)
-    hashed_password: str
-    role: str = Field(default="sales_rep") # admin or sales_rep
-    mfa_secret: Optional[str] = None
-    mfa_enabled: bool = Field(default=False)
-    is_active: bool = Field(default=True)
-    email_verified: bool = Field(default=False)
-    verification_token: Optional[str] = None
-
-class UserCreate(SQLModel):
-    username: str
-    email: str
-    password: str
-    role: Optional[str] = "sales_rep"
-
-def init_db():
-    SQLModel.metadata.create_all(engine)
-    
-    with Session(engine) as session:
-        # Seed System Settings if empty
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "system_instruction")).first():
-            default_instruction = """You are Rio, a professional AI sales assistant for Yexis Electronics (Chennai).
-Your goal is to identify leads, answer product queries, and book demos.
-
-CORE CAPABILITIES & TOOLS:
-- Use `get_or_create_lead` to identify the caller (Name, Phone, Email).
-- Use `lookup_product` for any price or stock queries about Samsung TVs, S24, or HVAC.
-- Use `book_meeting` to schedule demos on the calendar.
-- Use `send_followup_email` to send information to leads.
-- Use `handoff_to_human` if things get too complex for AI.
-
-RULES:
-1. Be professional and helpful.
-2. If the user gives you their email or phone, make sure to update their lead info using `get_or_create_lead`.
-3. Don't hallucinate tools; use exactly what you have bound."""
-            session.add(SystemSettings(key="system_instruction", value=default_instruction))
-
-        # Seed AI Verbosity if empty (1: Ultra-Concise, 2: Balanced, 3: Detailed)
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first():
-            session.add(SystemSettings(key="ai_verbosity", value="2"))
-        
-        # Seed Voice Engine if empty
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "llm_provider")).first():
-            session.add(SystemSettings(key="llm_provider", value="mistral"))
-        
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "llm_model")).first():
-            session.add(SystemSettings(key="llm_model", value="mistral-small-latest"))
-
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "tts_model")).first():
-            session.add(SystemSettings(key="tts_model", value="aura-asteria-en"))
-
-        # Seed Telephony Engine if empty
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "telephony_engine")).first():
-            session.add(SystemSettings(key="telephony_engine", value="twilio"))
-        
-        # Seed AI Verbosity if empty (1: Ultra-Concise, 2: Balanced, 3: Detailed)
-        if not session.exec(select(SystemSettings).where(SystemSettings.key == "ai_verbosity")).first():
-            session.add(SystemSettings(key="ai_verbosity", value="2"))
-
-        # Seed Products if empty
-        if not session.exec(select(Product)).first():
-            default_products = [
-                Product(name="Samsung 55 TV", stock=5, price="₹65,000"),
-                Product(name="Samsung S24", stock=12, price="₹75,000"),
-                Product(name="Galaxy Watch", stock=0, price="₹25,000"),
-                Product(name="VRF System", stock=2, price="₹4,00,000", note="Requires installation team")
-            ]
-            for p in default_products:
-                session.add(p)
-        
-        session.commit()
-    
-    print("Database initialized.")
 
 def get_session() -> Generator[Session, None, None]:
     with Session(engine) as session:
         yield session
+
+
+def seed_permissions(session: Session) -> None:
+    defaults = [
+        ("lead.read_own", "lead", "Read own leads"),
+        ("lead.read_company", "lead", "Read all company leads"),
+        ("lead.create", "lead", "Create leads"),
+        ("lead.update_own", "lead", "Update own leads"),
+        ("lead.update_company", "lead", "Update all company leads"),
+        ("lead.delete_own", "lead", "Delete own leads"),
+        ("lead.delete_company", "lead", "Delete all company leads"),
+        ("interaction.read_own", "interaction", "Read own interactions"),
+        ("interaction.read_company", "interaction", "Read all company interactions"),
+        ("product.read", "product", "Read products"),
+        ("product.manage", "product", "Manage products"),
+        ("appointment.read", "appointment", "Read appointments"),
+        ("appointment.manage", "appointment", "Manage appointments"),
+        ("outcome.read", "outcome", "Read outcomes"),
+        ("outcome.manage", "outcome", "Manage outcomes"),
+        ("user.invite", "user", "Invite users"),
+        ("user.read", "user", "Read company users"),
+        ("user.manage", "user", "Manage company users"),
+        ("role.read", "role", "Read roles"),
+        ("role.manage", "role", "Manage roles"),
+        ("settings.read_company", "settings", "Read company settings"),
+        ("settings.manage_company", "settings", "Manage company settings"),
+        ("integrations.read_company", "integrations", "Read company integrations"),
+        ("integrations.manage_company", "integrations", "Manage company integrations"),
+        ("analytics.read_own", "analytics", "Read own analytics"),
+        ("analytics.read_company", "analytics", "Read company analytics"),
+        ("campaign.read", "campaign", "Read campaigns"),
+        ("campaign.manage", "campaign", "Manage campaigns"),
+        ("campaign.launch", "campaign", "Launch campaigns"),
+        ("call_task.read", "call_task", "Read call tasks"),
+        ("call_task.manage", "call_task", "Manage call tasks"),
+        ("requirements.read", "requirements", "Read lead requirements"),
+        ("requirements.manage", "requirements", "Manage lead requirements"),
+        ("quote.read", "quote", "Read quotes"),
+        ("quote.manage", "quote", "Manage quotes"),
+        ("quote.send", "quote", "Send quotes"),
+        ("agent.manage", "agent", "View and manage agent tasks"),
+        ("agent.review", "agent", "Approve or reject agent actions"),
+        ("order.read", "order", "Read orders"),
+        ("order.manage", "order", "Create and manage orders"),
+        ("invoice.read", "invoice", "Read invoices"),
+        ("invoice.manage", "invoice", "Create and manage invoices"),
+        ("payment.read", "payment", "Read payments"),
+        ("payment.manage", "payment", "Create and manage payments"),
+        ("ticket.read", "ticket", "Read service tickets"),
+        ("ticket.manage", "ticket", "Create and manage service tickets"),
+        ("installation.read", "installation", "Read installations"),
+        ("installation.manage", "installation", "Create and manage installations"),
+        ("contact.read", "contact", "Read contacts"),
+        ("contact.manage", "contact", "Create and manage contacts"),
+    ]
+
+    existing = {item.key for item in session.exec(select(Permission)).all()}
+    for key, module, description in defaults:
+        if key not in existing:
+            session.add(Permission(key=key, module=module, description=description))
+
+    session.commit()
+
+
+_SALES_REP_PERMISSIONS = {
+    "lead.read_own", "lead.create", "lead.update_own",
+    "interaction.read_own",
+    "product.read",
+    "appointment.read", "appointment.manage",
+    "campaign.read",
+    "call_task.read", "call_task.manage",
+    "quote.read", "quote.manage", "quote.send",
+    "analytics.read_own",
+    "requirements.read", "requirements.manage",
+    "user.read",
+    "agent.manage",
+    "agent.review",
+    # Phase 7 read-only — sales reps can view but not manage
+    "order.read",
+    "invoice.read",
+    "payment.read",
+    "ticket.read",
+    "installation.read",
+    "contact.read",
+}
+
+
+def patch_sales_rep_permissions(session: Session) -> None:
+    """
+    Idempotent — ensures every sales_representative role in every company
+    has exactly the current set of sales permissions.
+    Adds missing permissions and removes stale ones. Safe to run on every startup.
+    """
+    sales_roles = session.exec(
+        select(Role).where(Role.name == "sales_representative")
+    ).all()
+
+    existing_keys = {p.key for p in session.exec(select(Permission)).all()}
+
+    for role in sales_roles:
+        existing_perms = set(session.exec(
+            select(RolePermission.permission_key).where(RolePermission.role_id == role.id)
+        ).all())
+
+        # Add missing permissions
+        for key in _SALES_REP_PERMISSIONS:
+            if key in existing_keys and key not in existing_perms:
+                session.add(RolePermission(role_id=role.id, permission_key=key))
+
+        # Remove permissions no longer in the set
+        stale = existing_perms - _SALES_REP_PERMISSIONS
+        for key in stale:
+            rp = session.exec(
+                select(RolePermission).where(
+                    RolePermission.role_id == role.id,
+                    RolePermission.permission_key == key,
+                )
+            ).first()
+            if rp:
+                session.delete(rp)
+
+    session.commit()
+
+
+def patch_system_admin_permissions(session: Session) -> None:
+    """
+    Keep existing company_owner and company_admin system roles aligned with the
+    current permission catalog. New permissions are seeded before this runs, so
+    older companies get access to newly introduced admin endpoints.
+    """
+    admin_roles = session.exec(
+        select(Role).where(
+            Role.name.in_(["company_owner", "company_admin"]),
+            Role.is_system == True,  # noqa: E712
+        )
+    ).all()
+
+    all_permissions = {p.key for p in session.exec(select(Permission)).all()}
+
+    for role in admin_roles:
+        existing_perms = set(session.exec(
+            select(RolePermission.permission_key).where(RolePermission.role_id == role.id)
+        ).all())
+
+        for key in all_permissions - existing_perms:
+            session.add(RolePermission(role_id=role.id, permission_key=key))
+
+    session.commit()
+
+
+def init_db() -> None:
+    SQLModel.metadata.create_all(engine, checkfirst=True)
+    with Session(engine) as session:
+        seed_permissions(session)
+        patch_system_admin_permissions(session)
+        patch_sales_rep_permissions(session)
+    from migrations.apply_rls import ensure_rls
+    ensure_rls()

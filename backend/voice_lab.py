@@ -11,8 +11,6 @@ load_dotenv()
 
 app = FastAPI(title="Rio Voice Lab 🧪")
 
-# EMBEDDED FRONTEND (ONE-FILE MAGIC)
-
 HTML_UI = """
 <!DOCTYPE html>
 <html>
@@ -188,8 +186,9 @@ async def handle_stream(websocket: WebSocket):
     print("🚀 Voice Lab: Client connected. Opening Deepgram Agent...")
 
     # Deepgram Voice Agent WebSocket: Correct V1 Endpoint
-    # Model: nova-2 (STT), Voice: aura-asteria-en (TTS)
-    uri = "wss://agent.deepgram.com/v1/agent/converse?model=nova-2&voice=aura-asteria-en&encoding=linear16&sample_rate=16000"
+    voice = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")
+    # Deepgram Voice Agent WebSocket: Correct V1 Endpoint
+    uri = f"wss://agent.deepgram.com/v1/agent/converse?model=nova-2&voice={voice}&encoding=linear16&sample_rate=16000"
     
     headers = {"Authorization": f"Token {api_key}"}
     

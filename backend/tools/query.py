@@ -1,188 +1,63 @@
-"""Query Tool - Agentic SQL + Lead Status queries"""
+"""Query Tool — Lead status checks and semantic KB search."""
 
-from sqlmodel import Session, select, text
-from backend.database import engine, Lead, Interaction, Product
+from typing import Optional
 
+from langchain_core.tools import tool
+from sqlmodel import Session, select
+from database import engine
+from models.models import Lead, Interaction
+
+
+@tool
 def check_lead_status(lead_id: int) -> dict:
     """
-    Get comprehensive lead status and history (DETERMINISTIC).
-    
-    Args:
-        lead_id: ID of the lead
-    
-    Returns:
-        {
-            "lead_id": int,
-            "name": str,
-            "email": str,
-            "phone": str,
-            "status": str,
-            "icp_score": float,
-            "interactions_count": int,
-            "last_interaction": str,
-            "created_date": str,
-            "message": str
-        }
+    Get comprehensive lead status and interaction history for a given lead_id.
+    Use this to look up what we know about a lead before or during a call.
     """
     with Session(engine) as session:
         lead = session.get(Lead, lead_id)
-        
+
         if not lead:
             return {"error": f"Lead {lead_id} not found"}
-        
-        # Count interactions
+
         interactions = session.exec(
             select(Interaction).where(Interaction.lead_id == lead_id)
         ).all()
-        
+
         last_interaction = None
         if interactions:
-            last_interaction = max(interactions, key=lambda x: x.timestamp).timestamp.isoformat()
-        
+            last_interaction = max(interactions, key=lambda x: x.started_at).started_at.isoformat()
+
         return {
             "lead_id": lead_id,
             "name": lead.name,
             "email": lead.email,
-            "phone": lead.phone,
+            "phone": lead.normalized_phone,
             "status": lead.status,
+            "ism_stage": lead.ism_stage,
             "source": lead.source,
             "enrichment_status": lead.enrichment_status,
             "interactions_count": len(interactions),
             "last_interaction": last_interaction,
             "created_date": lead.created_at.isoformat() if lead.created_at else None,
-            "message": f"✓ Lead {lead.name} has {len(interactions)} interactions"
+            "message": f"Lead {lead.name} has {len(interactions)} interactions",
         }
 
-def semantic_query(question: str, query_type: str = "leads") -> dict:
-    """
-    Agentic SQL query based on semantic question (AGENTIC - 20% use case).
-    
-    This tool lets the agent ask natural language questions and returns relevant data.
-    Examples:
-    - "Show me leads from Tech industry"
-    - "How many leads are qualified?"
-    - "What's our top performing product?"
-    
-    Args:
-        question: Natural language query
-        query_type: "leads", "products", "interactions"
-    
-    Returns:
-        {
-            "results": list,
-            "count": int,
-            "query_type": str,
-            "message": str
-        }
-    """
-    with Session(engine) as session:
-        question_lower = question.lower()
-        results = []
-        
-        # Lead queries
-        if query_type == "leads" or "lead" in question_lower:
-            if "tech" in question_lower or "technology" in question_lower:
-                leads = session.exec(
-                    select(Lead).where(Lead.source.ilike("%tech%"))
-                ).all()
-            elif "qualified" in question_lower:
-                leads = session.exec(
-                    select(Lead).where(Lead.status == "Qualified")
-                ).all()
-            elif "new" in question_lower:
-                leads = session.exec(
-                    select(Lead).where(Lead.status == "New")
-                ).all()
-            else:
-                leads = session.exec(select(Lead)).all()
-            
-            results = [
-                {
-                    "id": l.id,
-                    "name": l.name,
-                    "email": l.email,
-                    "status": l.status,
-                    "source": l.source
-                }
-                for l in leads
-            ]
-        
-        # Product queries
-        elif query_type == "products" or "product" in question_lower:
-            if "stock" in question_lower or "available" in question_lower:
-                products = session.exec(
-                    select(Product).where(Product.stock > 0)
-                ).all()
-            else:
-                products = session.exec(select(Product)).all()
-            
-            results = [
-                {
-                    "name": p.name,
-                    "price": p.price,
-                    "stock": p.stock
-                }
-                for p in products
-            ]
-        
-        # Interaction queries
-        elif query_type == "interactions" or "interaction" in question_lower:
-            interactions = session.exec(select(Interaction)).all()
-            results = [
-                {
-                    "type": i.type,
-                    "lead_id": i.lead_id,
-                    "timestamp": i.timestamp.isoformat() if i.timestamp else None
-                }
-                for i in interactions
-            ]
-        
-        return {
-            "results": results,
-            "count": len(results),
-            "query_type": query_type,
-            "message": f"✓ Found {len(results)} {query_type}"
-        }
 
-def search_leads_by_criteria(criteria: dict) -> dict:
+@tool
+def semantic_query(query: str, collection: str = "all", company_id: Optional[int] = None) -> str:
     """
-    Search leads using multiple criteria (DETERMINISTIC).
-    
-    Args:
-        criteria: Dict with keys like 'name', 'email', 'status', 'source'
-    
-    Returns:
-        {
-            "found": bool,
-            "results": list,
-            "count": int
-        }
+    Searches the Rio knowledge base semantically for relevant context.
+    Use this to find product information, objection handling strategies,
+    competitor intelligence, playbooks, or coaching tips.
+    Collections: products, objections, competitors, playbooks, coaching, sops, transcripts, all.
+    Returns the top matching knowledge chunks as formatted text.
     """
-    with Session(engine) as session:
-        query = select(Lead)
-        
-        if "name" in criteria:
-            query = query.where(Lead.name.ilike(f"%{criteria['name']}%"))
-        if "email" in criteria:
-            query = query.where(Lead.email.ilike(f"%{criteria['email']}%"))
-        if "status" in criteria:
-            query = query.where(Lead.status == criteria["status"])
-        if "source" in criteria:
-            query = query.where(Lead.source.ilike(f"%{criteria['source']}%"))
-        
-        leads = session.exec(query).all()
-        
-        return {
-            "found": len(leads) > 0,
-            "results": [
-                {
-                    "id": l.id,
-                    "name": l.name,
-                    "email": l.email,
-                    "status": l.status,
-                    "source": l.source
-                }
-                for l in leads
-            ],
-            "count": len(leads)
-        }
+    if not company_id:
+        return "company_id is required to search the knowledge base."
+    try:
+        from services.rag.query_engine import format_for_prompt, search as rag_search
+        results = rag_search(query, company_id=company_id, collection=collection, n_results=5)
+        return format_for_prompt(results)
+    except Exception as exc:
+        return f"Knowledge base search unavailable: {exc}"

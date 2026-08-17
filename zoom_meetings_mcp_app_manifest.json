@@ -1,0 +1,36 @@
+{
+  "app_type": "general",
+  "app_name": "RioBETA",
+  "contact_name": "Lokesh",
+  "contact_email": "lokeshk431@gmail.com",
+  "company_name": "Rio",
+  "manifest": {
+    "display_information": {
+      "display_name": "RioBETA",
+      "description": "Rio CRM — Zoom Meetings MCP connector for meeting search, meeting assets, and cloud recordings."
+    },
+    "oauth_information": {
+      "usage": "USER_OPERATION",
+      "development_redirect_uri": "http://localhost:6060/crm/zoom/callback",
+      "production_redirect_uri": "http://localhost:6060/crm/zoom/callback",
+      "oauth_allow_list": [
+        "http://localhost:6060/crm/zoom/callback",
+        "http://127.0.0.1:6060/crm/zoom/callback"
+      ],
+      "strict_mode": true,
+      "subdomain_strict_mode": true,
+      "scopes": [
+        { "scope": "meeting:read:search", "optional": false },
+        { "scope": "meeting:read:assets", "optional": false },
+        { "scope": "cloud_recording:read:list_user_recordings", "optional": false },
+        { "scope": "cloud_recording:read:content", "optional": false }
+      ],
+      "scope_description": "Use the four dedicated Meetings MCP tools for the authorizing user.",
+      "enable_private_pkce_client": false,
+      "enable_public_pkce_client": false
+    },
+    "features": {
+      "products": []
+    }
+  }
+}

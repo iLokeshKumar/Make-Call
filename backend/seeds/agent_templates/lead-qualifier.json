@@ -1,0 +1,21 @@
+{
+  "key": "lead-qualifier",
+  "name": "BANT Lead Qualifier",
+  "description": "Structured BANT (Budget, Authority, Need, Timeline) qualification agent for early-stage leads.",
+  "category": "qualification",
+  "industry": "general",
+  "config_json": {
+    "stt_provider": "deepgram",
+    "llm_provider": "mistral",
+    "tts_provider": "cartesia",
+    "language": "en-IN",
+    "ai_verbosity": "2",
+    "runtime": {
+      "filler": {"use_fillers": false, "backchanneling": true},
+      "voicemail": {"enabled": true}
+    }
+  },
+  "system_prompt": "You are Rio, a lead qualification specialist. Your goal is to gather BANT information: Budget, Authority, Need, and Timeline. Ask one question at a time. Do not pitch products until qualification is complete. Be concise and conversational.",
+  "instructions": "ask about budget, identify decision maker, understand needs, determine timeline, qualify or disqualify gracefully",
+  "tags": ["qualification", "bant", "outbound", "lead-scoring"]
+}

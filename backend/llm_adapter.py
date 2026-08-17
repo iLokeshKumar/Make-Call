@@ -2,7 +2,6 @@ from enum import Enum
 from typing import Any, Dict
 import os
 
-
 class LLMProvider(Enum):
     """Supported LLM providers"""
     GEMINI = "gemini"
@@ -11,11 +10,11 @@ class LLMProvider(Enum):
     CLAUDE = "claude"
     OPENAI = "openai"
     LLAMA = "llama"
-
+    OPENROUTER = "openrouter"
 
 class LLMClient:
     """Universal LLM client interface"""
-    
+
     def __init__(self, provider: LLMProvider, api_key: str = None, **kwargs):
         self.provider = provider
         self.api_key = api_key or self._get_api_key()
@@ -31,6 +30,7 @@ class LLMClient:
             LLMProvider.CLAUDE: "CLAUDE_API_KEY",
             LLMProvider.OPENAI: "OPENAI_API_KEY",
             LLMProvider.LLAMA: "LLAMA_API_KEY",
+            LLMProvider.OPENROUTER: "OPENROUTER_API_KEY",
         }
         env_var = key_map.get(self.provider)
         return os.getenv(env_var, "")
@@ -82,8 +82,7 @@ class LLMClient:
         from tool_adapter import get_mistral_tools
         
         if provider == LLMProvider.GEMINI:
-            # Gemini uses MCP protocol natively
-            return []  # MCP server handles it
+            return []
         
         elif provider == LLMProvider.MISTRAL:
             return get_mistral_tools()
@@ -99,6 +98,9 @@ class LLMClient:
         
         elif provider == LLMProvider.LLAMA:
             return get_llama_tools()
+        
+        elif provider == LLMProvider.OPENROUTER:
+            return get_openai_tools()
         
         else:
             raise ValueError(f"Unsupported provider: {provider}")
@@ -118,15 +120,13 @@ def get_qwen_tools() -> list:
                     "properties": {
                         "company_size": {"type": "string"},
                         "industry": {"type": "string"},
-                        "employee_count": {"type": "integer"}
+                        "employee_count": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
                     },
                     "required": ["company_size", "industry", "employee_count"]
                 }
             }
         },
-        # ... add other tools
     ]
-
 
 def get_claude_tools() -> list:
     """Convert MCP tools to Claude format"""
@@ -139,14 +139,12 @@ def get_claude_tools() -> list:
                 "properties": {
                     "company_size": {"type": "string"},
                     "industry": {"type": "string"},
-                    "employee_count": {"type": "integer"}
+                    "employee_count": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
                 },
                 "required": ["company_size", "industry", "employee_count"]
             }
         },
-        # ... add other tools
     ]
-
 
 def get_openai_tools() -> list:
     """Convert MCP tools to OpenAI format"""
@@ -161,44 +159,14 @@ def get_openai_tools() -> list:
                     "properties": {
                         "company_size": {"type": "string"},
                         "industry": {"type": "string"},
-                        "employee_count": {"type": "integer"}
+                        "employee_count": {"anyOf": [{"type": "integer"}, {"type": "string"}]}
                     },
                     "required": ["company_size", "industry", "employee_count"]
                 }
             }
         },
-        # ... add other tools
     ]
-
 
 def get_llama_tools() -> list:
     """Convert MCP tools to LLaMA format (if supported)"""
-    return []  # META LLaMA typically runs locally, adjust as needed
-
-# DEMO USAGE EXAMPLES
-
-"""
-# Switch to Qwen
-from llm_adapter import LLMProvider, LLMClient
-
-llm = LLMClient(
-    provider=LLMProvider.QWEN,
-    api_key="your-qwen-key"
-)
-
-# Get tools for the provider
-tools = LLMClient.get_tools_for_provider(LLMProvider.QWEN)
-
-# Use in voice pipeline or agents
-response = llm.client.chat.complete(...)
-
-
-# Switch to Claude
-llm = LLMClient(provider=LLMProvider.CLAUDE)
-tools = LLMClient.get_tools_for_provider(LLMProvider.CLAUDE)
-
-
-# Switch to OpenAI
-llm = LLMClient(provider=LLMProvider.OPENAI)
-tools = LLMClient.get_tools_for_provider(LLMProvider.OPENAI)
-"""
+    return []
