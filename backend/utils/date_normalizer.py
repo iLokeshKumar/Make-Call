@@ -1,11 +1,12 @@
 import os
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import json
 import re
 from typing import Optional
 
-from services.llm import get_llm_service
+from services.ai.llm import get_llm_service
 
 logger = logging.getLogger(__name__)
 
@@ -28,12 +29,12 @@ class DateNormalizer:
         )
         self.llm = get_llm_service(provider, system_prompt)
 
-    async def normalize(self, raw_date_str: str) -> Optional[datetime]:
+    async def normalize(self, raw_date_str: str, timezone_str: str = "UTC") -> Optional[datetime]:
         """Normalize a string using AI and return a corrected datetime object."""
         if not raw_date_str:
             return None
             
-        now = datetime.now()
+        now = datetime.now(ZoneInfo(timezone_str))
         
         # Reset messages to only contain system prompt for a fresh stateless call
         self.llm.messages = [{"role": "system", "content": self.llm.system_prompt}]
@@ -71,16 +72,16 @@ class DateNormalizer:
         """Post-parsing validation to strictly ensure only future weekdays are booked."""
         original_dt = dt
         
-        # 1. Rule: Only Future (Strictly)
+
         if dt <= now:
-            # If it's in the past, shift to tomorrow same time
+
             dt = dt + timedelta(days=1)
-            # Re-check if still in the past (e.g. if now is afternoon and user said 9 AM)
+
             if dt <= now:
                 dt = dt + timedelta(days=1)
             logger.info(f"🔄 [DateNormalizer] Shifting Past/Today to Future: {original_dt} -> {dt}")
 
-        # 2. Rule: Avoid Weekends (5=Saturday, 6=Sunday)
+
         while dt.weekday() >= 5:
             logger.info(f"🔄 [DateNormalizer] {dt.strftime('%A')} is a weekend. Shifting to Monday.")
             dt = dt + timedelta(days=1)
@@ -90,8 +91,12 @@ class DateNormalizer:
 # Singleton instance
 _normalizer = None
 
-async def normalize_date_ai(raw_str: str, provider: str = None) -> Optional[datetime]:
+async def normalize_date_ai(
+    raw_str: str,
+    provider: str = None,
+    timezone_str: str = "UTC",
+) -> Optional[datetime]:
     global _normalizer
     if _normalizer is None:
         _normalizer = DateNormalizer(provider=provider)
-    return await _normalizer.normalize(raw_str)
+    return await _normalizer.normalize(raw_str, timezone_str=timezone_str)

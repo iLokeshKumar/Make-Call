@@ -50,7 +50,7 @@ def book_meeting(lead_id: int, proposed_time: str, meeting_type: str = "demo", n
                 notes=notes or f"Appointment for {meeting_type}"
             )
             
-            # --- GOOGLE MEET INTEGRATION ---
+            # GOOGLE MEET INTEGRATION
             meet_result = create_google_meet_for_booking(
                 lead_name=lead.name,
                 lead_email=lead.email or "no-email@example.com",

@@ -1,44 +1,51 @@
 "use client";
 
 import { useEffect, useState, Suspense, useRef } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { CheckCircle, XCircle, Loader2, ArrowRight } from "lucide-react";
 import Link from "next/link";
+import { API_BASE } from "@/lib/api";
+
+type VerificationResponse = {
+    detail?: string | { message?: string };
+    message?: string;
+    status?: string;
+};
+
+function getResponseMessage(data: VerificationResponse, fallback: string) {
+    if (typeof data.message === "string" && data.message.trim()) return data.message;
+    if (typeof data.detail === "string" && data.detail.trim()) return data.detail;
+    if (typeof data.detail === "object" && data.detail.message?.trim()) return data.detail.message;
+    return fallback;
+}
 
 function VerifyContent() {
     const searchParams = useSearchParams();
-    const router = useRouter();
     const token = searchParams.get("token");
-    const [status, setStatus] = useState<"loading" | "success" | "error">("loading");
-    const [message, setMessage] = useState("");
+    const [status, setStatus] = useState<"loading" | "success" | "error">(token ? "loading" : "error");
+    const [message, setMessage] = useState(token ? "" : "Invalid or missing verification token.");
     const hasCalled = useRef(false);
 
     useEffect(() => {
-        if (!token || hasCalled.current) {
-            if (!token) {
-                setStatus("error");
-                setMessage("Invalid or missing verification token.");
-            }
-            return;
-        }
+        if (!token || hasCalled.current) return;
 
         hasCalled.current = true;
 
         const verifyEmail = async () => {
             try {
-                const res = await fetch(`http://localhost:6060/verify?token=${token}`);
-                const data = await res.json();
+                const res = await fetch(`${API_BASE}/auth/verify-email?token=${encodeURIComponent(token)}`);
+                const data = await res.json().catch(() => ({} as VerificationResponse));
 
                 if (res.ok) {
                     setStatus("success");
-                    setMessage(data.message);
+                    setMessage(getResponseMessage(data, "Email verified successfully. You can now sign in."));
                 } else {
                     setStatus("error");
-                    setMessage(data.detail || "Verification failed.");
+                    setMessage(getResponseMessage(data, "Verification failed. Please request a new verification link."));
                 }
-            } catch (err) {
+            } catch {
                 setStatus("error");
-                setMessage("Network error. Please try again later.");
+                setMessage("Could not verify your email right now. Please check your connection and try again.");
             }
         };
 
@@ -61,7 +68,7 @@ function VerifyContent() {
                         <CheckCircle className="h-12 w-12 text-green-500" />
                     </div>
                     <div className="space-y-2">
-                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Verified!</h1>
+                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Email verified successfully</h1>
                         <p className="text-gray-500 dark:text-gray-400">{message}</p>
                     </div>
                     <Link
@@ -80,7 +87,7 @@ function VerifyContent() {
                         <XCircle className="h-12 w-12 text-red-500" />
                     </div>
                     <div className="space-y-2">
-                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Verification Failed</h1>
+                        <h1 className="text-3xl font-bold text-gray-900 dark:text-white">Email verification failed</h1>
                         <p className="text-gray-500 dark:text-gray-400">{message}</p>
                     </div>
                     <div className="flex flex-col space-y-3">

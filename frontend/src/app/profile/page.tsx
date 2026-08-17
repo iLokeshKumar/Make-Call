@@ -1,40 +1,50 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { useAuth } from "@/context/AuthContext";
 import {
     User as UserIcon, Mail, Smartphone, Globe, Building2,
     Lock, Save, Loader2, CheckCircle2, AlertCircle, Camera,
-    Shield, Trash2, ExternalLink, RefreshCw, XCircle,
+    Shield, Trash2,
     Eye, EyeOff, ShieldCheck, X, Clock
 } from "lucide-react";
 import clsx from "clsx";
 import MFASetup from "@/components/MFASetup";
 import { useEffect } from "react";
-import { useSearchParams, useRouter } from "next/navigation";
 import { maskEmail, maskPhone } from "@/utils/security";
 
+import { apiFetch } from "@/utils/apiFetch";
+import { API_BASE } from "@/lib/api";
+type LoginHistoryEntry = {
+    id: number;
+    created_at?: string;
+    login_time?: string;
+    ip_address?: string;
+    user_agent?: string;
+    location?: string;
+    device?: string;
+};
+
 export default function ProfilePage() {
-    const { user, token, refreshUser, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    const { user, refreshUser, logoutAll, showPersonalDetails, revealPersonalDetails, hidePersonalDetails, timeLeft } = useAuth();
+    
     const [isSaving, setIsSaving] = useState(false);
-    const [isConnectingGoogle, setIsConnectingGoogle] = useState(false);
     const [message, setMessage] = useState<{ type: 'success' | 'error', text: string } | null>(null);
     const [isOtpModalOpen, setIsOtpModalOpen] = useState(false);
     const [otpValue, setOtpValue] = useState("");
+    const [loginHistory, setLoginHistory] = useState<LoginHistoryEntry[]>([]);
+    const [isHistoryLoading, setIsHistoryLoading] = useState(false);
+    const [isLogoutAllLoading, setIsLogoutAllLoading] = useState(false);
     const [isRequestingOtp, setIsRequestingOtp] = useState(false);
     const [isVerifyingOtp, setIsVerifyingOtp] = useState(false);
     const [otpError, setOtpError] = useState("");
-    const searchParams = useSearchParams();
-    const router = useRouter();
-
     const [formData, setFormData] = useState({
         first_name: user?.first_name || "",
         last_name: user?.last_name || "",
         phone_number: user?.phone_number || "",
         company_name: user?.company_name || "",
         company_website: user?.company_website || "",
-        profile_picture_url: user?.profile_picture_url || "",
-    });
+        profile_picture_url: user?.profile_picture_url || "" });
 
     const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
@@ -47,13 +57,11 @@ export default function ProfilePage() {
         uploadData.append("file", file);
 
         try {
-            const res = await fetch("http://localhost:6060/auth/upload-avatar", {
+            const res = await apiFetch(`${API_BASE}/auth/upload-avatar`, {
                 method: "POST",
                 headers: {
-                    Authorization: `Bearer ${token}`,
                 },
-                body: uploadData,
-            });
+                body: uploadData });
 
             if (res.ok) {
                 const data = await res.json();
@@ -70,84 +78,58 @@ export default function ProfilePage() {
         }
     };
 
-    // Add this near the top of ProfilePage component
-    const hasHandledCode = useRef(false);
-
-    useEffect(() => {
-        const code = searchParams.get("code");
-        if (code && token && !hasHandledCode.current) {
-            hasHandledCode.current = true;  // ← blocks second fire
-            const finalizeGoogleAuth = async () => {
-                setIsConnectingGoogle(true);
-                try {
-                    const res = await fetch("http://localhost:6060/auth/google/callback", {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            Authorization: `Bearer ${token}`,
-                        },
-                        body: JSON.stringify({ code }),
-                    });
-                    if (res.ok) {
-                        setMessage({ type: 'success', text: "Google account connected successfully! 📅" });
-                        await refreshUser();
-                        router.replace("/profile");
-                    } else {
-                        const err = await res.json();
-                        setMessage({ type: 'error', text: err.detail || "Failed to connect Google account." });
-                    }
-                } catch (err) {
-                    setMessage({ type: 'error', text: "An error occurred during Google connection." });
-                } finally {
-                    setIsConnectingGoogle(false);
-                }
-            };
-            finalizeGoogleAuth();
+    const getInitials = () => {
+        const first = (user?.first_name || "").trim();
+        const last = (user?.last_name || "").trim();
+        if (!first && !last) {
+            const un = user?.username || "U";
+            return un.slice(0, 2).toUpperCase();
         }
-    }, [searchParams, token]); // ← remove refreshUser and router from deps
-
-    const handleConnectGoogle = async () => {
-        setIsConnectingGoogle(true);
-        try {
-            const res = await fetch("http://localhost:6060/auth/google/url", {
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            const data = await res.json();
-            if (data.auth_url) {
-                // Open in a new window/tab
-                const authWindow = window.open(data.auth_url, '_blank', 'width=600,height=700');
-
-                // Set up a listener for the callback
-                const checkWindow = setInterval(async () => {
-                    if (authWindow?.closed) {
-                        clearInterval(checkWindow);
-                        setIsConnectingGoogle(false);
-                        await refreshUser();
-                    }
-                }, 1000);
-            }
-        } catch (err) {
-            console.error("Google Auth error:", err);
-            setIsConnectingGoogle(false);
-        }
+        const parts = `${first} ${last}`.trim().split(/\s+/);
+        if (parts.length === 1) return parts[0].slice(0, 2).toUpperCase();
+        return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
     };
 
-    const handleDisconnectGoogle = async () => {
-        if (!window.confirm("Disconnect your Google account? You won't be able to generate Meet links automatically.")) return;
-
+    const fetchLoginHistory = async () => {
+        if (!user) return;
+        setIsHistoryLoading(true);
         try {
-            const res = await fetch("http://localhost:6060/auth/google/disconnect", {
-                method: "DELETE",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch(`${API_BASE}/auth/login-history`, {
             });
             if (res.ok) {
-                setMessage({ type: 'success', text: "Google account disconnected." });
-                await refreshUser();
+                setLoginHistory(await res.json());
+            } else {
+                console.warn("Failed login history", await res.text());
             }
         } catch (err) {
-            setMessage({ type: 'error', text: "Failed to disconnect." });
+            console.error("Error loading login history", err);
+        } finally {
+            setIsHistoryLoading(false);
         }
     };
+
+    const formatLoginTimestamp = (entry: LoginHistoryEntry) => {
+        const ts = entry.created_at ?? entry.login_time;
+        if (!ts) return "Unknown";
+        const parsed = new Date(ts);
+        return Number.isNaN(parsed.getTime()) ? "Unknown" : parsed.toLocaleString();
+    };
+
+    const handleLogoutAll = async () => {
+        if (!user) return;
+        setIsLogoutAllLoading(true);
+        try {
+            await logoutAll();
+        } finally {
+            setIsLogoutAllLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (user) {
+            fetchLoginHistory();
+        }
+    }, [user]);
 
     const handleRequestReveal = async () => {
         if (showPersonalDetails) {
@@ -160,9 +142,8 @@ export default function ProfilePage() {
         setOtpError("");
 
         try {
-            const res = await fetch("http://localhost:6060/auth/reveal/request", {
-                method: "POST",
-                headers: { Authorization: `Bearer ${token}` },
+            const res = await apiFetch(`${API_BASE}/auth/reveal/request`, {
+                method: "POST"
             });
             if (!res.ok) throw new Error("Failed to send OTP");
         } catch (err) {
@@ -177,14 +158,11 @@ export default function ProfilePage() {
         setOtpError("");
 
         try {
-            const res = await fetch("http://localhost:6060/auth/reveal/verify", {
+            const res = await apiFetch(`${API_BASE}/auth/reveal/verify`, {
                 method: "POST",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`
-                },
-                body: JSON.stringify({ token: otpValue }),
-            });
+                    "Content-Type": "application/json" },
+                body: JSON.stringify({ token: otpValue }) });
 
             if (res.ok) {
                 revealPersonalDetails();
@@ -207,16 +185,14 @@ export default function ProfilePage() {
         }
 
         try {
-            const res = await fetch("http://localhost:6060/auth/me", {
-                method: "DELETE",
-                headers: {
-                    "Authorization": `Bearer ${token}`
-                },
+            const res = await apiFetch(`${API_BASE}/auth/me`, {
+                method: "DELETE"
             });
 
             if (res.ok) {
                 alert("Account deleted successfully.");
-                localStorage.removeItem("access_token");
+                // Server already cleared the session cookie during account
+                // deletion; nothing to clear client-side.
                 window.location.href = "/register";
             } else {
                 const errorData = await res.json();
@@ -234,14 +210,11 @@ export default function ProfilePage() {
         setMessage(null);
 
         try {
-            const res = await fetch("http://localhost:6060/users/me", {
+            const res = await apiFetch(`${API_BASE}/users/me`, {
                 method: "PATCH",
                 headers: {
-                    "Content-Type": "application/json",
-                    Authorization: `Bearer ${token}`,
-                },
-                body: JSON.stringify(formData),
-            });
+                    "Content-Type": "application/json" },
+                body: JSON.stringify(formData) });
 
             if (res.ok) {
                 setMessage({ type: 'success', text: "Profile updated successfully! ✨" });
@@ -258,36 +231,41 @@ export default function ProfilePage() {
     };
 
     return (
-        <div className="min-h-screen bg-slate-950 p-8 pt-24 text-slate-200">
+        <div className="min-h-screen p-8 pt-24 text-slate-900 dark:text-slate-200">
             <div className="max-w-4xl mx-auto space-y-8 animate-in fade-in slide-in-from-bottom-4 duration-700">
 
                 {/* Header Section */}
-                <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-8 border-b border-white/10">
+                <div className="flex flex-col md:flex-row md:items-end justify-between gap-6 pb-8 border-b border-slate-200 dark:border-white/10">
                     <div className="space-y-2">
                         <h1 className="text-4xl font-black tracking-tight bg-gradient-to-r from-violet-400 to-blue-400 bg-clip-text text-transparent">
                             My Profile
                         </h1>
-                        <p className="text-slate-400 font-medium">Manage your personal and company identity.</p>
+                        <p className="text-slate-500 dark:text-slate-400 font-medium">Manage your personal and company identity.</p>
                     </div>
 
-                    <div className="flex items-center space-x-2 text-xs font-bold uppercase tracking-widest text-slate-500 bg-white/5 px-4 py-2 rounded-full border border-white/10">
-                        <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse mr-1" />
-                        Account Status: Active
+                    <div className="flex items-center gap-3">
+                        <div className="flex items-center space-x-2 text-xs font-bold uppercase tracking-widest text-slate-500 bg-slate-100 dark:bg-white/5 px-4 py-2 rounded-full border border-slate-200 dark:border-white/10">
+                            <span className="h-2 w-2 rounded-full bg-green-500 animate-pulse mr-1" />
+                            Account Status: Active
+                        </div>
                     </div>
                 </div>
 
-                <form onSubmit={handleSave} className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                <form onSubmit={handleSave} className="space-y-8">
 
-                    {/* Left Column: Avatar & Quick Info */}
-                    <div className="lg:col-span-1 space-y-6">
-                        <div className="glass-panel p-8 rounded-3xl flex flex-col items-center text-center space-y-4">
+                    {/* Avatar and Profile Info */}
+                    <div className="bg-white/80 dark:bg-slate-800/40 backdrop-blur-xl border border-violet-200/30 dark:border-white/5 shadow-lg dark:shadow-slate-900/50 p-8 rounded-3xl flex flex-col items-center text-center space-y-4">
                             <div className="relative group">
-                                <div className="h-32 w-32 rounded-full bg-gradient-to-br from-violet-600 to-blue-600 p-1 shadow-2xl shadow-violet-500/20">
-                                    <div className="h-full w-full rounded-full bg-slate-900 flex items-center justify-center overflow-hidden">
+                                <div className="h-24 w-24 rounded-full bg-gradient-to-br from-violet-600 to-blue-600 p-1 shadow-2xl shadow-violet-500/20">
+                                    <div className="h-full w-full rounded-full bg-white dark:bg-slate-900 flex items-center justify-center overflow-hidden">
                                         {formData.profile_picture_url ? (
                                             <img src={formData.profile_picture_url} alt="Profile" className="h-full w-full object-cover" />
+                                        ) : user?.profile_picture_url ? (
+                                            <img src={user.profile_picture_url} alt="Profile" className="h-full w-full object-cover" />
                                         ) : (
-                                            <UserIcon size={48} className="text-slate-700" />
+                                            <div className="flex items-center justify-center h-full w-full text-2xl font-bold text-white bg-gradient-to-br from-violet-500 to-blue-500">
+                                                {getInitials()}
+                                            </div>
                                         )}
                                     </div>
                                 </div>
@@ -301,46 +279,40 @@ export default function ProfilePage() {
                                 <button
                                     type="button"
                                     onClick={() => document.getElementById('profile-upload')?.click()}
-                                    className="absolute bottom-1 right-1 h-10 w-10 bg-slate-800 border border-slate-700 rounded-full flex items-center justify-center text-violet-400 hover:text-white hover:bg-violet-600 transition-all shadow-lg"
+                                    className="absolute bottom-0 right-0 h-8 w-8 bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-full flex items-center justify-center text-violet-500 dark:text-violet-400 hover:text-white hover:bg-violet-600 transition-all shadow-lg"
                                 >
-                                    <Camera size={18} />
+                                    <Camera size={14} />
                                 </button>
                             </div>
 
                             <div className="space-y-1">
-                                <h2 className="text-xl font-bold text-white">{user?.first_name || 'User'} {user?.last_name || ''}</h2>
+                                <h2 className="text-lg font-bold text-slate-900 dark:text-white">{user?.first_name || 'User'} {user?.last_name || ''}</h2>
                                 <p className="text-xs font-mono text-violet-400 uppercase tracking-widest">@{user?.username}</p>
                             </div>
 
-                            <div className="w-full pt-4 space-y-2 border-t border-white/5">
+                            <div className="w-full pt-4 space-y-2 border-t border-slate-100 dark:border-white/5">
                                 <div className="flex justify-between text-xs">
-                                    <span className="text-slate-500">Role</span>
-                                    <span className="text-slate-300 font-bold capitalize">{user?.role}</span>
+                                    <span className="text-slate-400 dark:text-slate-500">Role</span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-bold">{user?.role ? user.role.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()) : ""}</span>
                                 </div>
                                 <div className="flex justify-between text-xs">
-                                    <span className="text-slate-500">Member Since</span>
-                                    <span className="text-slate-300 font-bold">Jan 2026</span>
+                                    <span className="text-slate-400 dark:text-slate-500">Member Since</span>
+                                    <span className="text-slate-700 dark:text-slate-300 font-bold">
+                                        {user?.created_at
+                                            ? new Date(user.created_at).toLocaleDateString(undefined, { month: "short", year: "numeric" })
+                                            : "—"}
+                                    </span>
                                 </div>
                             </div>
                         </div>
 
-                        {/* Read-Only Alert */}
-                        <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 flex gap-3">
-                            <Lock className="text-amber-500 shrink-0" size={18} />
-                            <p className="text-[11px] text-amber-200/80 leading-relaxed font-medium">
-                                Username and email are immutable for security. Contact an admin if you need to update these.
-                            </p>
-                        </div>
-                    </div>
-
-                    {/* Right Column: Edit Fields */}
-                    <div className="lg:col-span-2 space-y-6">
-                        <div className="glass-panel p-8 rounded-3xl space-y-8">
+                    {/* Personal Information Form */}
+                    <div className="bg-white/80 dark:bg-slate-800/40 backdrop-blur-xl border border-violet-200/30 dark:border-white/5 shadow-lg dark:shadow-slate-900/50 p-8 rounded-3xl space-y-8">
 
                             {/* Personal Section */}
                             <div className="space-y-6">
-                                <div className="flex items-center justify-between border-b border-white/5 pb-2">
-                                    <div className="flex items-center space-x-2 text-slate-400">
+                                <div className="flex items-center justify-between border-b border-slate-200/70 dark:border-white/5 pb-2">
+                                    <div className="flex items-center space-x-2 text-slate-500 dark:text-slate-400">
                                         <UserIcon size={16} />
                                         <span className="text-xs font-bold uppercase tracking-wider">Personal Information</span>
                                     </div>
@@ -353,7 +325,7 @@ export default function ProfilePage() {
                                         <button
                                             type="button"
                                             onClick={handleRequestReveal}
-                                            className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-violet-400 transition-all border border-white/10 group"
+                                            className="p-1.5 rounded-lg bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 text-violet-500 dark:text-violet-400 transition-all border border-slate-200 dark:border-white/10 group"
                                             title={showPersonalDetails ? "Hide private info" : "Reveal private info"}
                                         >
                                             {showPersonalDetails ? <EyeOff size={16} /> : <Eye size={16} />}
@@ -363,33 +335,33 @@ export default function ProfilePage() {
 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 ml-1">First Name</label>
+                                        <label className="text-xs font-bold text-slate-400 dark:text-slate-500 ml-1">First Name</label>
                                         <input
                                             type="text"
                                             value={formData.first_name}
                                             onChange={(e) => setFormData({ ...formData, first_name: e.target.value })}
-                                            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all"
+                                            className="w-full bg-white dark:bg-slate-800/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all"
                                         />
                                     </div>
                                     <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 ml-1">Last Name</label>
+                                        <label className="text-xs font-bold text-slate-400 dark:text-slate-500 ml-1">Last Name</label>
                                         <input
                                             type="text"
                                             value={formData.last_name}
                                             onChange={(e) => setFormData({ ...formData, last_name: e.target.value })}
-                                            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all"
+                                            className="w-full bg-white dark:bg-slate-800/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all"
                                         />
                                     </div>
                                     <div className="space-y-2 opacity-80">
-                                        <label className="text-xs font-bold text-slate-500 ml-1 flex items-center">
+                                        <label className="text-xs font-bold text-slate-400 dark:text-slate-500 ml-1 flex items-center">
                                             Email address <Lock size={10} className="ml-1" />
                                         </label>
-                                        <div className="w-full bg-slate-900/80 border border-slate-800 rounded-xl px-4 py-3 text-slate-300 font-medium">
+                                        <div className="w-full bg-slate-100 dark:bg-slate-900/80 border border-slate-200 dark:border-slate-800 rounded-xl px-4 py-3 text-slate-700 dark:text-slate-300 font-medium">
                                             {showPersonalDetails ? user?.email : maskEmail(user?.email || '')}
                                         </div>
                                     </div>
                                     <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 ml-1">Phone Number</label>
+                                        <label className="text-xs font-bold text-slate-400 dark:text-slate-500 ml-1">Phone Number</label>
                                         <div className="relative group/input">
                                             <input
                                                 type="text"
@@ -397,12 +369,12 @@ export default function ProfilePage() {
                                                 onChange={(e) => setFormData({ ...formData, phone_number: e.target.value })}
                                                 disabled={!showPersonalDetails}
                                                 className={clsx(
-                                                    "w-full bg-slate-800/50 border rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all",
-                                                    showPersonalDetails ? "border-slate-700" : "border-slate-800/50 text-slate-500 cursor-not-allowed select-none"
+                                                    "w-full bg-white dark:bg-slate-800/50 border rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all",
+                                                    showPersonalDetails ? "border-slate-300 dark:border-slate-700" : "border-slate-200 dark:border-slate-800/50 text-slate-500 cursor-not-allowed select-none"
                                                 )}
                                             />
                                             {!showPersonalDetails && (
-                                                <div className="absolute inset-0 flex items-center justify-center bg-slate-900/40 backdrop-blur-[1px] rounded-xl opacity-0 group-hover/input:opacity-100 transition-opacity pointer-events-none">
+                                                <div className="absolute inset-0 flex items-center justify-center bg-white/60 dark:bg-slate-900/40 backdrop-blur-[1px] rounded-xl opacity-0 group-hover/input:opacity-100 transition-opacity pointer-events-none">
                                                     <span className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">Reveal to edit</span>
                                                 </div>
                                             )}
@@ -413,32 +385,32 @@ export default function ProfilePage() {
 
                             {/* Company Section */}
                             <div className="space-y-6 pt-4">
-                                <div className="flex items-center space-x-2 text-slate-400 border-b border-white/5 pb-2">
+                                <div className="flex items-center space-x-2 text-slate-500 dark:text-slate-400 border-b border-slate-200/70 dark:border-white/5 pb-2">
                                     <Building2 size={16} />
                                     <span className="text-xs font-bold uppercase tracking-wider">Company Branding</span>
                                 </div>
 
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                                     <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 ml-1">Company Name</label>
+                                        <label className="text-xs font-bold text-slate-400 dark:text-slate-500 ml-1">Company Name</label>
                                         <input
                                             type="text"
                                             value={formData.company_name}
                                             onChange={(e) => setFormData({ ...formData, company_name: e.target.value })}
                                             placeholder="e.g. Yexis Electronics"
-                                            className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all placeholder:text-slate-600"
+                                            className="w-full bg-white dark:bg-slate-800/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all placeholder:text-slate-400 dark:placeholder:text-slate-600"
                                         />
                                     </div>
                                     <div className="space-y-2">
-                                        <label className="text-xs font-bold text-slate-500 ml-1">Company Website</label>
+                                        <label className="text-xs font-bold text-slate-400 dark:text-slate-500 ml-1">Company Website</label>
                                         <div className="relative">
-                                            <Globe size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-600" />
+                                            <Globe size={16} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 dark:text-slate-600" />
                                             <input
                                                 type="url"
                                                 value={formData.company_website}
                                                 onChange={(e) => setFormData({ ...formData, company_website: e.target.value })}
                                                 placeholder="https://example.com"
-                                                className="w-full bg-slate-800/50 border border-slate-700 rounded-xl pl-12 pr-4 py-3 text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all placeholder:text-slate-600"
+                                                className="w-full bg-white dark:bg-slate-800/50 border border-slate-300 dark:border-slate-700 rounded-xl pl-12 pr-4 py-3 text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-blue-500/50 transition-all placeholder:text-slate-400 dark:placeholder:text-slate-600"
                                             />
                                         </div>
                                     </div>
@@ -468,55 +440,66 @@ export default function ProfilePage() {
                             </div>
                         </div>
 
-                        {/* Connected Accounts Section */}
-                        <div className="glass-panel p-8 rounded-3xl space-y-6">
-                            <div className="flex items-center space-x-2 text-slate-400 border-b border-white/5 pb-2">
-                                <Globe size={16} />
-                                <span className="text-xs font-bold uppercase tracking-wider">Connected Accounts</span>
-                            </div>
-
-                            <div className="grid grid-cols-1 gap-4">
-                                <div className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10 hover:border-violet-500/30 transition-all group">
-                                    <div className="flex items-center space-x-4">
-                                        <div className="h-10 w-10 flex items-center justify-center rounded-xl bg-white text-slate-900 font-bold shadow-lg">
-                                            G
-                                        </div>
-                                        <div>
-                                            <p className="font-bold text-white">Google Account</p>
-                                            <p className="text-xs text-slate-500">
-                                                {user?.google_account_email ? `Connected: ${user.google_account_email}` : "For Google Meet integration"}
-                                            </p>
-                                        </div>
-                                    </div>
-
-                                    {user?.google_account_email ? (
-                                        <button
-                                            type="button"
-                                            onClick={handleDisconnectGoogle}
-                                            className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-red-500/10 text-red-400 text-xs font-bold hover:bg-red-500 hover:text-white transition-all"
-                                        >
-                                            <XCircle size={14} />
-                                            <span>Disconnect</span>
-                                        </button>
-                                    ) : (
-                                        <button
-                                            type="button"
-                                            onClick={handleConnectGoogle}
-                                            disabled={isConnectingGoogle}
-                                            className="flex items-center space-x-2 px-4 py-2 rounded-lg bg-violet-600 text-white text-xs font-bold hover:bg-violet-500 transition-all shadow-lg shadow-violet-500/20 disabled:opacity-50"
-                                        >
-                                            {isConnectingGoogle ? <RefreshCw size={14} className="animate-spin" /> : <ExternalLink size={14} />}
-                                            <span>Connect Google</span>
-                                        </button>
-                                    )}
+                    {/* Read-Only Alert */}
+                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4">
+                        <div className="flex gap-2">
+                            <Lock className="text-amber-500 shrink-0 mt-0.5" size={14} />
+                            <p className="text-[11px] text-amber-200/80 leading-relaxed">
+                                Username and email are immutable for security.
+                            </p>
+                        </div>
+                    </div>
+                        <div className="bg-white/80 dark:bg-slate-800/40 backdrop-blur-xl border border-violet-200/30 dark:border-white/5 shadow-lg dark:shadow-slate-900/50 p-8 rounded-3xl space-y-4">
+                            <div className="flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
+                                <div>
+                                    <h3 className="text-lg font-bold">Login History</h3>
+                                    <p className="text-xs text-slate-500 dark:text-slate-400">Recent sign-ins and devices. Use 'Sign out everywhere' to revoke all sessions.</p>
                                 </div>
+                                <button
+                                    type="button"
+                                    onClick={handleLogoutAll}
+                                    disabled={isLogoutAllLoading}
+                                    className="px-4 py-2 rounded-lg bg-red-500 text-white text-xs font-bold uppercase tracking-widest hover:bg-red-600 transition-all disabled:opacity-50"
+                                >
+                                    {isLogoutAllLoading ? "Signing out..." : "Sign out everywhere"}
+                                </button>
                             </div>
+
+                            {isHistoryLoading ? (
+                                <div className="text-sm text-slate-500 dark:text-slate-400">Loading history…</div>
+                            ) : loginHistory.length === 0 ? (
+                                <div className="text-sm text-slate-500 dark:text-slate-400">No login history available yet.</div>
+                            ) : (
+                                <div className="overflow-auto max-h-64">
+                                    <table className="w-full text-left text-xs text-slate-700 dark:text-slate-300 border-collapse">
+                                        <thead>
+                                            <tr className="text-slate-500 dark:text-slate-400 uppercase text-[10px] tracking-wider">
+                                                <th className="px-2 py-2">When</th>
+                                                <th className="px-2 py-2">IP</th>
+                                                <th className="px-2 py-2">User Agent</th>
+                                                <th className="px-2 py-2">Location</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {loginHistory.map((entry) => (
+                                                <tr key={entry.id} className="hover:bg-slate-100 dark:hover:bg-slate-900/40">
+                                                    <td className="px-2 py-2">{formatLoginTimestamp(entry)}</td>
+                                                    <td className="px-2 py-2">{entry.ip_address || "-"}</td>
+                                                    <td className="px-2 py-2 text-[11px] max-w-[240px] truncate" title={entry.user_agent}>{entry.user_agent || "-"}</td>
+                                                    <td className="px-2 py-2">{entry.location || "Unknown"}</td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
                         </div>
 
-                        {/* MFA Section */}
-                        <div className="glass-panel p-8 rounded-3xl overflow-hidden relative">
-                            <div className="absolute top-0 right-0 p-8 opacity-10 pointer-events-none">
-                                <Shield size={120} className="text-violet-400" />
+                        {/* Security (MFA) */}
+                        <div className="bg-white/80 dark:bg-slate-800/40 backdrop-blur-xl border border-violet-200/30 dark:border-white/5 shadow-lg dark:shadow-slate-900/50 p-8 rounded-3xl space-y-4">
+                            <div className="flex items-center space-x-2 text-slate-500 dark:text-slate-400">
+                                <Shield size={16} />
+                                <span className="text-xs font-bold uppercase tracking-wider">Security</span>
                             </div>
                             <MFASetup />
                         </div>
@@ -533,10 +516,10 @@ export default function ProfilePage() {
                                 </div>
                             </div>
 
-                            <div className="p-6 rounded-2xl bg-slate-900/50 border border-red-500/10 flex flex-col md:flex-row items-center justify-between gap-6">
+                            <div className="p-6 rounded-2xl bg-slate-50 dark:bg-slate-900/50 border border-red-500/10 flex flex-col md:flex-row items-center justify-between gap-6">
                                 <div className="space-y-1 text-center md:text-left">
-                                    <p className="font-bold text-white">Delete Account</p>
-                                    <p className="text-sm text-slate-500">Once deleted, your data cannot be recovered. Please be certain.</p>
+                                    <p className="font-bold text-slate-900 dark:text-white">Delete Account</p>
+                                    <p className="text-sm text-slate-500 dark:text-slate-500">Once deleted, your data cannot be recovered. Please be certain.</p>
                                 </div>
                                 <button
                                     type="button"
@@ -548,33 +531,32 @@ export default function ProfilePage() {
                                 </button>
                             </div>
                         </div>
-                    </div>
                 </form>
             </div>
 
             {/* OTP Modal */}
             {isOtpModalOpen && (
-                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
-                    <div className="w-full max-w-sm bg-slate-900 border border-slate-700 rounded-2xl p-6 shadow-2xl space-y-6 relative overflow-hidden animate-in zoom-in-95 duration-300">
+                <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30 dark:bg-slate-950/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
+                    <div className="w-full max-w-sm bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-2xl p-6 shadow-2xl space-y-6 relative overflow-hidden animate-in zoom-in-95 duration-300">
                         {/* Modal Background Decor */}
                         <div className="absolute -top-12 -right-12 h-32 w-32 bg-violet-600/20 rounded-full blur-3xl" />
 
                         <div className="flex items-center justify-between">
-                            <h3 className="text-lg font-bold text-white flex items-center gap-2">
+                            <h3 className="text-lg font-bold text-slate-900 dark:text-white flex items-center gap-2">
                                 <ShieldCheck className="text-violet-500" />
                                 Identity Verification
                             </h3>
                             <button
                                 type="button"
                                 onClick={() => setIsOtpModalOpen(false)}
-                                className="text-slate-400 hover:text-white transition-colors"
+                                className="text-slate-500 dark:text-slate-400 hover:text-slate-800 dark:hover:text-white transition-colors"
                                 disabled={isVerifyingOtp}
                             >
                                 <X size={20} />
                             </button>
                         </div>
 
-                        <p className="text-sm text-slate-400">
+                        <p className="text-sm text-slate-600 dark:text-slate-400">
                             We've sent a 6-digit verification code to <strong>{maskEmail(user?.email || '')}</strong>. Enter it below to reveal your sensitive details.
                         </p>
 
@@ -586,12 +568,12 @@ export default function ProfilePage() {
                                     value={otpValue}
                                     onChange={(e) => setOtpValue(e.target.value.replace(/\D/g, ""))}
                                     placeholder="000000"
-                                    className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-center text-3xl tracking-[0.4em] font-mono text-white focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all placeholder:text-slate-600"
+                                    className="w-full bg-white dark:bg-slate-800/50 border border-slate-300 dark:border-slate-700 rounded-xl px-4 py-3 text-center text-3xl tracking-[0.4em] font-mono text-slate-900 dark:text-white focus:outline-none focus:ring-2 focus:ring-violet-500 transition-all placeholder:text-slate-300 dark:placeholder:text-slate-600"
                                     disabled={isVerifyingOtp || isRequestingOtp}
                                     autoFocus
                                 />
                                 {isRequestingOtp && (
-                                    <div className="absolute inset-0 bg-slate-900/50 flex items-center justify-center rounded-xl">
+                                    <div className="absolute inset-0 bg-white/60 dark:bg-slate-900/50 flex items-center justify-center rounded-xl">
                                         <Loader2 className="animate-spin text-violet-500" />
                                     </div>
                                 )}
@@ -611,26 +593,13 @@ export default function ProfilePage() {
                             </button>
                         </div>
 
-                        <p className="text-[10px] text-center text-slate-500">
+                        <p className="text-[10px] text-center text-slate-400 dark:text-slate-500">
                             This code will expire in 10 minutes. Haven't received it? Check your spam folder.
                         </p>
                     </div>
                 </div>
             )}
 
-            <style jsx>{`
-        .glass-panel {
-          background: rgba(30, 41, 59, 0.4);
-          backdrop-filter: blur(12px);
-          border: 1px solid rgba(255, 255, 255, 0.05);
-          box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
-        }
-        .gradient-text {
-          background: linear-gradient(135deg, #a78bfa 0%, #60a5fa 100%);
-          -webkit-background-clip: text;
-          -webkit-text-fill-color: transparent;
-        }
-      `}</style>
         </div>
     );
 }

@@ -11,8 +11,13 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
+**/python*/lib/
+**/python*/lib64/
+# (the bare `lib/` rule was also hiding frontend/src/lib/ which contains
+# shadcn helpers like utils.ts — broke CI tsc.  Scope to repo-root + Python
+# venv paths only.)
 parts/
 sdist/
 var/
@@ -23,6 +28,18 @@ wheels/
 myenvironment/
 venv/
 .venv/
+tts_env/
+audio/tts_env/
+audio/*.onnx
+audio/*.bin
+audio/*.wav
+audio/wavs/
+audio/w_audio/
+audio/dataset/
+audio/xtts_finetuned/
+audio/*.zip
+audio/**/*.wav
+audio/**/*.zip
 
 # Environment
 .env
@@ -62,3 +79,89 @@ dist-ssr/
 .idea/
 *.swp
 *.swo
+
+# Claude
+.claude/
+continuation_handoff.md
+implementation_backlog.md
+multi-tenant_plan.md
+overall_architecture.md
+.gstack/
+Claude.md
+
+# Gemini & Tools
+.gemini/
+GEMINI.md
+**/GEMINI.md
+graphify-out/
+Voice/
+.obsidian/
+
+# Test/cache
+.pytest_cache/
+**/.pytest_cache/
+
+# QA/local work folders
+.qa/
+backend/.qa/
+frontend/.qa/
+
+# Local plugin/work dirs
+caveman/
+
+# Generated app data
+backend/uploads/
+backend/quotes/*.pdf
+
+# Windows
+desktop.ini
+
+PHASE*_COMPLETE.md (e.g. PHASE1_COMPLETE.md, PHASE2_COMPLETE.md, etc.)
+ENGINEERING_FIXES_SUMMARY.md
+FINAL_SUMMARY.md
+backend/utils/ASYNC_BRIDGE_GUIDE.md
+backend/pipelines/voice/INTEGRATION_GUIDE.md
+docs/ROADMAP.md
+docs/SCALING.md
+docs/SLOs.md
+docs/VOICE_TUNING.md
+docs/ARCHITECTURE.md
+tools/claude-usage/
+docs/IMPLEMENTATION_PLAN.md
+archi.jpeg
+
+**/CLAUDE.md
+**/CLAUDE.md
+**/.gitignore
+
+# Antigravity CLI and Agent config/state folders
+.antigravitycli/
+.commandcode/
+.cursor/
+.fallow/
+
+# Graphify cache & tool files
+.graphify_ast_extract.py
+.graphify_detect.json
+.graphify_python
+
+# Sensitive and temporary data/keys
+cookies.txt
+interactions.json
+Voice_accessKeys.csv
+google_calendar.json
+google_credentials.json
+
+# Local/Development tools, docs, and configurations
+.github/
+docs/
+tools/
+
+# Ignore all markdown files globally
+*.md
+
+# Except for these specific files, which must be synced:
+!/README.md
+!/delivery-plan.md
+!/frontend/README.md
+!/labs/README.md

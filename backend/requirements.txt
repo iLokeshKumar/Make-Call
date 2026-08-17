@@ -1,4 +1,8 @@
 fastapi
+fast-langdetect>=1.0.1
+openai>=1.0.0
+markitdown[all]>=0.1.0
+boto3
 uvicorn
 twilio
 websockets
@@ -7,17 +11,38 @@ psycopg2-binary
 chromadb
 python-dotenv
 google-genai
-numpy
+numpy>=1.26,<2.0
 scipy
 mistralai
 deepgram-sdk>=5.0.0,<6.0.0
 elevenlabs
 aiohttp
-pandas
+pandas>=2.2,<2.3
+pyarrow>=21,<22  # >=21 required by datasets 5.x; <22 keeps Windows wheels stable (24.x segfaults on Win64 w/ numpy 2.x)
 openpyxl
 python-multipart
 requests
-cartesia>=1.0.0
-sarvamai>=0.2.0
+cartesia>=1.0.0 #3.0.2
+sarvamai>=0.1.27 #0.2.0 is the first version with TTS support
+gnani-vachana>=0.1.0
+plivo
 dateparser
 python-dateutil
+langgraph
+langgraph-checkpoint-postgres
+psycopg[binary]
+langchain
+langsmith
+langchain-google-genai
+langchain-openai
+langchain-anthropic
+langchain-mistralai
+fastmcp
+scikit-learn
+sentence-transformers>=3.0.0
+rank-bm25>=0.2.2
+pyotp
+qrcode
+jinja2>=3.1.0
+httpx>=0.27.0
+MailChecker>=6.0.0

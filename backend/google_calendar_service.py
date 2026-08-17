@@ -1,12 +1,11 @@
 import os
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.auth.transport.requests import Request
 from google.oauth2.service_account import Credentials
 from google.oauth2 import service_account
 from google_auth_oauthlib.flow import Flow
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials as UserCredentials
 import pickle
 import requests
@@ -24,12 +23,13 @@ SCOPES = [
 class GoogleMeetGenerator:
     """Generate Google Meet links for demo meetings using Google Calendar API"""
     
-    def __init__(self, user: User = None):
+    def __init__(self, user: User = None, session = None):
         """Initialize with credentials from user or environment"""
         self.client_id = os.getenv("Client_ID")
         self.client_secret = os.getenv("Client_Secret")
         self.credentials = None
         self.user = user
+        self.session = session
         if user:
             self.load_from_user(user)
         else:
@@ -54,33 +54,90 @@ class GoogleMeetGenerator:
             return True
         return False
 
-    def authenticate(self):
-        """Check if authenticated (legacy/fallback), otherwise prepare for OAuth flow."""
-        try:
-            if os.path.exists('token.pickle'):
-                with open('token.pickle', 'rb') as token:
-                    self.credentials = pickle.load(token)
-                
-                # Check if expired
-                if self.credentials and self.credentials.expired and self.credentials.refresh_token:
-                    from google.auth.transport.requests import Request
-                    try:
-                        self.credentials.refresh(Request())
-                        with open('token.pickle', 'wb') as token:
-                            pickle.dump(self.credentials, token)
-                        logger.info("✅ Refreshed Google credentials")
-                    except Exception as re:
-                        logger.warning(f"⚠️ Refresh failed: {re}. Re-authentication needed.")
-                        self.credentials = None
-                
-                if self.credentials:
-                    logger.info("✅ Google Calendar Authenticated (Legacy)")
-                    return True
+    def validate_authentication(self) -> dict:
+        """
+        Validates if current credentials are valid or can be refreshed.
+        Returns:
+            {
+                "status": "valid" | "expiring_soon" | "expired" | "disconnected",
+                "email": str or None,
+                "expiry": str (ISO) or None,
+                "message": str
+            }
+        """
+        if not self.credentials:
+            return {
+                "status": "disconnected",
+                "email": None,
+                "expiry": None,
+                "message": "Google Calendar not connected."
+            }
             
-            return False
-        except Exception as e:
-            logger.error(f"❌ Google auth check failed: {e}")
-            return False
+        # Helper to get expiry string
+        expiry_str = self.credentials.expiry.isoformat() if self.credentials.expiry else None
+        email = self.user.google_account_email if self.user else self.credentials._id_token.get('email', None) if hasattr(self.credentials, '_id_token') else None
+
+        # Check if expiring in the next 5 minutes
+        is_expiring_soon = False
+        if self.credentials.expiry:
+            expiry = self.credentials.expiry
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            
+            time_until_expiry = expiry - datetime.now(timezone.utc)
+            if timedelta(0) < time_until_expiry < timedelta(minutes=5):
+                is_expiring_soon = True
+
+        if self.credentials.expired or is_expiring_soon:
+            if self.credentials.refresh_token:
+                from google.auth.transport.requests import Request
+                try:
+                    logger.info("🔄 Attempting token refresh...")
+                    self.credentials.refresh(Request())
+                    # Use merge to handle objects from different sessions (e.g. Pipeline vs Tool)
+                    if self.user and self.session:
+                        db_user = self.session.merge(self.user)
+                        db_user.google_access_token = self.credentials.token
+                        # Ensure expiry is UTC-aware before saving
+                        expiry = self.credentials.expiry
+                        if expiry and expiry.tzinfo is None:
+                            expiry = expiry.replace(tzinfo=timezone.utc)
+                        db_user.google_token_expiry = expiry
+                        self.session.commit()
+                    
+                    return {
+                        "status": "valid",
+                        "email": email,
+                        "expiry": self.credentials.expiry.isoformat() if self.credentials.expiry else None,
+                        "message": "Authenticated (Refreshed)"
+                    }
+                except Exception as e:
+                    logger.error(f"❌ Token refresh failed: {e}")
+                    return {
+                        "status": "expired",
+                        "email": email,
+                        "expiry": expiry_str,
+                        "message": f"Connection expired/revoked: {str(e)}. Please connect again."
+                    }
+            else:
+                return {
+                    "status": "expired",
+                    "email": email,
+                    "expiry": expiry_str,
+                    "message": "Connection expired and no refresh token available. Please reconnect."
+                }
+            
+        return {
+            "status": "valid" if not is_expiring_soon else "expiring_soon",
+            "email": email,
+            "expiry": expiry_str,
+            "message": "Authenticated"
+        }
+
+    def authenticate(self):
+        """Boolean check for authentication status."""
+        result = self.validate_authentication()
+        return result["status"] == "valid"
 
     def get_auth_url(self) -> str:
         """Get the URL for the user to visit and authorize."""
@@ -98,7 +155,11 @@ class GoogleMeetGenerator:
             if user and session:
                 user.google_access_token = self.credentials.token
                 user.google_refresh_token = self.credentials.refresh_token
-                user.google_token_expiry = self.credentials.expiry
+                # Ensure expiry is UTC-aware before saving
+                expiry = self.credentials.expiry
+                if expiry and expiry.tzinfo is None:
+                    expiry = expiry.replace(tzinfo=timezone.utc)
+                user.google_token_expiry = expiry
                 
                 # Try to get the email if possible
                 try:
@@ -189,9 +250,9 @@ class GoogleMeetGenerator:
                 ],
                 'conferenceData': {
                     'createRequest': {
-                        'requestId': f'rio-{lead_name}-{datetime.now().timestamp()}',
+                        'requestId': f'rio-{int(datetime.now().timestamp())}-{lead_name}',
                         'conferenceSolutionKey': {
-                            'key': 'hangoutsMeet'
+                            'type': 'hangoutsMeet'
                         }
                     }
                 },
@@ -210,7 +271,7 @@ class GoogleMeetGenerator:
                 calendarId='primary',
                 body=event,
                 conferenceDataVersion=1,
-                sendUpdates='eventCreators'
+                sendUpdates='all'
             ).execute()
             
             google_meet_link = created_event.get('conferenceData', {}).get('entryPoints', [{}])[0].get('uri')
@@ -239,15 +300,35 @@ class GoogleMeetGenerator:
             }
     
     def _get_calendar_service(self):
-        """Get Google Calendar service object"""
-        from google.auth.transport.requests import Request
+        """Get Google Calendar service object and ensure tokens are fresh/saved."""
         from googleapiclient.discovery import build
         
+        if not self.credentials:
+            raise ValueError("Google credentials not loaded")
+
         # Refresh token if expired
         if self.credentials.expired and self.credentials.refresh_token:
-            self.credentials.refresh(Request())
+            logger.info("🔄 Refreshing expired Google tokens...")
+            try:
+                self.credentials.refresh(Request())
+                
+                # Use merge to handle objects from different sessions
+                if self.user and self.session:
+                    db_user = self.session.merge(self.user)
+                    db_user.google_access_token = self.credentials.token
+                    db_user.google_token_expiry = self.credentials.expiry
+                    self.session.commit()
+                    logger.info(f"✅ Refreshed Google tokens and saved to DB for user: {db_user.username}")
+                # Legacy fallback to pickle if no user session
+                elif os.path.exists('token.pickle'):
+                    with open('token.pickle', 'wb') as token:
+                        pickle.dump(self.credentials, token)
+                    logger.info("✅ Refreshed Google tokens and saved to pickle (Legacy)")
+            except Exception as e:
+                logger.error(f"❌ Token refresh failed: {e}")
+                raise
         
-        return build('calendar', 'v3', credentials=self.credentials)
+        return build('calendar', 'v3', credentials=self.credentials, cache_discovery=False)
     
     async def _parse_time_string(self, time_str: str) -> datetime:
         """
@@ -293,7 +374,7 @@ class GoogleMeetGenerator:
 
 
 async def create_google_meet_for_booking(lead_name: str, lead_email: str, proposed_time: str, 
-                                    meeting_type: str = "demo") -> dict:
+                                    meeting_type: str = "demo", user: User = None, session = None) -> dict:
     """
     Convenience function to create Google Meet link for a booking
     
@@ -305,7 +386,7 @@ async def create_google_meet_for_booking(lead_name: str, lead_email: str, propos
         }
     """
     try:
-        generator = GoogleMeetGenerator()
+        generator = GoogleMeetGenerator(user=user, session=session)
         result = await generator.create_google_meet_event(lead_name, lead_email, proposed_time, meeting_type)
         return result
     except Exception as e:

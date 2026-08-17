@@ -1,0 +1,22 @@
+{
+  "source": "E:\\something_new\\audio\\lk_voice_dataset_chunks\\metadata_pipe.csv",
+  "source_rows": 297,
+  "backup_dir": "E:\\something_new\\audio\\lk_voice_dataset_chunks\\backups\\sync_20260630_183210",
+  "files": {
+    "metadata.csv": {
+      "updated": 297,
+      "missing_in_pipe": [],
+      "extra_in_pipe": []
+    },
+    "review.csv": {
+      "updated": 297,
+      "missing_in_pipe": [],
+      "extra_in_pipe": []
+    },
+    "metadata.jsonl": {
+      "updated": 297,
+      "missing_in_pipe": [],
+      "extra_in_pipe": []
+    }
+  }
+}

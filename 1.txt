@@ -1,0 +1,2532 @@
+
+    135 +      background: var(--panel);
+    136 +      color: var(--text);
+    137 +      padding: 0 10px;
+    138 +      font: inherit;
+    139 +    }}
+    140 +    button {{
+    141 +      cursor: pointer;
+    142 +    }}
+    143 +    button.primary {{
+    144 +      border-color: #1f6feb;
+    145 +      background: #1f6feb;
+    146 +      color: white;
+    147 +    }}
+    148 +    main {{
+    149 +      display: grid;
+    150 +      gap: 10px;
+    151 +      max-width: 1180px;
+    152 +      margin: 0 auto;
+    153 +      padding: 14px;
+    154 +    }}
+    155 +    .clip {{
+    156 +      display: grid;
+    157 +      grid-template-columns: minmax(260px, 360px) 1fr auto;
+    158 +      gap: 12px;
+    159 +      align-items: center;
+    160 +      padding: 12px;
+    161 +      border: 1px solid var(--line);
+    162 +      border-radius: 8px;
+    163 +      background: var(--panel);
+    164 +    }}
+    165 +    .clip[data-status="keep"] {{
+    166 +      border-left: 5px solid var(--keep);
+    167 +    }}
+    168 +    .clip[data-status="reject"] {{
+    169 +      border-left: 5px solid var(--reject);
+    170 +      opacity: 0.68;
+    171 +    }}
+    172 +    .meta {{
+    173 +      display: flex;
+    174 +      flex-direction: column;
+    175 +      gap: 7px;
+    176 +      min-width: 0;
+    177 +    }}
+    178 +    audio {{
+    179 +      width: 100%;
+    180 +      height: 34px;
+    181 +    }}
+    182 +    .source {{
+    183 +      color: var(--muted);
+    184 +      overflow: hidden;
+    185 +      text-overflow: ellipsis;
+    186 +      white-space: nowrap;
+    187 +      font-size: 13px;
+    188 +    }}
+    189 +    .badges {{
+    190 +      display: flex;
+    191 +      flex-wrap: wrap;
+    192 +      gap: 6px;
+    193 +    }}
+    194 +    .badge {{
+    195 +      border-radius: 999px;
+    196 +      background: #eef2f6;
+    197 +      color: #43515c;
+    198 +      padding: 2px 8px;
+    199 +      font-size: 12px;
+    200 +    }}
+    201 +    .badge.warn {{
+    202 +      background: #fff4d6;
+    203 +      color: var(--warn);
+    204 +    }}
+    205 +    textarea {{
+    206 +      width: 100%;
+    207 +      min-height: 58px;
+    208 +      resize: vertical;
+    209 +      border: 1px solid var(--line);
+    210 +      border-radius: 6px;
+    211 +      padding: 8px;
+    212 +      color: var(--text);
+    213 +      font: inherit;
+    214 +    }}
+    215 +    .decision {{
+    216 +      display: grid;
+    217 +      grid-template-columns: 1fr 1fr;
+    218 +      gap: 8px;
+    219 +      width: 158px;
+    220 +    }}
+    221 +    .decision button {{
+    222 +      padding: 0 8px;
+    223 +    }}
+    224 +    .decision .keep.active {{
+    225 +      border-color: var(--keep);
+    226 +      background: var(--keep);
+    227 +      color: white;
+    228 +    }}
+    229 +    .decision .reject.active {{
+    230 +      border-color: var(--reject);
+    231 +      background: var(--reject);
+    232 +      color: white;
+    233 +    }}
+    234 +    .notes {{
+    235 +      grid-column: span 2;
+    236 +    }}
+    237 +    @media (max-width: 840px) {{
+    238 +      header {{
+    239 +        grid-template-columns: 1fr;
+    240 +      }}
+    241 +      .actions {{
+    242 +        justify-content: flex-start;
+    243 +      }}
+    244 +      .clip {{
+    245 +        grid-template-columns: 1fr;
+    246 +      }}
+    247 +      .decision {{
+    248 +        width: 100%;
+    249 +      }}
+    250 +      .notes {{
+    251 +        grid-column: auto;
+    252 +      }}
+    253 +    }}
+    254 +  </style>
+    255 +</head>
+    256 +<body>
+    257 +  <header>
+    258 +    <div>
+    259 +      <h1>Aswini Clip Review</h1>
+    260 +      <div class="summary" id="summary"></div>
+    261 +    </div>
+    262 +    <div class="actions">
+    263 +      <select id="filter">
+    264 +        <option value="all">All clips</option>
+    265 +        <option value="unreviewed">Unreviewed</option>
+    266 +        <option value="keep">Kept</option>
+    267 +        <option value="reject">Rejected</option>
+    268 +        <option value="flagged">Flagged</option>
+    269 +      </select>
+    270 +      <button type="button" id="exportJsonl" class="primary">Export JSONL</button>
+    271 +      <button type="button" id="exportCsv">Export CSV</button>
+    272 +    </div>
+    273 +  </header>
+    274 +  <main id="clips"></main>
+    275 +  <script>
+    276 +    const rows = {data};
+    277 +    const storageKey = "aswini-review-v1";
+    278 +    const state = JSON.parse(localStorage.getItem(storageKey) || "{{}}");
+    279 +    const clipsEl = document.getElementById("clips");
+    280 +    const filterEl = document.getElementById("filter");
+    281 +    const summaryEl = document.getElementById("summary");
+    282 +
+    283 +    function getReview(id) {{
+    284 +      return state[id] || {{ status: "unreviewed", text: rows[id].text, notes: "" }};
+    285 +    }}
+    286 +
+    287 +    function saveReview(id, patch) {{
+    288 +      state[id] = {{ ...getReview(id), ...patch }};
+    289 +      localStorage.setItem(storageKey, JSON.stringify(state));
+    290 +      render();
+    291 +    }}
+    292 +
+    293 +    function escapeCsv(value) {{
+    294 +      return '"' + String(value ?? "").replaceAll('"', '""') + '"';
+    295 +    }}
+    296 +
+    297 +    function keptRows() {{
+    298 +      return rows
+    299 +        .map(row => ({{ ...row, review: getReview(row.id) }}))
+    300 +        .filter(row => row.review.status === "keep")
+    301 +        .map(row => ({{
+    302 +          audio_path: row.audio_path,
+    303 +          text: row.review.text.trim(),
+    304 +          source: row.source,
+    305 +          start: row.start,
+    306 +          end: row.end,
+    307 +          duration: row.duration,
+    308 +          notes: row.review.notes || ""
+    309 +        }}));
+    310 +    }}
+    311 +
+    312 +    function download(filename, mime, text) {{
+    313 +      const blob = new Blob([text], {{ type: mime }});
+    314 +      const url = URL.createObjectURL(blob);
+    315 +      const link = document.createElement("a");
+    316 +      link.href = url;
+    317 +      link.download = filename;
+    318 +      link.click();
+    319 +      URL.revokeObjectURL(url);
+    320 +    }}
+    321 +
+    322 +    function render() {{
+    323 +      const filter = filterEl.value;
+    324 +      const counts = {{ keep: 0, reject: 0, unreviewed: 0 }};
+    325 +      rows.forEach(row => counts[getReview(row.id).status]++);
+    326 +      summaryEl.textContent = `${{rows.length}} clips | ${{counts.keep}} kept | ${{counts.reject}} rejected | ${{counts.unreviewed}} unrevi
+         ewed`;
+    327 +
+    328 +      clipsEl.innerHTML = "";
+    329 +      rows.forEach(row => {{
+    330 +        const review = getReview(row.id);
+    331 +        if (filter !== "all") {{
+    332 +          if (filter === "flagged" && row.flags.length === 0) return;
+    333 +          if (filter !== "flagged" && review.status !== filter) return;
+    334 +        }}
+    335 +
+    336 +        const card = document.createElement("section");
+    337 +        card.className = "clip";
+    338 +        card.dataset.status = review.status;
+    339 +        card.innerHTML = `
+    340 +          <div class="meta">
+    341 +            <audio controls preload="none" src="${{row.audio_src}}"></audio>
+    342 +            <div class="source">#${{String(row.id).padStart(3, "0")}} | ${{row.source}} | ${{row.duration}}s</div>
+    343 +            <div class="badges">
+    344 +              ${{row.flags.map(flag => `<span class="badge warn">${{flag}}</span>`).join("")}}
+    345 +              ${{row.flags.length ? "" : '<span class="badge">no auto flags</span>'}}
+    346 +            </div>
+    347 +          </div>
+    348 +          <textarea aria-label="Transcript">${{review.text}}</textarea>
+    349 +          <div class="decision">
+    350 +            <button type="button" class="keep ${{review.status === "keep" ? "active" : ""}}">Keep</button>
+    351 +            <button type="button" class="reject ${{review.status === "reject" ? "active" : ""}}">Reject</button>
+    352 +            <textarea class="notes" aria-label="Notes" placeholder="Notes">${{review.notes || ""}}</textarea>
+    353 +          </div>
+    354 +        `;
+    355 +
+    356 +        const transcript = card.querySelector("textarea");
+    357 +        transcript.addEventListener("change", event => saveReview(row.id, {{ text: event.target.value }}));
+    358 +        card.querySelector(".notes").addEventListener("change", event => saveReview(row.id, {{ notes: event.target.value }}));
+    359 +        card.querySelector(".keep").addEventListener("click", () => saveReview(row.id, {{ status: "keep", text: transcript.value }}));
+    360 +        card.querySelector(".reject").addEventListener("click", () => saveReview(row.id, {{ status: "reject", text: transcript.value }}));
+    361 +        clipsEl.appendChild(card);
+    362 +      }});
+    363 +    }}
+    364 +
+    365 +    filterEl.addEventListener("change", render);
+    366 +    document.getElementById("exportJsonl").addEventListener("click", () => {{
+    367 +      const body = keptRows().map(row => JSON.stringify(row)).join("\\n") + "\\n";
+    368 +      download("aswini_gold_dataset.jsonl", "application/jsonl", body);
+    369 +    }});
+    370 +    document.getElementById("exportCsv").addEventListener("click", () => {{
+    371 +      const header = ["audio_file", "text", "source", "start", "end", "duration", "notes"];
+    372 +      const body = keptRows().map(row => [
+    373 +        row.audio_path, row.text, row.source, row.start, row.end, row.duration, row.notes
+    374 +      ].map(escapeCsv).join(","));
+    375 +      download("aswini_gold_metadata.csv", "text/csv", [header.join(","), ...body].join("\\n"));
+    376 +    }});
+    377 +
+    378 +    render();
+    379 +  </script>
+    380 +</body>
+    381 +</html>
+    382 +"""
+    383 +
+    384 +
+    385 +def main() -> None:
+    386 +    rows = load_rows()
+    387 +    OUTPUT_HTML.write_text(build_html(rows), encoding="utf-8")
+    388 +    flagged = sum(1 for row in rows if row["flags"])
+    389 +    total_seconds = sum(row["duration"] for row in rows)
+    390 +    print(f"Wrote {OUTPUT_HTML}")
+    391 +    print(f"Clips: {len(rows)}")
+    392 +    print(f"Flagged: {flagged}")
+    393 +    print(f"Duration: {total_seconds / 60:.2f} minutes")
+    394 +
+    395 +
+    396 +if __name__ == "__main__":
+    397 +    main()
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The review page generator is in place. I’m going to run it now and then do a quick syntax/read check so we know the generated page is usable
+  without adding dependencies.
+
+• Running python audio\build_review_page.py
+
+• Ran python -m py_compile audio\build_review_page.py
+  └ (no output)
+
+• Ran python audio\build_review_page.py
+  └ Wrote E:\something_new\audio\aswini_clip_review.html
+    Clips: 97
+    Flagged: 31
+    Duration: 6.51 minutes
+
+◦ Running git diff -- audio/build_review_page.py audio/aswini_clip_review.html
+
+• Ran git diff -- audio/build_review_page.py audio/aswini_clip_review.html
+  └ (no output)
+
+• Ran Get-ChildItem audio\aswini_clip_review.html
+  └
+
+    … +6 lines (ctrl + t to view transcript)
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The generator produced audio/aswini_clip_review.html: 97 clips, 31 auto-flagged, 6.51 minutes total. That confirms the core issue: this is a
+  curation problem first, not a training problem.
+
+• Running git status --short
+
+• Ran git status --short
+  └  M audio/metadata.csv
+     M backend/main.py
+    … +22 lines (ctrl + t to view transcript)
+    ?? interest.txt
+    ?? test.ipynb
+
+• Ran rg -n "Aswini Clip Review|rows =|Flagged" audio\build_review_page.py audio\aswini_clip_review.html
+  └ audio\aswini_clip_review.html:6:  <title>Aswini Clip Review</title>
+    audio\aswini_clip_review.html:186:      <h1>Aswini Clip Review</h1>
+    … +210 lines (ctrl + t to view transcript)
+    audio\build_review_page.py:386:    rows = load_rows()
+    audio\build_review_page.py:392:    print(f"Flagged: {flagged}")
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I looked through interest.txt and the current audio work.
+
+  The Kaggle route did run, but the output is not strong enough for satisfying voice training yet. Current extracted Ashwini set is:
+
+  - 97 clips
+  - 6.51 minutes total
+  - 16 kHz, mono WAV
+  - 31 clips auto-flagged as suspicious
+  - several clips contain customer speech, voicemail, wrong transcript text, or mixed dialogue
+
+  The core issue is not Kaggle itself. It is that the dataset is contaminated. Training or fine-tuning on this will teach the model mixed voices,
+  phone-call quality, and transcript mistakes.
+
+  I added a local review tool:
+
+  audio/build_review_page.py
+  Generated page: audio/aswini_clip_review.html
+
+  Open the HTML file in a browser. It lets you listen to each clip, mark Keep / Reject, edit the transcript, filter flagged clips, and export a
+  clean JSONL/CSV dataset.
+
+  My recommendation from here:
+
+  1. Use this page to create a small “gold” dataset first.
+  2. Reject anything with customer speech, voicemail, overlap, noisy audio, or wrong words.
+  3. Do not fine-tune again until you have clean clips.
+  4. For better results, record fresh voice notes/scripts in one quiet room instead of relying mainly on sales-call audio.
+
+  For “something else”: the best path is probably not more Kaggle training right now. First build a clean dataset from either manually reviewed
+  Ashwini clips or fresh recordings, then use XTTS/F5-style voice cloning before trying another full fine-tune.
+
+─ Worked for 4m 55s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› Well, I'm thinking of recording my voice for about An hour or so. What do you see? Should we do it? Should we not do it? I'll record another hour
+  or so, or maybe two hours, a couple of hours, and let's see how it goes. If things work, voice cloning happens and all that I've been trying to
+  do, like the DTS, the voice cloning and fine-tuning models. If everything works well and good. I can do it in English, Tamil, Hindi, bhojpuri.
+
+
+• Yes, record it. This is the right next move.
+
+  Your current call-derived Ashwini dataset is too noisy and mixed-speaker. One clean hour of your own recorded voice will likely beat many hours of
+  WhatsApp/call audio for TTS, cloning, and fine-tuning experiments.
+
+  Do it, but do it deliberately.
+
+  Recommendation
+
+  Start with 45-60 minutes in one language first, preferably English or the language you most care about. Do not immediately record 2 hours across
+  four languages. If the first hour is badly recorded, 2 hours just gives us more bad data.
+
+  Best plan:
+
+  1. Record 30 minutes English
+  2. Record 15 minutes Tamil
+  3. Record 15 minutes Hindi
+  4. Optionally record Bhojpuri later after we validate the pipeline
+
+  That gives us a clean multilingual test set without making the first attempt too big.
+
+  Recording Rules
+
+  Use the same setup throughout:
+
+  - Same room
+  - Same mic
+  - Same distance from mic
+  - No fan, traffic, music, echo
+  - Phone on airplane mode if recording on phone
+  - Speak naturally, not like reading a school essay
+  - Avoid long silences
+  - Avoid coughing, laughing, chair sounds, keyboard sounds
+  - Record in WAV if possible; otherwise high-quality M4A is okay and we can convert
+
+  Record in short files, not one huge file.
+
+  Good format:
+
+  english_001.wav  3-5 minutes
+  english_002.wav  3-5 minutes
+  tamil_001.wav    3-5 minutes
+  hindi_001.wav    3-5 minutes
+
+  Most Important Part
+
+  You need the exact text you read.
+
+  For TTS/fine-tuning, every audio clip must match its transcript. So either:
+
+  - read from a prepared script, or
+  - record freely, then transcribe and manually correct
+
+  Prepared script is much better.
+
+  Language Strategy
+
+  If you want multilingual cloning:
+
+  - English: good for general XTTS/F5 testing
+  - Tamil/Hindi/Bhojpuri: useful, but keep each language clearly separated
+  - Do not mix languages inside every sentence at first
+  - Later we can add code-switching examples like English + Tamil/Hindi mixed speech
+
+  How Much Is Enough
+
+  For voice cloning:
+
+  - 30-60 seconds clean reference can work
+  - 5-10 minutes gives better tests
+  - 30-60 minutes is solid
+
+  For fine-tuning:
+
+  - 1 hour clean single-speaker audio is a real starting point
+  - 2-3 hours is better
+  - Quality matters more than duration
+
+  So yes: record one clean hour first. Then we review quality, split it into clips, prepare metadata, and test XTTS/F5 before you spend time
+  recording more.
+
+
+› Okay, now it's your turn. Give me a perfect script to record in English, Hindi, Tamil, and Bhojpuri. I need a perfect script for around an RSO.
+  How do I do it in WAV, and what does that format M4V, I guess, that was something which you mentioned, high quality M4A or MPEG? How to do that?
+
+
+• I’ll put the recording instructions and scripts into a workspace file so you can read from it directly while recording, then I’ll summarize the
+  recording format choices here.
+
+• Model interrupted to submit steer instructions.
+
+
+› emotions & everything matters the most. it must not sound like robot speaking. mind it.
+
+
+• I’ll make this practical: a recording script should force natural prosody, not just coverage. I’m going to create a structured script with emotion
+  cues, pauses, question/answer shapes, numbers, names, sales-call phrases, and language-separated sections so the model gets expressive speech
+  instead of flat reading.
+
+• Added audio\voice_recording_script.md (+482 -0)
+      1 +# Voice Recording Script for TTS / Voice Cloning
+      2 +
+      3 +Goal: record clean, expressive, single-speaker audio for voice cloning, TTS, and possible fine-tuning.
+      4 +
+      5 +Record this as separate files, not one long file. Use the same mic, same room, same sitting position, and same distance from the mic.
+      6 +
+      7 +## Recording Format
+      8 +
+      9 +Best format:
+     10 +
+     11 +- WAV
+     12 +- Mono
+     13 +- 44.1 kHz or 48 kHz
+     14 +- 16-bit or 24-bit
+     15 +
+     16 +Also acceptable:
+     17 +
+     18 +- High-quality M4A from a phone voice recorder
+     19 +- High-quality MP3 only if WAV/M4A is not available
+     20 +
+     21 +Avoid:
+     22 +
+     23 +- WhatsApp voice notes
+     24 +- Screen recordings
+     25 +- Low bitrate MPEG audio
+     26 +- Audio recorded with fan noise, traffic, echo, music, or other speakers
+     27 +
+     28 +If your recorder only gives M4A, use it. We can convert M4A to WAV later. Clean recording matters more than the file extension.
+     29 +
+     30 +## How to Speak
+     31 +
+     32 +Do not read like a robot. Imagine you are speaking to a real person.
+     33 +
+     34 +Use:
+     35 +
+     36 +- natural pauses
+     37 +- small changes in speed
+     38 +- warm greetings
+     39 +- clear questions
+     40 +- polite emphasis
+     41 +- mild concern
+     42 +- confidence
+     43 +- a smile in the voice
+     44 +- calm explanation
+     45 +
+     46 +Avoid:
+     47 +
+     48 +- acting too much
+     49 +- shouting
+     50 +- whispering
+     51 +- singing
+     52 +- fake drama
+     53 +- monotone reading
+     54 +- rushing
+     55 +
+     56 +When a line says `[warm]`, actually smile slightly while speaking. When it says `[concerned]`, slow down a little. When it says `[clear]`,
+         speak cleanly and evenly.
+     57 +
+     58 +## Session Plan
+     59 +
+     60 +Recommended first dataset:
+     61 +
+     62 +- English: 25 minutes
+     63 +- Hindi: 15 minutes
+     64 +- Tamil: 15 minutes
+     65 +- Bhojpuri: 10 minutes
+     66 +- Mixed language/code-switching: 5 minutes
+     67 +
+     68 +Total: about 70 minutes.
+     69 +
+     70 +Record each part as 3-5 minute files.
+     71 +
+     72 +Example:
+     73 +
+     74 +- english_001.wav
+     75 +- english_002.wav
+     76 +- hindi_001.wav
+     77 +- tamil_001.wav
+     78 +- bhojpuri_001.wav
+     79 +- mixed_001.wav
+     80 +
+     81 +Before every file, clap once softly or say: "start". After that, leave one second of silence and begin.
+     82 +
+     83 +---
+     84 +
+     85 +# English Script
+     86 +
+     87 +## English 001 - Warm Introductions
+     88 +
+     89 +[warm] Hello, good morning. I hope you are doing well today.
+     90 +
+     91 +[warm] My name is Ashwini, and I am calling from Yexis Electronics.
+     92 +
+     93 +[clear] We are regional distributors for Samsung products, including commercial displays, signage boards, video walls, monitors, television
+         s, and air conditioning solutions.
+     94 +
+     95 +[polite] Is this a good time to speak with you for a minute?
+     96 +
+     97 +[friendly] I will keep this very brief.
+     98 +
+     99 +[clear] I just wanted to understand whether you have any current or future requirement for displays, signage, video walls, or professional
+         monitors.
+    100 +
+    101 +[curious] Are you currently using Samsung products in your office or factory?
+    102 +
+    103 +[gentle] No problem at all. I completely understand.
+    104 +
+    105 +[warm] I can send you a short company profile on WhatsApp or email, whichever is convenient for you.
+    106 +
+    107 +[clear] Please let me know the right email address, and I will share the details.
+    108 +
+    109 +[polite] Thank you for your time. I really appreciate it.
+    110 +
+    111 +[warm] Have a good day.
+    112 +
+    113 +## English 002 - Natural Questions
+    114 +
+    115 +[curious] May I know who handles purchase decisions in your company?
+    116 +
+    117 +[clear] Is there a separate IT team for monitors and display requirements?
+    118 +
+    119 +[polite] Could you please connect me with the concerned person?
+    120 +
+    121 +[warm] I am not calling to disturb you. I only want to share the right information with the right person.
+    122 +
+    123 +[clear] Do you need televisions for conference rooms, meeting rooms, or reception areas?
+    124 +
+    125 +[curious] Are you looking for normal consumer televisions, or professional commercial displays?
+    126 +
+    127 +[explanatory] The main difference is usage time, warranty, brightness, and reliability.
+    128 +
+    129 +[clear] If the screen will be used for many hours every day, a commercial display is usually better.
+    130 +
+    131 +[gentle] But if it is only for simple viewing, a normal television may be enough.
+    132 +
+    133 +[confident] We can suggest the right model based on your room size, viewing distance, and budget.
+    134 +
+    135 +[polite] Would you like me to send a few options?
+    136 +
+    137 +## English 003 - Emotion and Variation
+    138 +
+    139 +[happy] That is good to hear.
+    140 +
+    141 +[surprised] Oh, I see. I did not know that.
+    142 +
+    143 +[concerned] I understand. In that case, we should not rush the decision.
+    144 +
+    145 +[calm] Let us check the requirement properly and then suggest the right product.
+    146 +
+    147 +[reassuring] No worries. We can wait until you are ready.
+    148 +
+    149 +[firm but polite] I would not recommend that model for heavy commercial usage.
+    150 +
+    151 +[clear] It may work for a short time, but it may not be reliable in the long run.
+    152 +
+    153 +[helpful] If you share the approximate size of the room, I can suggest the screen size.
+    154 +
+    155 +[friendly] You do not have to decide immediately.
+    156 +
+    157 +[warm] I will send the details, and you can review them whenever you are free.
+    158 +
+    159 +## English 004 - Numbers, Names, and Products
+    160 +
+    161 +[clear] The model number is Q B forty three C.
+    162 +
+    163 +[clear] The screen sizes available are forty three inch, fifty inch, fifty five inch, sixty five inch, seventy five inch, and eighty five i
+         nch.
+    164 +
+    165 +[clear] The price may vary depending on quantity, warranty, and installation.
+    166 +
+    167 +[clear] Our office number is zero four four, four eight five six, two eight one two.
+    168 +
+    169 +[clear] My mobile number is nine eight four zero zero, five eight eight two two.
+    170 +
+    171 +[clear] Please send the requirement to sales at yexis dot in.
+    172 +
+    173 +[clear] The quotation includes product cost, GST, delivery, and installation charges.
+    174 +
+    175 +[explanatory] If the site is outside Chennai, logistics may be calculated separately.
+    176 +
+    177 +[polite] Please share the billing name, shipping address, GST number, and contact person details.
+    178 +
+    179 +[warm] Once I receive the details, I will prepare the quotation and send it to you.
+    180 +
+    181 +## English 005 - Longer Natural Paragraphs
+    182 +
+    183 +[calm] Let me explain this simply. If you need a display for a boardroom, the main things to consider are screen size, brightness, connecti
+         vity, and how many hours the display will run each day. For a small meeting room, a fifty five inch or sixty five inch screen may be enough
+         . For a larger conference room, we may need seventy five inch or eighty five inch, depending on the viewing distance.
+    184 +
+    185 +[confident] For signage, the requirement is different. The display may have to run for ten to sixteen hours a day, sometimes even longer. I
+         n that case, commercial displays are better than normal televisions because they are designed for longer usage, better heat handling, and b
+         usiness environments.
+    186 +
+    187 +[warm] I am not saying you must buy the most expensive model. I am saying we should choose the right model for the right usage. That way, y
+         ou do not overspend, and you also do not face problems later.
+    188 +
+    189 +## English 006 - Conversational Sales Follow-up
+    190 +
+    191 +[warm] Hello sir, this is Ashwini. I spoke with you last week regarding Samsung display requirements.
+    192 +
+    193 +[polite] I just wanted to check whether you had a chance to look at the details I shared.
+    194 +
+    195 +[gentle] No hurry, sir. I am only following up so that I do not miss your requirement.
+    196 +
+    197 +[curious] Is the requirement still open, or has it been postponed?
+    198 +
+    199 +[clear] If it is postponed, I can follow up next month.
+    200 +
+    201 +[friendly] If you need a revised quote, I can prepare it today.
+    202 +
+    203 +[concerned] If price is the concern, please tell me the target budget. I will check what best can be done.
+    204 +
+    205 +[warm] Thank you, sir. I will wait for your confirmation.
+    206 +
+    207 +---
+    208 +
+    209 +# Hindi Script
+    210 +
+    211 +## Hindi 001 - Warm Introduction
+    212 +
+    213 +[warm] Namaste sir, good morning. Aap kaise hain?
+    214 +
+    215 +[warm] Mera naam Ashwini hai, aur main Yexis Electronics se baat kar rahi hoon.
+    216 +
+    217 +[clear] Hum Samsung ke regional distributors hain.
+    218 +
+    219 +[polite] Kya abhi aapse ek minute baat karna theek rahega?
+    220 +
+    221 +[friendly] Main aapka zyada samay nahi loongi.
+    222 +
+    223 +[clear] Main bas yeh samajhna chahti hoon ki aapke office ya factory mein display, signage board, video wall, monitor, ya air conditioning
+         ka koi requirement hai kya.
+    224 +
+    225 +[gentle] Agar abhi requirement nahi hai, toh koi baat nahi.
+    226 +
+    227 +[warm] Main aapko company profile WhatsApp ya email par bhej sakti hoon.
+    228 +
+    229 +[polite] Aap please mujhe sahi email id bata dijiye.
+    230 +
+    231 +[warm] Dhanyavaad sir. Aapka din achha rahe.
+    232 +
+    233 +## Hindi 002 - Natural Business Questions
+    234 +
+    235 +[curious] Purchase decision kaun handle karte hain?
+    236 +
+    237 +[clear] IT team alag hai ya admin team hi requirement dekhti hai?
+    238 +
+    239 +[polite] Kya aap mujhe concerned person se connect kar sakte hain?
+    240 +
+    241 +[gentle] Main sirf details share karna chahti hoon, taaki jab requirement aaye toh aapke paas information ready rahe.
+    242 +
+    243 +[clear] Conference room ke liye television chahiye, ya commercial display chahiye?
+    244 +
+    245 +[explanatory] Agar screen roz zyada ghante chalni hai, toh commercial display better rahega.
+    246 +
+    247 +[calm] Agar simple viewing ke liye hai, toh normal television bhi kaafi ho sakta hai.
+    248 +
+    249 +[warm] Aap requirement share kijiye, main suitable model suggest kar dungi.
+    250 +
+    251 +## Hindi 003 - Emotion and Variation
+    252 +
+    253 +[happy] Bahut achha, sir.
+    254 +
+    255 +[surprised] Achha, aisa hai kya?
+    256 +
+    257 +[concerned] Samajh gayi. Phir humein thoda carefully check karna chahiye.
+    258 +
+    259 +[reassuring] Koi baat nahi, sir. Aap araam se dekhiye.
+    260 +
+    261 +[firm but polite] Heavy usage ke liye main normal TV recommend nahi karungi.
+    262 +
+    263 +[clear] Short term mein kaam kar sakta hai, lekin long term mein problem aa sakti hai.
+    264 +
+    265 +[helpful] Agar aap room ka approximate size bata denge, toh main screen size suggest kar sakti hoon.
+    266 +
+    267 +[warm] Main details bhej deti hoon. Aap jab free ho tab dekh lijiye.
+    268 +
+    269 +## Hindi 004 - Longer Paragraphs
+    270 +
+    271 +[calm] Main simple tareeke se explain karti hoon. Agar aapko boardroom ke liye display chahiye, toh screen size, brightness, warranty, aur
+         daily usage hours important hote hain. Chhote meeting room ke liye fifty five inch ya sixty five inch ka screen enough ho sakta hai. Bade c
+         onference room ke liye seventy five inch ya eighty five inch better ho sakta hai.
+    272 +
+    273 +[confident] Signage ke case mein requirement thoda alag hota hai. Display ko roz bahut ghante chalna padta hai. Isliye commercial display n
+         ormal TV se zyada reliable hota hai.
+    274 +
+    275 +[warm] Mera suggestion yeh hai ki pehle usage samjhte hain, phir model decide karte hain. Isse aapka paisa bhi save hoga aur future problem
+          bhi kam hogi.
+    276 +
+    277 +---
+    278 +
+    279 +# Tamil Script
+    280 +
+    281 +## Tamil 001 - Warm Introduction
+    282 +
+    283 +[warm] Vanakkam sir, good morning. Neenga eppadi irukkeenga?
+    284 +
+    285 +[warm] En peyar Ashwini. Naan Yexis Electronics lendhu pesuren.
+    286 +
+    287 +[clear] Naanga Samsung products ku regional distributors.
+    288 +
+    289 +[polite] Ippo unga kitta oru nimisham pesa mudiyuma?
+    290 +
+    291 +[friendly] Naan romba time eduthukama brief ah pesuren.
+    292 +
+    293 +[clear] Unga office la illa factory la display, signage board, video wall, monitor, TV, illa air conditioning requirement irukka nu therinj
+         ikka call panninen.
+    294 +
+    295 +[gentle] Ippo requirement illa na paravala sir.
+    296 +
+    297 +[warm] Naan company profile ah WhatsApp la illa email la share pannalaam.
+    298 +
+    299 +[polite] Correct email id sollunga sir, naan details anuppuren.
+    300 +
+    301 +[warm] Romba nandri sir. Unga time ku thanks.
+    302 +
+    303 +## Tamil 002 - Business Questions
+    304 +
+    305 +[curious] Purchase decision yaar handle panraanga sir?
+    306 +
+    307 +[clear] IT team separate ah irukka, illa admin team dhaan paakuraangala?
+    308 +
+    309 +[polite] Concerned person kitta connect panna mudiyuma?
+    310 +
+    311 +[gentle] Disturb panna call pannala sir. Correct person kitta information share panna dhaan call panninen.
+    312 +
+    313 +[clear] Conference room ku TV venuma, illa commercial display venuma?
+    314 +
+    315 +[explanatory] Daily long hours use panna commercial display better ah irukkum.
+    316 +
+    317 +[calm] Simple viewing ku mattum na normal TV enough ah irukkalaam.
+    318 +
+    319 +[warm] Requirement share pannunga sir. Naan suitable model suggest panren.
+    320 +
+    321 +## Tamil 003 - Emotion and Variation
+    322 +
+    323 +[happy] Seri sir, romba nalla vishayam.
+    324 +
+    325 +[surprised] Appadiya sir? Naan adha therinjikala.
+    326 +
+    327 +[concerned] Puriyudhu sir. Appo konjam carefully check pannalaam.
+    328 +
+    329 +[reassuring] Paravala sir. Neenga free ah irukkumbodhu paarunga.
+    330 +
+    331 +[firm but polite] Heavy usage ku normal TV recommend panna maaten sir.
+    332 +
+    333 +[clear] Konja naal work aagalam, aana long term la problem varalaam.
+    334 +
+    335 +[helpful] Room size approximate ah sonna, naan screen size suggest panna mudiyum.
+    336 +
+    337 +[warm] Details anuppiduren sir. Neenga time kidaikkumbodhu paarunga.
+    338 +
+    339 +## Tamil 004 - Longer Paragraphs
+    340 +
+    341 +[calm] Simple ah explain panren sir. Boardroom ku display venumna, screen size, brightness, connectivity, warranty, daily usage hours ellam
+          important. Small meeting room ku fifty five inch illa sixty five inch enough ah irukkum. Large conference room ku seventy five inch illa e
+         ighty five inch better ah irukkum.
+    342 +
+    343 +[confident] Signage requirement different sir. Display daily many hours run aagum. Appo commercial display use pannina reliability better a
+         h irukkum.
+    344 +
+    345 +[warm] Naan costly model dhaan vangunga nu sollala. Usage ku correct model choose panna sollren. Appadi pannina budget waste aagathu, futur
+         e problem um kammiya irukkum.
+    346 +
+    347 +---
+    348 +
+    349 +# Bhojpuri Script
+    350 +
+    351 +## Bhojpuri 001 - Warm Introduction
+    352 +
+    353 +[warm] Namaste sir, good morning. Raur ka haal ba?
+    354 +
+    355 +[warm] Hamaar naam Ashwini ba, aur hum Yexis Electronics se baat karat bani.
+    356 +
+    357 +[clear] Humni ke Samsung products ke regional distributor bani.
+    358 +
+    359 +[polite] Abhi raur se ek minute baat kar sakat bani?
+    360 +
+    361 +[friendly] Hum raur zyada samay na lehab.
+    362 +
+    363 +[clear] Hum bas ee jaane ke chaht bani ki raur office ya factory mein display, signage board, video wall, monitor, TV, ya air conditioning
+         ke kuch requirement ba ka.
+    364 +
+    365 +[gentle] Agar abhi requirement na ho, ta koi baat na.
+    366 +
+    367 +[warm] Hum company profile WhatsApp ya email par bhej dehab.
+    368 +
+    369 +[polite] Raur sahi email id bata di.
+    370 +
+    371 +[warm] Bahut dhanyavaad sir. Raur din achha rahe.
+    372 +
+    373 +## Bhojpuri 002 - Business Questions
+    374 +
+    375 +[curious] Purchase decision ke dekhela sir?
+    376 +
+    377 +[clear] IT team alag ba, ki admin team ee sab dekhela?
+    378 +
+    379 +[polite] Raur concerned person se connect kara sakat bani?
+    380 +
+    381 +[gentle] Hum disturb kare ke nahi, bas correct person ke information share kare ke call kaile bani.
+    382 +
+    383 +[clear] Conference room khatir TV chahi, ki commercial display chahi?
+    384 +
+    385 +[explanatory] Agar screen roj lamba time chale wala ba, ta commercial display better rahi.
+    386 +
+    387 +[calm] Agar simple viewing khatir ba, ta normal TV bhi kaafi ho sakela.
+    388 +
+    389 +[warm] Requirement bata di sir, hum suitable model suggest kar dehab.
+    390 +
+    391 +## Bhojpuri 003 - Emotion and Variation
+    392 +
+    393 +[happy] Bahut achha sir.
+    394 +
+    395 +[surprised] Achha, aisan ba ka?
+    396 +
+    397 +[concerned] Samajh gaili. Ta ee thoda dhyan se check kare ke padi.
+    398 +
+    399 +[reassuring] Koi baat na sir. Raur aaram se dekhi.
+    400 +
+    401 +[firm but polite] Heavy usage khatir hum normal TV recommend na karab.
+    402 +
+    403 +[clear] Thoda din kaam kar sakela, lekin long term mein problem aa sakela.
+    404 +
+    405 +[helpful] Agar room ke size bata di, ta hum screen size suggest kar sakat bani.
+    406 +
+    407 +[warm] Hum details bhej det bani. Raur jab free bani tab dekh liji.
+    408 +
+    409 +---
+    410 +
+    411 +# Mixed Language Script
+    412 +
+    413 +Use this only after recording clean separate-language files.
+    414 +
+    415 +[warm] Hello sir, good morning. Naan Ashwini pesuren from Yexis Electronics.
+    416 +
+    417 +[clear] Hum Samsung commercial displays, signage boards, monitors, and air conditioning solutions handle karte hain.
+    418 +
+    419 +[polite] Ippo unga kitta oru minute pesa mudiyuma, sir?
+    420 +
+    421 +[friendly] Main sirf brief details share karna chahti hoon.
+    422 +
+    423 +[clear] If there is any requirement now or in the future, please let me know.
+    424 +
+    425 +[warm] Naan company profile WhatsApp la share panren.
+    426 +
+    427 +[polite] Aap email id bhej dijiye, main quotation prepare karke send kar dungi.
+    428 +
+    429 +[gentle] No hurry sir. Neenga free ah irukkumbodhu paarunga.
+    430 +
+    431 +[warm] Thank you sir. Romba nandri. Dhanyavaad.
+    432 +
+    433 +---
+    434 +
+    435 +# Extra Expressive Lines
+    436 +
+    437 +Record these once in English, once in Hindi, once in Tamil, and once in Bhojpuri if possible.
+    438 +
+    439 +[very warm] I am happy to help.
+    440 +
+    441 +[calm] Let me check and get back to you.
+    442 +
+    443 +[concerned] I understand your concern.
+    444 +
+    445 +[reassuring] Please do not worry. We will handle it.
+    446 +
+    447 +[confident] This option will be more reliable for your usage.
+    448 +
+    449 +[polite] May I call you back tomorrow?
+    450 +
+    451 +[apologetic] Sorry for the delay.
+    452 +
+    453 +[grateful] Thank you for your patience.
+    454 +
+    455 +[curious] Could you please explain the requirement once more?
+    456 +
+    457 +[clear] I will send the quotation by today evening.
+    458 +
+    459 +[gentle] No problem, sir. We can discuss it next week.
+    460 +
+    461 +[friendly] Have a nice day.
+    462 +
+    463 +---
+    464 +
+    465 +# File Naming Checklist
+    466 +
+    467 +Use names like:
+    468 +
+    469 +- english_001.wav
+    470 +- english_002.wav
+    471 +- hindi_001.wav
+    472 +- hindi_002.wav
+    473 +- tamil_001.wav
+    474 +- tamil_002.wav
+    475 +- bhojpuri_001.wav
+    476 +- mixed_001.wav
+    477 +
+    478 +After recording, put all files in:
+    479 +
+    480 +audio/my_voice_recordings/raw
+    481 +
+    482 +Do not rename files randomly after we begin processing.
+
+⚠ Heads up, you have less than 5% of your monthly limit left. Run /status for a breakdown.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Yes, emotions matter a lot. A flat script will produce a flat cloned voice.
+
+  I created the recording script here:
+
+  audio/voice_recording_script.md
+
+  It includes English, Hindi, Tamil, Bhojpuri, and mixed-language sections, with emotion cues like [warm], [concerned], [confident], [polite], and
+  [reassuring]. Read it naturally, as if speaking to a real customer. Do not overact, but do not read like news or school recitation.
+
+  For format:
+
+  Use WAV if your recorder supports it.
+  WAV, mono, 44.1 kHz or 48 kHz, 16-bit or 24-bit
+
+  Acceptable:
+  Avoid:
+  WhatsApp voice notes, low-quality MPEG, noisy recordings, or one huge file.
+  tamil_001.wav
+  bhojpuri_001.wav
+  mixed_001.wav
+
+  Keep each file around 3-5 minutes. Put them later in:
+
+  audio/my_voice_recordings/raw
+─ Worked for 9m 20s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› ive recordings under the said folder.
+
+
+• I’ll check audio/my_voice_recordings/raw now, verify the files, durations, sample rates, channels, and whether they’re already in a good shape for
+  processing.
+
+• Running rg --files audio\my_voice_recordings
+
+• Ran Get-ChildItem audio\my_voice_recordings\raw -Force
+  └ Get-ChildItem : Cannot find path 'E:\something_new\audio\my_voice_recordings\raw' because it does not exist.
+    At line:2 char:1
+    … +3 lines (ctrl + t to view transcript)
+        + FullyQualifiedErrorId : PathNotFound,Microsoft.PowerShell.Commands.GetChildItemCommand
+
+• Running Get-ChildItem audio -Recurse -File | Where-Object { $_.Extension -match '\.(wav|m4a|mp3|mpeg|aac|flac)$' } | Sort-Object LastWriteTime
+    FullName                                                                  Length LastWriteTime
+    … +41 lines (ctrl + t to view transcript)
+
+
+
+• Ran Get-ChildItem -Recurse -File | Where-Object { $_.Extension -match '\.(wav|m4a|mp3|mpeg|aac|flac)$' } | Sort-Object LastWriteTime -Descending |
+  │ Select-Object -First 50 FullName,Length,LastWriteTime
+  └ (no output)
+
+■ You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at Jul 23rd, 2026 1:09 PM.
+
+
+› E:\something_new\audio\recording
+
+
+■ You've hit your usage limit. Upgrade to Plus to continue using Codex (https://chatgpt.com/explore/plus), or try again at Jul 23rd, 2026 1:09 PM.
+
+
+› E:\something_new\audio\recording
+• Found them under audio\recording. I’ll audit that folder directly now and calculate duration/sample format per file so we know what is usable and
+  what needs conversion or cleanup.
+• Ran python -c "import wave,glob,os; files=glob.glob(r'audio\recording\**\*.wav',recursive=True); print('wav_count',len(files));
+  │ for p in sorted(files):
+  │     with wave.open(p,'rb') as w:
+  │ … +1 lines
+  └ wav_count 22
+    audio\recording\lk\bhojpuri\gags.wav    63.71s    48000Hz    2ch    16bit
+    … +19 lines (ctrl + t to view transcript)
+    audio\recording\skt\intro.wav    52.74s    48000Hz    2ch    16bit
+    audio\recording\skt\purchase_question.wav    62.82s    48000Hz    2ch    16bit
+
+• Ran Get-ChildItem audio\recording -Recurse -File | Select-Object FullName,Length,LastWriteTime | Sort-Object FullName
+  └
+    FullName                                                          Length LastWriteTime
+    … +24 lines (ctrl + t to view transcript)
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The WAV files are technically good: 48 kHz, stereo, 16-bit, with about 43 minutes of lk recordings plus smaller skt and one rk MPEG. For model
+  prep we should normalize these to mono WAV and then segment/transcribe/review; I’m checking whether ffmpeg is available for conversion.
+
+• Running ffmpeg -version
+
+• Running ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio\recording\rk\introduction.mpeg
+
+  │     parts=p.split(os.sep); speaker=parts[2] if len(parts)>2 else 'unknown'; lang='english'
+  │ … +7 lines
+  └ lk/bhojpuri 2 6.5 min
+    lk/english 7 27.52 min
+    … +2 lines (ctrl + t to view transcript)
+    lk/tamil 4 7.13 min
+    skt/english 3 2.07 min
+
+• Ran ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio\recording\rk\introduction.mpeg
+  └ ffprobe : The term 'ffprobe' is not recognized as the name of a cmdlet, function, script file, or operable program.
+    Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+    … +4 lines (ctrl + t to view transcript)
+        + FullyQualifiedErrorId : CommandNotFoundException
+
+
+• Ran ffmpeg -version
+  └ ffmpeg : The term 'ffmpeg' is not recognized as the name of a cmdlet, function, script file, or operable program.
+    Check the spelling of the name, or if a path was included, verify that the path is correct and try again.
+    … +4 lines (ctrl + t to view transcript)
+        + FullyQualifiedErrorId : CommandNotFoundException
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• ffmpeg is not installed on PATH, so the MPEG file cannot be handled cleanly right now. The WAV files can still be processed locally with Python
+  libraries if available; I’ll check for soundfile/scipy and then create a preparation script for the WAV recordings.
+
+• Running python -c "import whisper; print('whisper ok')"
+
+• Running python -c "import soundfile, scipy; print('soundfile ok'); print('scipy ok')"
+
+• Ran python -c "import whisper; print('whisper ok')"
+  └ Traceback (most recent call last):
+      File "<string>", line 1, in <module>
+    ModuleNotFoundError: No module named 'whisper'
+
+• Ran python -c "import soundfile, scipy; print('soundfile ok'); print('scipy ok')"
+  └ Traceback (most recent call last):
+      File "<string>", line 1, in <module>
+    ModuleNotFoundError: No module named 'soundfile'
+
+• Ran python -c "import librosa; print('librosa ok')"
+  └ Traceback (most recent call last):
+      File "<string>", line 1, in <module>
+    ModuleNotFoundError: No module named 'librosa'
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The local Python environment is bare: no soundfile, librosa, or whisper. I can still do a useful first pass with the standard library: downmix
+  stereo WAV to mono, trim leading/trailing silence, peak-normalize safely, and generate a manifest. That gives us clean source files for later
+  transcription/training.
+
+• Added audio\prepare_recordings_stdlib.py (+196 -0)
+      1 +"""
+      2 +Prepare recorded WAV files for voice-cloning experiments using only Python stdlib.
+      3 +
+      4 +Input:
+      5 +  audio/recording/**/*.wav
+      6 +
+      7 +Output:
+      8 +  audio/my_voice_recordings/normalized/*.wav
+      9 +  audio/my_voice_recordings/manifest.jsonl
+     10 +  audio/my_voice_recordings/summary.txt
+     11 +
+     12 +This script downmixes stereo WAV to mono, trims leading/trailing silence, applies
+     13 +conservative peak normalization, and preserves the original sample rate.
+     14 +"""
+     15 +
+     16 +from __future__ import annotations
+     17 +
+     18 +import audioop
+     19 +import json
+     20 +import math
+     21 +import wave
+     22 +from pathlib import Path
+     23 +
+     24 +
+     25 +ROOT = Path(__file__).resolve().parent
+     26 +INPUT_DIR = ROOT / "recording"
+     27 +OUT_DIR = ROOT / "my_voice_recordings"
+     28 +NORMALIZED_DIR = OUT_DIR / "normalized"
+     29 +MANIFEST = OUT_DIR / "manifest.jsonl"
+     30 +SUMMARY = OUT_DIR / "summary.txt"
+     31 +
+     32 +FRAME_MS = 20
+     33 +TRIM_THRESHOLD_RATIO = 0.012
+     34 +TARGET_PEAK_RATIO = 0.86
+     35 +
+     36 +
+     37 +def classify(path: Path) -> tuple[str, str]:
+     38 +    rel = path.relative_to(INPUT_DIR)
+     39 +    speaker = rel.parts[0] if rel.parts else "unknown"
+     40 +    lower_parts = [part.lower() for part in rel.parts]
+     41 +    language = "english"
+     42 +    for candidate in ("hindi", "tamil", "bhojpuri"):
+     43 +        if candidate in lower_parts:
+     44 +            language = candidate
+     45 +            break
+     46 +    if "mixed" in path.stem.lower():
+     47 +        language = "mixed"
+     48 +    return speaker, language
+     49 +
+     50 +
+     51 +def read_wav(path: Path) -> tuple[bytes, int, int]:
+     52 +    with wave.open(str(path), "rb") as wav:
+     53 +        channels = wav.getnchannels()
+     54 +        sample_width = wav.getsampwidth()
+     55 +        sample_rate = wav.getframerate()
+     56 +        frames = wav.readframes(wav.getnframes())
+     57 +    if sample_width != 2:
+     58 +        raise ValueError(f"Only 16-bit WAV is supported: {path}")
+     59 +    if channels == 2:
+     60 +        frames = audioop.tomono(frames, sample_width, 0.5, 0.5)
+     61 +    elif channels != 1:
+     62 +        raise ValueError(f"Only mono/stereo WAV is supported: {path}")
+     63 +    return frames, sample_rate, sample_width
+     64 +
+     65 +
+     66 +def trim_silence(frames: bytes, sample_rate: int, sample_width: int) -> bytes:
+     67 +    frame_bytes = int(sample_rate * FRAME_MS / 1000) * sample_width
+     68 +    if frame_bytes <= 0:
+     69 +        return frames
+     70 +
+     71 +    max_peak = audioop.max(frames, sample_width) or 1
+     72 +    threshold = max(120, int(max_peak * TRIM_THRESHOLD_RATIO))
+     73 +
+     74 +    chunks = [
+     75 +        frames[i : i + frame_bytes]
+     76 +        for i in range(0, len(frames), frame_bytes)
+     77 +        if len(frames[i : i + frame_bytes]) == frame_bytes
+     78 +    ]
+     79 +    if not chunks:
+     80 +        return frames
+     81 +
+     82 +    start = 0
+     83 +    while start < len(chunks) and audioop.rms(chunks[start], sample_width) < threshold:
+     84 +        start += 1
+     85 +
+     86 +    end = len(chunks) - 1
+     87 +    while end > start and audioop.rms(chunks[end], sample_width) < threshold:
+     88 +        end -= 1
+     89 +
+     90 +    pad = max(1, int(120 / FRAME_MS))
+     91 +    start = max(0, start - pad)
+     92 +    end = min(len(chunks) - 1, end + pad)
+     93 +    return b"".join(chunks[start : end + 1]) or frames
+     94 +
+     95 +
+     96 +def peak_normalize(frames: bytes, sample_width: int) -> tuple[bytes, float]:
+     97 +    peak = audioop.max(frames, sample_width)
+     98 +    if peak <= 0:
+     99 +        return frames, 1.0
+    100 +    max_value = (2 ** (8 * sample_width - 1)) - 1
+    101 +    target = int(max_value * TARGET_PEAK_RATIO)
+    102 +    gain = min(target / peak, 4.0)
+    103 +    return audioop.mul(frames, sample_width, gain), gain
+    104 +
+    105 +
+    106 +def write_wav(path: Path, frames: bytes, sample_rate: int, sample_width: int) -> None:
+    107 +    path.parent.mkdir(parents=True, exist_ok=True)
+    108 +    with wave.open(str(path), "wb") as wav:
+    109 +        wav.setnchannels(1)
+    110 +        wav.setsampwidth(sample_width)
+    111 +        wav.setframerate(sample_rate)
+    112 +        wav.writeframes(frames)
+    113 +
+    114 +
+    115 +def seconds(frames: bytes, sample_rate: int, sample_width: int) -> float:
+    116 +    return len(frames) / sample_width / sample_rate
+    117 +
+    118 +
+    119 +def dbfs(frames: bytes, sample_width: int) -> float | None:
+    120 +    rms = audioop.rms(frames, sample_width)
+    121 +    if rms <= 0:
+    122 +        return None
+    123 +    max_value = (2 ** (8 * sample_width - 1)) - 1
+    124 +    return 20 * math.log10(rms / max_value)
+    125 +
+    126 +
+    127 +def main() -> None:
+    128 +    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    129 +    NORMALIZED_DIR.mkdir(parents=True, exist_ok=True)
+    130 +
+    131 +    wavs = sorted(INPUT_DIR.rglob("*.wav"))
+    132 +    records = []
+    133 +
+    134 +    for source in wavs:
+    135 +        speaker, language = classify(source)
+    136 +        frames, sample_rate, sample_width = read_wav(source)
+    137 +        original_duration = seconds(frames, sample_rate, sample_width)
+    138 +        trimmed = trim_silence(frames, sample_rate, sample_width)
+    139 +        normalized, gain = peak_normalize(trimmed, sample_width)
+    140 +        output_name = "_".join(source.relative_to(INPUT_DIR).with_suffix("").parts) + ".wav"
+    141 +        output = NORMALIZED_DIR / output_name
+    142 +        write_wav(output, normalized, sample_rate, sample_width)
+    143 +
+    144 +        record = {
+    145 +            "audio_path": str(output),
+    146 +            "source_path": str(source),
+    147 +            "speaker": speaker,
+    148 +            "language": language,
+    149 +            "sample_rate": sample_rate,
+    150 +            "channels": 1,
+    151 +            "sample_width_bits": sample_width * 8,
+    152 +            "duration": round(seconds(normalized, sample_rate, sample_width), 3),
+    153 +            "original_duration": round(original_duration, 3),
+    154 +            "gain": round(gain, 4),
+    155 +            "rms_dbfs": None if dbfs(normalized, sample_width) is None else round(dbfs(normalized, sample_width), 2),
+    156 +            "text": "",
+    157 +        }
+    158 +        records.append(record)
+    159 +
+    160 +    with MANIFEST.open("w", encoding="utf-8") as handle:
+    161 +        for record in records:
+    162 +            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
+    163 +
+    164 +    totals: dict[tuple[str, str], float] = {}
+    165 +    for record in records:
+    166 +        key = (record["speaker"], record["language"])
+    167 +        totals[key] = totals.get(key, 0.0) + record["duration"]
+    168 +
+    169 +    lines = [
+    170 +        "Recording preparation summary",
+    171 +        f"Input: {INPUT_DIR}",
+    172 +        f"Output: {NORMALIZED_DIR}",
+    173 +        f"Files: {len(records)}",
+    176 +        "By speaker/language:",
+    177 +    ]
+    178 +    for (speaker, language), duration in sorted(totals.items()):
+    179 +        lines.append(f"- {speaker}/{language}: {duration / 60:.2f} min")
+    180 +
+    181 +    lines.extend(
+    182 +        [
+    183 +            "",
+    184 +            "Notes:",
+    185 +            "- MPEG/M4A/MP3 files are not processed by this stdlib script.",
+    186 +            "- Transcripts are intentionally blank; fill them after transcription/review.",
+    187 +            "- Sample rate is preserved because stdlib has no high-quality resampler.",
+    188 +        ]
+    189 +    )
+    190 +    SUMMARY.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    193 +
+    194 +
+    195 +if __name__ == "__main__":
+    196 +    main()
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ve added a dependency-free prep script. It will not touch the originals; it writes normalized mono copies and a manifest under audio/
+  my_voice_recordings. I’m running it now.
+
+• Running python audio\prepare_recordings_stdlib.py
+
+• Ran python -m py_compile audio\prepare_recordings_stdlib.py
+  └ (no output)
+
+• Ran python audio\prepare_recordings_stdlib.py
+  └ Recording preparation summary
+    Input: E:\something_new\audio\recording
+    … +17 lines (ctrl + t to view transcript)
+    E:\something_new\audio\prepare_recordings_stdlib.py:18: DeprecationWarning: 'audioop' is deprecated and slated for removal in Python 3.13
+  folder and manifest.
+
+• Running Get-ChildItem audio\my_voice_recordings -Force
+
+• Running Get-Content audio\my_voice_recordings\summary.txt
+
+• Running Get-ChildItem audio\my_voice_recordings\normalized -File | Select-Object -First 30 Name,Length
+
+• Ran Get-Content audio\my_voice_recordings\summary.txt
+  └ Recording preparation summary
+    Input: E:\something_new\audio\recording
+    … +14 lines (ctrl + t to view transcript)
+    - Transcripts are intentionally blank; fill them after transcription/review.
+    - Sample rate is preserved because stdlib has no high-quality resampler.
+
+• Ran Get-ChildItem audio\my_voice_recordings -Force
+  └
+
+    … +8 lines (ctrl + t to view transcript)
+
+
+
+• Ran Get-Content audio\my_voice_recordings\manifest.jsonl -TotalCount 5
+  └ {"audio_path": "E:\\something_new\\audio\\my_voice_recordings\\normalized\\lk_bhojpuri_gags.wav", "source_path": "E:\\something_new\\audio\
+    \recording\\lk\\bhojpuri\\gags.wav", "speaker": "lk", "language": "bhojpuri", "sample_rate": 48000, "channels": 1, "sample_width_bits": 16,
+    … +11 lines (ctrl + t to view transcript)
+    \recording\\lk\\hindi\\expressive.wav", "speaker": "lk", "language": "hindi", "sample_rate": 48000, "channels": 1, "sample_width_bits": 16,
+    "duration": 202.82, "original_duration": 202.97, "gain": 2.9402, "rms_dbfs": -26.06, "text": ""}
+
+• Ran Get-ChildItem audio\my_voice_recordings\normalized -File | Select-Object -First 30 Name,Length
+  └
+    Name                             Length
+    … +23 lines (ctrl + t to view transcript)
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I found the recordings under audio/recording, not the earlier raw folder.
+
+  I prepared the WAV files into clean mono copies here:
+
+  audio/my_voice_recordings/normalized
+
+  Summary:
+
+  - 22 WAV files processed
+  - 56.53 minutes total
+  - Output is mono WAV, original sample rate preserved at 48 kHz
+  - Originals were not modified
+  - Manifest created: audio/my_voice_recordings/manifest.jsonl
+  - Summary created: audio/my_voice_recordings/summary.txt
+
+  Breakdown:
+
+  lk/english:   27.36 min
+  lk/hindi:     11.66 min
+  lk/tamil:      7.10 min
+  lk/bhojpuri:   6.46 min
+  lk/mixed:      1.98 min
+  skt/english:   1.96 min
+
+  One file was not processed: audio/recording/rk/introduction.mpeg, because ffmpeg is not installed on PATH. The WAV recordings are enough to
+  proceed.
+
+  Next step: we need transcripts. For TTS/fine-tuning, audio without exact text is not enough. We should either transcribe these files with Whisper
+  on Kaggle/Colab, or install local transcription tools and produce a reviewed dataset.jsonl.
+
+─ Worked for 3m 22s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› C:\Users\User>ffmpeg -version
+  ffmpeg version 8.1.1-full_build-www.gyan.dev Copyright (c) 2000-2026 the FFmpeg developers
+  built with gcc 15.2.0 (Rev13, Built by MSYS2 project)
+  configuration: --enable-gpl --enable-version3 --enable-static --disable-w32threads --disable-autodetect --enable-cairo --enable-fontconfig
+  --enable-iconv --enable-gnutls --enable-lcms2 --enable-libxml2 --enable-gmp --enable-bzlib --enable-lzma --enable-libsnappy --enable-zlib
+  --enable-librist --enable-libsrt --enable-libssh --enable-libzmq --enable-avisynth --enable-libbluray --enable-libcaca --enable-libdvdnav
+  --enable-libdvdread --enable-sdl2 --enable-libaribb24 --enable-libaribcaption --enable-libdav1d --enable-libdavs2 --enable-libopenjpeg --enable-
+  libquirc --enable-libuavs3d --enable-libxevd --enable-libzvbi --enable-liboapv --enable-libqrencode --enable-librav1e --enable-libsvtav1
+  --enable-libvvenc --enable-libwebp --enable-libx264 --enable-libx265 --enable-libxavs2 --enable-libxeve --enable-libxvid --enable-libaom
+  --enable-libjxl --enable-libsvtjpegxs --enable-libvpx --enable-mediafoundation --enable-libass --enable-frei0r --enable-libfreetype --enable-
+  libfribidi --enable-libharfbuzz --enable-liblensfun --enable-libvidstab --enable-libvmaf --enable-libzimg --enable-amf --enable-cuda-llvm
+  --enable-cuvid --enable-dxva2 --enable-d3d11va --enable-d3d12va --enable-ffnvcodec --enable-libvpl --enable-nvdec --enable-nvenc --enable-vaapi
+  --enable-libshaderc --enable-vulkan --enable-libplacebo --enable-opencl --enable-libcdio --enable-openal --enable-libgme --enable-libmodplug
+  --enable-libopenmpt --enable-libopencore-amrwb --enable-libmp3lame --enable-libshine --enable-libtheora --enable-libtwolame --enable-libvo-
+  amrwbenc --enable-libcodec2 --enable-libilbc --enable-libgsm --enable-liblc3 --enable-libopencore-amrnb --enable-libopus --enable-libspeex
+  --enable-libvorbis --enable-ladspa --enable-libbs2b --enable-libflite --enable-libmysofa --enable-librubberband --enable-libsoxr --enable-
+  chromaprint --enable-whisper
+  libavutil      60. 26.101 / 60. 26.101
+  libavcodec     62. 28.101 / 62. 28.101
+  libavformat    62. 12.101 / 62. 12.101
+  libavdevice    62.  3.101 / 62.  3.101
+  libavfilter    11. 14.101 / 11. 14.101
+  libswscale      9.  5.101 /  9.  5.101
+  libswresample   6.  3.101 /  6.  3.101
+
+  Exiting with exit code 0
+
+  C:\Users\User>dont  know how to download & install ffprobe.PS E:\something_new> ./backend/myenvironment\Scripts\Activate
+  (myenvironment) PS E:\something_new> pip show soundfile
+  Name: soundfile
+  Version: 0.14.0
+  Summary: An audio library based on libsndfile, CFFI and NumPy
+  Home-page: https://github.com/bastibe/python-soundfile
+  Author: Bastian Bechtold
+  Author-email: bastibe.dev@mailbox.org
+  License: BSD 3-Clause License
+  Required-by: f5-tts, kittentts, librosa
+  (myenvironment) PS E:\something_new> pip show librosa
+  Name: librosa
+  Version: 0.11.0
+  Author: Brian McFee, librosa development team
+  Author-email: brian.mcfee@nyu.edu
+  Location: E:\something_new\backend\myenvironment\Lib\site-packages
+  Requires: audioread, decorator, joblib, lazy_loader, msgpack, numba, numpy, pooch, scikit-learn, scipy, soundfile, soxr, typing_extensions
+  Required-by: f5-tts
+  (myenvironment) PS E:\something_new> pip show whisper
+  WARNING: Package(s) not found: whisper
+  (myenvironment) PS E:\something_new> pip show whisperx
+  Name: whisperx
+  Version: 3.8.6
+  Summary: Time-Accurate Automatic Speech Recognition using Whisper.
+  Home-page:
+  Author: Max Bain
+  Author-email:
+  License: BSD-2-Clause
+  Location: E:\something_new\backend\myenvironment\Lib\site-packages
+  Requires: ctranslate2, faster-whisper, huggingface-hub, nltk, numpy, omegaconf, pandas, pyannote-audio, torch, torchaudio, torchcodec,
+  torchvision, transformers
+  Required-by:
+• You do not need the separate whisper package. whisperx already pulls faster-whisper, which is the better route here. Also, ffprobe normally ships
+  in the same bin folder as ffmpeg; if ffmpeg -version works in your C:\Users\User> shell, ffprobe.exe is probably already next to it or that shell
+  has a PATH entry my PowerShell session did not inherit. I’ll locate it from this workspace session and then use your venv tools.
+
+• Running where.exe ffprobe
+
+• Running where.exe ffmpeg
+
+• Ran where.exe ffprobe
+  └ INFO: Could not find files for the given pattern(s).
+
+• Ran where.exe ffmpeg
+  └ INFO: Could not find files for the given pattern(s).
+
+• Ran backend\myenvironment\Scripts\python.exe -c "import soundfile, librosa, whisperx; print('soundfile', soundfile.__version__); print('librosa',
+  │ librosa.__version__); print('whisperx ok')"
+  └ soundfile 0.14.0
+    librosa 0.11.0
+    whisperx ok
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The venv is usable from here: soundfile, librosa, and whisperx import correctly through backend\myenvironment\Scripts\python.exe. This session
+  still cannot see ffmpeg/ffprobe on PATH, so I’m checking common install locations; if it is not discoverable, we can still process all WAVs and
+  only skip the one MPEG until you give me the exact ffmpeg folder.
+
+• Running Get-ChildItem C:\ffmpeg,C:\tools,C:\ProgramData,choco:\ -ErrorAction SilentlyContinue
+
+• Ran Get-ChildItem C:\ffmpeg,C:\tools,C:\ProgramData,choco:\ -ErrorAction SilentlyContinue
+  └
+
+    … +30 lines (ctrl + t to view transcript)
+
+
+
+• Ran Get-ChildItem C:\ -Directory -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'ffmpeg|tools|Program|Users' } | Select-Object
+  │ FullName
+  └
+    FullName
+    … +4 lines (ctrl + t to view transcript)
+
+
+
+• Ran Get-ChildItem C:\Users\User -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 20 FullName
+  └
+    FullName
+    … +2 lines (ctrl + t to view transcript)
+
+
+
+
+• Running Get-ChildItem C:\ProgramData\chocolatey -Recurse -Filter ffprobe.exe -ErrorAction SilentlyContinue | Select-Object -First 20 FullName
+
+• Ran Get-ChildItem C:\ProgramData\chocolatey -Recurse -Filter ffprobe.exe -ErrorAction SilentlyContinue | Select-Object -First 20 FullName
+• Ran Get-ChildItem C:\ProgramData\chocolatey -Recurse -Filter ffmpeg.exe -ErrorAction SilentlyContinue | Select-Object -First 20 FullName
+  └ (no output)
+
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Practical answer: do not install whisper; it is not needed. For our pipeline, whisperx/faster-whisper is already installed in your venv, and model
+  weights are downloaded only when we actually transcribe. I’m going to add a proper venv-based preparation script now that uses soundfile/librosa
+  and creates model-ready 24 kHz mono WAVs; it will use ffmpeg automatically if it can see it, otherwise it will skip only compressed files like
+  MPEG.
+
+• Model interrupted to submit steer instructions.
+
+
+› C:\Users\User>where.exe ffprobe
+  C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffprobe.exe
+
+  C:\Users\User>where.exe ffmpeg
+  C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe
+
+  C:\Users\User>
+
+
+• Good, that is the exact Winget install path. I’ll use those full paths directly from this PowerShell session, so we don’t need to touch PATH. Next
+  I’ll verify them and process the MPEG into the prepared recordings too.
+• Ran & 'C:
+  │ \Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe'
+  │ -version
+  └ & : The term 'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\f
+    fmpeg-8.1.1-full_build\bin\ffmpeg.exe' is not recognized as the name of a cmdlet, function, script file, or operable
+    … +5 lines (ctrl + t to view transcript)
+        + FullyQualifiedErrorId : CommandNotFoundException
+
+
+• Ran & 'C:
+  │ \Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffprobe.exe'
+  │ -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio\recording\rk\introduction.mpeg
+  └ & : The term 'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\f
+    fmpeg-8.1.1-full_build\bin\ffprobe.exe' is not recognized as the name of a cmdlet, function, script file, or operable
+    … +5 lines (ctrl + t to view transcript)
+        + FullyQualifiedErrorId : CommandNotFoundException
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• That path still is not visible to this managed PowerShell session, likely because the Winget package directory is outside the readable sandbox
+
+• Ran & 'C:
+  │ \Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffprobe.exe'
+  │ -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 audio\recording\rk\introduction.mpeg
+  └ 40.609625
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• rk/introduction.mpeg is about 40.6 seconds. I’ll convert it into the normalized recordings folder as mono 48 kHz WAV, then update the manifest so
+  it is included with the rest.
+
+✔ You approved codex to run & 'C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsof... this time
+
+• Ran & 'C:
+  │ \Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffmpeg.exe'
+  │ -y -i audio\recording\rk\introduction.mpeg -vn -ac 1 -ar 48000 -sample_fmt s16 audio\my_voice_recordings\normalized\rk_introduction.wav
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The conversion worked, with one non-fatal MP3 header warning near the end; ffmpeg still wrote a 40.5 second mono WAV. I’ll add it to the dataset
+  summary/manifest now and verify all prepared WAVs.
+  │ w.getframerate(), w.getframerate(), w.getnchannels(), w.getsampwidth()*8); w.close()"
+  └ 40.536 48000 1 16
+
+• Ran Get-ChildItem audio\my_voice_recordings\normalized -File | Measure-Object
+  └
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• There are now 23 prepared audio files. I’m updating the manifest and summary to include rk/introduction as a 40.536 second English recording.
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’m using a direct summary update because this is generated metadata, not source code. After this I’ll re-check the manifest totals.
+
+• Ran @'
+  │ Recording preparation summary
+  │ Input: E:\something_new\audio\recording
+  │ … +19 lines
+  └ (no output)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ll verify the manifest count and totals from the file itself so we are not relying on hand math.
+
+• Running Get-Content audio\my_voice_recordings\summary.txt
+
+• Running python -c "import json,collections; rows=[json.loads(l) for l in open(r'audio\my_voice_recordings\manifest.jsonl',encoding='utf-8-sig') if
+  │ l.strip()]; print('rows',len(rows)); print('total_min',round(sum(r['duration'] for r in rows)/60,2));
+  │ totals=collections.defaultdict(float); [totals.__setitem__((r['speaker'],r['language']),
+  │ … +2 lines
+
+• Ran Get-Content audio\my_voice_recordings\manifest.jsonl -Tail 3
+  └ {"audio_path": "E:\\something_new\\audio\\my_voice_recordings\\normalized\\skt_intro.wav", "source_path": "E:\\something_new\\audio\\recording\
+    \skt\\intro.wav", "speaker": "skt", "language": "english", "sample_rate": 48000, "channels": 1, "sample_width_bits": 16, "duration": 48.7,
+    … +6 lines (ctrl + t to view transcript)
+    \introduction.mpeg","speaker":"rk","language":"english","sample_rate":48000,"channels":1,"sample_width_bits":16,"duration":40.536,"original_dura
+    tion":40.61,"gain":1.0,"rms_dbfs":null,"text":""}
+
+• Ran Get-Content audio\my_voice_recordings\summary.txt
+  └ Recording preparation summary
+    Input: E:\something_new\audio\recording
+    … +16 lines (ctrl + t to view transcript)
+    - Transcripts are intentionally blank; fill them after transcription/review.
+    - Sample rate is preserved at 48 kHz for these recordings.
+
+• Ran python -c "import json,collections; rows=[json.loads(l) for l in open(r'audio\my_voice_recordings\manifest.jsonl',encoding='utf-8-sig') if
+  │ l.strip()]; print('rows',len(rows)); print('total_min',round(sum(r['duration'] for r in rows)/60,2)); totals=collections.defaultdict(float);
+  │ [totals.__setitem__((r['speaker'],r['language']), totals[(r['speaker'],r['language'])]+r['duration']) for r in rows]; [print(f'{k[0]}/{k[1]}
+  │ … +1 lines
+  └ rows 23
+    total_min 57.2
+    skt/english 1.96 min
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• You don’t need to download ffprobe separately. It already came with your FFmpeg install:
+
+  C:\Users\User\AppData\Local\Microsoft\WinGet\Packages\Gyan.FFmpeg_Microsoft.Winget.Source_8wekyb3d8bbwe\ffmpeg-8.1.1-full_build\bin\ffprobe.exe
+
+  I converted:
+  to:
+
+  audio/my_voice_recordings/normalized/rk_introduction.wav
+
+  Final prepared dataset:
+
+  Files: 23
+  Total: 57.20 minutes
+
+  Breakdown:
+
+  lk/english:    27.36 min
+
+• Model interrupted to submit steer instructions.
+
+
+› rk is hindi
+
+
+• Got it. I’ll correct rk from English to Hindi in the manifest and summary so later transcription/training groups it properly.
+
+• Running (Get-Content audio\my_voice_recordings\manifest.jsonl) -replace '"speaker":"rk","language":"english"','"speaker":"rk","language":"hindi"'
+  │ | Set-Content audio\my_voice_recordings\manifest.jsonl -Encoding UTF8
+
+• Ran (Get-Content audio\my_voice_recordings\manifest.jsonl) -replace '"speaker":"rk","language":"english"','"speaker":"rk","language":"hindi"' |
+  │ Set-Content audio\my_voice_recordings\manifest.jsonl -Encoding UTF8
+  └ (no output)
+
+• Ran (Get-Content audio\my_voice_recordings\summary.txt) -replace '- rk/english: 0.68 min','- rk/hindi: 0.68 min' | Set-Content
+  │ audio\my_voice_recordings\summary.txt -Encoding UTF8
+  └ (no output)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ll verify the grouping from the manifest now.
+
+• Running Get-Content audio\my_voice_recordings\summary.txt
+
+• Ran Get-Content audio\my_voice_recordings\summary.txt
+  └ Recording preparation summary
+    Input: E:\something_new\audio\recording
+    … +16 lines (ctrl + t to view transcript)
+    - Transcripts are intentionally blank; fill them after transcription/review.
+    - Sample rate is preserved at 48 kHz for these recordings.
+
+• Ran python -c "import json,collections; rows=[json.loads(l) for l in open(r'audio\my_voice_recordings\manifest.jsonl',encoding='utf-8-sig') if
+  │ l.strip()]; totals=collections.defaultdict(float); [totals.__setitem__((r['speaker'],r['language']),
+  │ totals[(r['speaker'],r['language'])]+r['duration']) for r in rows]; print('rows',len(rows)); print('total_min',round(sum(r['duration'] for r
+  │ … +1 lines
+    … +5 lines (ctrl + t to view transcript)
+    rk/hindi 0.68 min
+    skt/english 1.96 min
+  Current totals:
+
+  lk/english:    27.36 min
+  lk/hindi:      11.66 min
+  lk/tamil:       7.10 min
+  lk/bhojpuri:    6.46 min
+  lk/mixed:       1.98 min
+  rk/hindi:       0.68 min
+  skt/english:    1.96 min
+
+  Total prepared audio: 57.2 minutes across 23 files.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› refer interest.txt what to do next?
+
+
+• I’ll use the graphify skill briefly because this repo has graphify-out/ and your question is about where the current voice work should go next.
+  Then I’ll give you a concrete next-step sequence, not theory.
+
+• Ran Get-Content C:\Users\User\.agents\skills\graphify\SKILL.md
+  └ ---
+    name: graphify
+    … +1026 lines (ctrl + t to view transcript)
+    - Never hide cohesion scores behind symbols - show the raw number.
+    - Never run HTML viz on a graph with more than 5,000 nodes without warning the user.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I have enough context from interest.txt plus the prepared recording summary. The decision point is clear: stop trying to train on the old call-
+  derived Ashwini clips for now, and move the new clean recordings through transcription, review, segmentation, then cloning tests.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Next step: build a clean TTS dataset from your new recordings.
+
+  Do this order:
+
+  1. Do not train yet
+     Your audio is prepared, but transcripts are blank. TTS/fine-tuning needs exact audio + text.
+
+  2. Transcribe the 57 minutes
+     Use whisperx from your existing venv, not the old huge whisper package. Start with the lk recordings first because that is the main voice:
+      - English: 27 min
+      - Hindi: 11 min
+      - Tamil: 7 min
+      - Bhojpuri: 6 min
+
+  3. Manually review transcripts
+     This matters more than the model. Wrong text will damage TTS. We need to correct names, mixed language, pronunciation words, and punctuation.
+     Long recordings must become small training clips:
+
+     audio_path + exact text + language + speaker
+
+  5. Create final dataset
+     Target:
+
+     audio/my_voice_recordings/dataset/wavs/*.wav
+     audio/my_voice_recordings/dataset/dataset.jsonl
+     audio/my_voice_recordings/dataset/metadata.csv
+
+  6. First test voice cloning, not fine-tuning
+     Use 30-60 seconds of best clean lk English as reference in XTTS/F5. If that sounds good, then try Hindi/Tamil/Bhojpuri.
+
+  7. Only then fine-tune
+     Fine-tuning before transcript review is a waste.
+
+  Important correction from interest.txt: the old Ashwini call dataset was failing because it had mixed speakers, noisy call audio, and bad
+  transcripts. Your new recordings solve the speaker/noise problem. Now the remaining hard problem is accurate transcript + clean segmentation.
+
+  Best immediate task for me: create and run a script that uses your installed whisperx to transcribe audio/my_voice_recordings/normalized,
+  producing draft transcript JSON files for review.
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› ok
+
+
+• I’ll create a WhisperX transcription script that uses your existing venv, keeps outputs separate by file, and avoids diarization since these are
+  single-speaker recordings. Then I’ll run a small import/help check first before launching full transcription.
+
+• Added audio\transcribe_my_recordings.py (+132 -0)
+      1 +"""
+      2 +Transcribe prepared voice recordings with WhisperX/faster-whisper.
+      3 +
+      4 +Input:
+      5 +  audio/my_voice_recordings/manifest.jsonl
+      6 +  audio/my_voice_recordings/normalized/*.wav
+      7 +
+      8 +Output:
+      9 +  audio/my_voice_recordings/transcripts/*.json
+     10 +  audio/my_voice_recordings/transcripts/*.txt
+     11 +  audio/my_voice_recordings/transcripts_manifest.jsonl
+     12 +
+     13 +Usage from repo root:
+     14 +  backend\\myenvironment\\Scripts\\python.exe audio\\transcribe_my_recordings.py --model small
+     15 +
+     16 +Notes:
+     17 +  - No diarization is used because these are intended to be single-speaker files.
+     18 +  - Use --limit 1 for a quick smoke test.
+     19 +"""
+     20 +
+     21 +from __future__ import annotations
+     22 +
+     23 +import argparse
+     24 +import json
+     25 +from pathlib import Path
+     26 +
+     27 +
+     28 +ROOT = Path(__file__).resolve().parent
+     29 +DATA_DIR = ROOT / "my_voice_recordings"
+     30 +MANIFEST = DATA_DIR / "manifest.jsonl"
+     31 +TRANSCRIPTS_DIR = DATA_DIR / "transcripts"
+     32 +OUT_MANIFEST = DATA_DIR / "transcripts_manifest.jsonl"
+     33 +
+     34 +LANGUAGE_HINTS = {
+     35 +    "english": "en",
+     36 +    "hindi": "hi",
+     37 +    "tamil": "ta",
+     38 +    "bhojpuri": "hi",
+     39 +}
+     40 +
+     41 +
+     42 +def load_manifest() -> list[dict]:
+     43 +    rows: list[dict] = []
+     44 +    with MANIFEST.open("r", encoding="utf-8-sig") as handle:
+     45 +        for line in handle:
+     46 +            if line.strip():
+     47 +                rows.append(json.loads(line))
+     48 +    return rows
+     49 +
+     50 +
+     51 +def language_hint(language: str) -> str | None:
+     52 +    return LANGUAGE_HINTS.get(language.lower())
+     53 +
+     54 +
+     55 +def clean_text(segments: list[dict]) -> str:
+     56 +    parts = [segment.get("text", "").strip() for segment in segments]
+     57 +    return " ".join(part for part in parts if part).strip()
+     58 +
+     59 +
+     60 +def main() -> None:
+     61 +    parser = argparse.ArgumentParser()
+     62 +    parser.add_argument("--model", default="small", help="faster-whisper model size: tiny/base/small/medium/large-v3")
+     63 +    parser.add_argument("--device", default="cpu")
+     64 +    parser.add_argument("--compute_type", default="int8")
+     65 +    parser.add_argument("--batch_size", type=int, default=8)
+     66 +    parser.add_argument("--limit", type=int, default=0)
+     67 +    parser.add_argument("--force", action="store_true")
+     68 +    args = parser.parse_args()
+     69 +
+     70 +    import whisperx
+     71 +
+     72 +    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
+     73 +    rows = load_manifest()
+     74 +    if args.limit:
+     75 +        rows = rows[: args.limit]
+     76 +
+     77 +    print(f"Loading WhisperX model: {args.model} ({args.device}, {args.compute_type})")
+     78 +    model = whisperx.load_model(args.model, args.device, compute_type=args.compute_type)
+     79 +
+     80 +    output_rows = []
+     81 +
+     82 +    for index, row in enumerate(rows, start=1):
+     83 +        audio_path = Path(row["audio_path"])
+     84 +        stem = audio_path.stem
+     85 +        json_path = TRANSCRIPTS_DIR / f"{stem}.json"
+     86 +        txt_path = TRANSCRIPTS_DIR / f"{stem}.txt"
+     87 +
+     88 +        if json_path.exists() and not args.force:
+     89 +            result = json.loads(json_path.read_text(encoding="utf-8"))
+     90 +            text = clean_text(result.get("segments", []))
+     91 +            print(f"[{index}/{len(rows)}] cached {audio_path.name}")
+     92 +        else:
+     93 +            lang = language_hint(row.get("language", ""))
+     94 +            print(f"[{index}/{len(rows)}] transcribing {audio_path.name} lang={lang or 'auto'}")
+     95 +            audio = whisperx.load_audio(str(audio_path))
+     96 +            result = model.transcribe(
+     97 +                audio,
+     98 +                batch_size=args.batch_size,
+     99 +                language=lang,
+    100 +            )
+    101 +            text = clean_text(result.get("segments", []))
+    102 +            payload = {
+    103 +                "audio_path": str(audio_path),
+    104 +                "source_path": row.get("source_path"),
+    105 +                "speaker": row.get("speaker"),
+    106 +                "language": row.get("language"),
+    107 +                "duration": row.get("duration"),
+    108 +                "model": args.model,
+    109 +                "segments": result.get("segments", []),
+    112 +            json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    113 +            txt_path.write_text(text + "\n", encoding="utf-8")
+    114 +
+    115 +        out_row = {
+    116 +            **row,
+    117 +            "transcript_json": str(json_path),
+    118 +            "transcript_txt": str(txt_path),
+    119 +            "draft_text": text,
+    120 +        }
+    121 +        output_rows.append(out_row)
+    122 +
+    123 +    with OUT_MANIFEST.open("w", encoding="utf-8") as handle:
+    124 +        for row in output_rows:
+    125 +            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    126 +
+
+• Running backend\myenvironment\Scripts\python.exe -m py_compile audio\transcribe_my_recordings.py
+
+• Ran backend\myenvironment\Scripts\python.exe -m py_compile audio\transcribe_my_recordings.py
+• Ran backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --model tiny --limit 1
+  └ Loading WhisperX model: tiny (cpu, int8)
+    E:\something_new\backend\myenvironment\Lib\site-packages\pyannote\audio\core\io.py:47: UserWarning:
+    … +123 lines (ctrl + t to view transcript)
+
+• The script compiles. The smoke test failed only because the sandbox blocked Hugging Face model download; the code path is otherwise reaching
+  WhisperX correctly. I’ll rerun the same one-file test with network approval so it can download the tiny model cache.
+
+✔ You approved codex to run backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --... this time
+
+• Ran backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --model tiny --limit 1
+  └ Loading WhisperX model: tiny (cpu, int8)
+    2026-06-26 19:53:23 - whisperx.asr - INFO - No language specified, language will be detected for each audio file (increases inference time)
+    … +35 lines (ctrl + t to view transcript)
+    Lightning automatically upgraded your loaded checkpoint from v1.5.4 to v2.6.5. To apply the upgrade to your files permanently, run `python -m
+    lightning.pytorch.utilities.upgrade_checkpoint E:\something_new\backend\myenvironment\Lib\site-packages\whisperx\assets\pytorch_model.bin`
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The one-file smoke test succeeded after network approval. It says “cached” because the first failed run had already created the first transcript
+  before failing on model-cache/network cleanup. I’ll inspect that transcript before deciding whether to run the full batch with small or adjust the
+  script.
+
+• Running Get-ChildItem audio\my_voice_recordings\transcripts -Force
+
+• Running Get-Content audio\my_voice_recordings\transcripts\lk_bhojpuri_gags.txt
+
+• Ran Get-Content audio\my_voice_recordings\transcripts_manifest.jsonl -TotalCount 3
+  └ {"audio_path": "E:\\something_new\\audio\\my_voice_recordings\\normalized\\lk_bhojpuri_gags.wav", "source_path": "E:\\something_new\\audio\
+    \recording\\lk\\bhojpuri\\gags.wav", "speaker": "lk", "language": "bhojpuri", "sample_rate": 48000, "channels": 1, "sample_width_bits": 16,
+    … +11 lines (ctrl + t to view transcript)
+    à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥"}
+
+• Ran Get-Content audio\my_voice_recordings\transcripts\lk_bhojpuri_gags.txt
+  └ à¤œà¥ˆà¤¸à¥‡ à¤²à¥‹à¤¨ à¤•à¥‡ à¤²à¤¿à¤ à¤®à¤¾à¤°à¤¤à¤¨à¥€ à¤¨à¤¾ à¤µà¥‹à¤ˆ à¤¤à¤°à¥‹ à¤•à¥‡ à¤¬à¤¾à¤‰à¤šà¤° à¤†à¤ˆà¤ª à¤”à¤° à¤¦à¥‡
+    … +8 lines (ctrl + t to view transcript)
+    à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥
+
+• Ran Get-Content audio\my_voice_recordings\transcripts_manifest.jsonl -TotalCount 3
+  └ {"audio_path": "E:\\something_new\\audio\\my_voice_recordings\\normalized\\lk_bhojpuri_gags.wav", "source_path": "E:\\something_new\\audio\
+    \recording\\lk\\bhojpuri\\gags.wav", "speaker": "lk", "language": "bhojpuri", "sample_rate": 48000, "channels": 1, "sample_width_bits": 16,
+    … +11 lines (ctrl + t to view transcript)
+    à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥à¤šà¥"}
+
+• Ran Get-ChildItem audio\my_voice_recordings\transcripts -Force
+  └
+• Edited audio\transcribe_my_recordings.py (+6 -0)
+    66      parser.add_argument("--limit", type=int, default=0)
+    67 +    parser.add_argument("--speaker", default="", help="Only transcribe one speaker id, e.g. lk")
+    68 +    parser.add_argument("--language_filter", default="", help="Only transcribe one manifest language, e.g. english")
+    69      parser.add_argument("--force", action="store_true")
+       ⋮
+    75      rows = load_manifest()
+    76 +    if args.speaker:
+
+• Ran backend\myenvironment\Scripts\python.exe -m py_compile audio\transcribe_my_recordings.py
+✔ You approved codex to run backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --... this time
+
+• Ran backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --model small --speaker lk --language_filter english --force
+    … +35 lines (ctrl + t to view transcript)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    RuntimeError: mkl_malloc: failed to allocate memory
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• small is too heavy for this machine right now: it failed at model load with mkl_malloc: failed to allocate memory. I’ll step down to base, which
+  is much better than tiny but more realistic for local CPU/RAM.
+
+✔ You approved codex to run backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --... this time
+
+• Ran backend\myenvironment\Scripts\python.exe audio\transcribe_my_recordings.py --model base --speaker lk --language_filter english --force
+  └ Loading WhisperX model: base (cpu, int8)
+    2026-06-26 19:56:26 - whisperx.asr - INFO - No language specified, language will be detected for each audio file (increases inference time)
+    … +25 lines (ctrl + t to view transcript)
+    Lightning automatically upgraded your loaded checkpoint from v1.5.4 to v2.6.5. To apply the upgrade to your files permanently, run `python -m
+    lightning.pytorch.utilities.upgrade_checkpoint E:\something_new\backend\myenvironment\Lib\site-packages\whisperx\assets\pytorch_model.bin`
+
+• Model interrupted to submit steer instructions.
+
+
+› or lets move to kaggle notebooks.
+
+
+• Kaggle is the right move for transcription and later training. Local CPU/RAM is already showing limits, so I’ll make a Kaggle-ready workflow:
+  upload the prepared recordings as a dataset, run WhisperX/faster-whisper there, export transcripts, then bring results back for review.
+
+• Running Get-Content audio\kaggle_diarize.ipynb -TotalCount 60
+
+• Running Get-ChildItem audio\my_voice_recordings -Force
+
+• Ran Get-Content audio\kaggle_diarize.ipynb -TotalCount 60
+  └ {
+     "cells": [
+    … +56 lines (ctrl + t to view transcript)
+      {
+       "cell_type": "code",
+
+• Ran Get-ChildItem audio\my_voice_recordings -Force
+  └
+
+    … +10 lines (ctrl + t to view transcript)
+
+
+
+• Ran Get-ChildItem audio\my_voice_recordings\normalized -File | Measure-Object -Property Length -Sum
+  └
+
+    … +7 lines (ctrl + t to view transcript)
+
+
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• I’ll add a new Kaggle notebook specifically for your clean recordings, not diarization. It will transcribe the normalized files, segment them into
+  training clips, and zip the output dataset for download.
+
+• Added audio\kaggle_transcribe_my_voice.ipynb (+306 -0)
+      1 +{
+      2 + "cells": [
+      3 +  {
+      4 +   "cell_type": "markdown",
+      5 +   "metadata": {},
+      6 +   "source": [
+      7 +    "# My Voice Recording Transcription + TTS Dataset Builder\n",
+      8 +    "\n",
+      9 +    "Use this notebook on Kaggle for the clean recordings in `audio/my_voice_recordings`.\n",
+     10 +    "\n",
+     11 +    "## Before running\n",
+     12 +    "\n",
+     13 +    "1. Upload `my_voice_recordings_upload.zip` as a Kaggle Dataset, or upload the folder containing `manifest.jsonl` and `normalized/`.\n"
+         ,
+     14 +    "2. Add that dataset to this notebook.\n",
+     15 +    "3. Enable Internet.\n",
+     16 +    "4. Use GPU T4 if available.\n",
+     17 +    "5. Run cells in order.\n",
+     18 +    "\n",
+     19 +    "This notebook does **not** use diarization. These are single-speaker recordings."
+     20 +   ]
+     21 +  },
+     22 +  {
+     23 +   "cell_type": "code",
+     24 +   "execution_count": null,
+     25 +   "metadata": {},
+     26 +   "outputs": [],
+     27 +   "source": [
+     28 +    "# CELL 1 - Install dependencies\n",
+     29 +    "!pip install -q faster-whisper soundfile pandas tqdm"
+     30 +   ]
+     31 +  },
+     32 +  {
+     33 +   "cell_type": "code",
+     34 +   "execution_count": null,
+     35 +   "metadata": {},
+     36 +   "outputs": [],
+     37 +   "source": [
+     38 +    "# CELL 2 - Locate uploaded dataset\n",
+     39 +    "import json, os, shutil, subprocess, zipfile\n",
+     40 +    "from pathlib import Path\n",
+     41 +    "import pandas as pd\n",
+     42 +    "from tqdm.auto import tqdm\n",
+     43 +    "\n",
+     44 +    "INPUT_ROOT = Path('/kaggle/input')\n",
+     45 +    "WORK_ROOT = Path('/kaggle/working/my_voice_work')\n",
+     46 +    "WORK_ROOT.mkdir(parents=True, exist_ok=True)\n",
+     47 +    "\n",
+     48 +    "def find_manifest():\n",
+     49 +    "    manifests = sorted(INPUT_ROOT.rglob('manifest.jsonl'))\n",
+     50 +    "    if manifests:\n",
+     51 +    "        return manifests[0]\n",
+     52 +    "\n",
+     53 +    "    zips = sorted(INPUT_ROOT.rglob('*.zip'))\n",
+     54 +    "    for z in zips:\n",
+     55 +    "        extract_dir = WORK_ROOT / 'uploaded_zip'\n",
+     56 +    "        extract_dir.mkdir(parents=True, exist_ok=True)\n",
+     57 +    "        with zipfile.ZipFile(z, 'r') as handle:\n",
+     58 +    "            handle.extractall(extract_dir)\n",
+     59 +    "        manifests = sorted(extract_dir.rglob('manifest.jsonl'))\n",
+     60 +    "        if manifests:\n",
+     61 +    "            return manifests[0]\n",
+     62 +    "    raise FileNotFoundError('Could not find manifest.jsonl in /kaggle/input. Upload my_voice_recordings_upload.zip or the folder.')\n"
+         ,
+     63 +    "\n",
+     64 +    "MANIFEST = find_manifest()\n",
+     65 +    "DATA_ROOT = MANIFEST.parent\n",
+     66 +    "print('Manifest:', MANIFEST)\n",
+     67 +    "print('Data root:', DATA_ROOT)\n",
+     68 +    "\n",
+     69 +    "rows = []\n",
+     70 +    "with open(MANIFEST, 'r', encoding='utf-8-sig') as f:\n",
+     71 +    "    for line in f:\n",
+     72 +    "        if line.strip():\n",
+     73 +    "            rows.append(json.loads(line))\n",
+     74 +    "\n",
+     75 +    "print('Rows:', len(rows))\n",
+     76 +    "pd.DataFrame(rows)[['speaker', 'language', 'duration', 'audio_path']].head()"
+     77 +   ]
+     78 +  },
+     79 +  {
+     80 +   "cell_type": "code",
+     81 +   "execution_count": null,
+     82 +   "metadata": {},
+     83 +   "outputs": [],
+     84 +   "source": [
+     85 +    "# CELL 3 - Fix audio paths for Kaggle filesystem\n",
+     86 +    "def resolve_audio_path(row):\n",
+     87 +    "    original = Path(row['audio_path'])\n",
+     88 +    "    name = original.name\n",
+     89 +    "    candidates = list(DATA_ROOT.rglob(name))\n",
+     90 +    "    if candidates:\n",
+     91 +    "        return candidates[0]\n",
+     92 +    "    candidates = list(INPUT_ROOT.rglob(name))\n",
+     93 +    "    if candidates:\n",
+     94 +    "        return candidates[0]\n",
+     95 +    "    raise FileNotFoundError(f'Could not find audio file for {name}')\n",
+     96 +    "\n",
+     97 +    "for row in rows:\n",
+     98 +    "    row['kaggle_audio_path'] = str(resolve_audio_path(row))\n",
+     99 +    "\n",
+    100 +    "df = pd.DataFrame(rows)\n",
+    101 +    "display(df.groupby(['speaker', 'language'])['duration'].agg(['count', 'sum']))\n",
+    102 +    "print('Total minutes:', round(df['duration'].sum() / 60, 2))"
+    103 +   ]
+    104 +  },
+    105 +  {
+    106 +   "cell_type": "code",
+    107 +   "execution_count": null,
+    108 +   "metadata": {},
+    109 +   "outputs": [],
+    110 +   "source": [
+    111 +    "# CELL 4 - Load faster-whisper model\n",
+    112 +    "from faster_whisper import WhisperModel\n",
+    113 +    "\n",
+    114 +    "# Recommended:\n",
+    115 +    "# - base: fastest, lower quality\n",
+    116 +    "# - medium: good balance on Kaggle T4\n",
+    117 +    "# - large-v3: best quality, slower/heavier\n",
+    118 +    "MODEL_SIZE = 'medium'\n",
+    119 +    "DEVICE = 'cuda'\n",
+    120 +    "COMPUTE_TYPE = 'float16'\n",
+    121 +    "\n",
+    122 +    "model = WhisperModel(MODEL_SIZE, device=DEVICE, compute_type=COMPUTE_TYPE)\n",
+    123 +    "print('Loaded', MODEL_SIZE)"
+    124 +   ]
+    125 +  },
+    126 +  {
+    127 +   "cell_type": "code",
+    128 +   "execution_count": null,
+    129 +   "metadata": {},
+    130 +   "outputs": [],
+    131 +   "source": [
+    132 +    "# CELL 5 - Transcribe files\n",
+    133 +    "TRANSCRIPTS_DIR = Path('/kaggle/working/my_voice_transcripts')\n",
+    134 +    "TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)\n",
+    135 +    "\n",
+    136 +    "LANG_HINTS = {\n",
+    137 +    "    'english': 'en',\n",
+    138 +    "    'hindi': 'hi',\n",
+    139 +    "    'tamil': 'ta',\n",
+    140 +    "    # Bhojpuri is not a first-class Whisper language. Hindi hint often works better than auto.\n",
+    141 +    "    'bhojpuri': 'hi',\n",
+    142 +    "    'mixed': None,\n",
+    143 +    "}\n",
+    144 +    "\n",
+    145 +    "transcript_rows = []\n",
+    146 +    "\n",
+    147 +    "for row in tqdm(rows):\n",
+    148 +    "    audio_path = Path(row['kaggle_audio_path'])\n",
+    149 +    "    stem = audio_path.stem\n",
+    150 +    "    lang = LANG_HINTS.get(row.get('language'), None)\n",
+    151 +    "    json_path = TRANSCRIPTS_DIR / f'{stem}.json'\n",
+    152 +    "    txt_path = TRANSCRIPTS_DIR / f'{stem}.txt'\n",
+    153 +    "\n",
+    154 +    "    if json_path.exists():\n",
+    155 +    "        payload = json.loads(json_path.read_text(encoding='utf-8'))\n",
+    156 +    "    else:\n",
+    157 +    "        segments, info = model.transcribe(\n",
+    158 +    "            str(audio_path),\n",
+    159 +    "            language=lang,\n",
+    160 +    "            beam_size=5,\n",
+    161 +    "            vad_filter=True,\n",
+    162 +    "            vad_parameters=dict(min_silence_duration_ms=450),\n",
+    163 +    "        )\n",
+    164 +    "        segs = []\n",
+    165 +    "        for s in segments:\n",
+    166 +    "            segs.append({\n",
+    167 +    "                'start': round(float(s.start), 3),\n",
+    168 +    "                'end': round(float(s.end), 3),\n",
+    169 +    "                'text': s.text.strip(),\n",
+    170 +    "            })\n",
+    171 +    "        text = ' '.join(s['text'] for s in segs).strip()\n",
+    172 +    "        payload = {\n",
+    173 +    "            **row,\n",
+    174 +    "            'detected_language': getattr(info, 'language', None),\n",
+    175 +    "            'language_probability': float(getattr(info, 'language_probability', 0.0) or 0.0),\n",
+    176 +    "            'model': MODEL_SIZE,\n",
+    177 +    "            'segments': segs,\n",
+    178 +    "            'text': text,\n",
+    179 +    "        }\n",
+    180 +    "        json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding='utf-8')\n",
+    181 +    "        txt_path.write_text(text + '\\n', encoding='utf-8')\n",
+    182 +    "\n",
+    183 +    "    transcript_rows.append({**row, 'transcript_json': str(json_path), 'transcript_txt': str(txt_path), 'draft_text': payload.get('text
+         ', '')})\n",
+    184 +    "\n",
+    185 +    "transcript_manifest = Path('/kaggle/working/transcripts_manifest.jsonl')\n",
+    186 +    "with open(transcript_manifest, 'w', encoding='utf-8') as f:\n",
+    187 +    "    for row in transcript_rows:\n",
+    188 +    "        f.write(json.dumps(row, ensure_ascii=False) + '\\n')\n",
+    189 +    "\n",
+    190 +    "print('Wrote', transcript_manifest)"
+    191 +   ]
+    192 +  },
+    193 +  {
+    194 +   "cell_type": "code",
+    195 +   "execution_count": null,
+    196 +   "metadata": {},
+    197 +   "outputs": [],
+    198 +   "source": [
+    199 +    "# CELL 6 - Build segmented draft TTS dataset\n",
+    200 +    "DATASET_DIR = Path('/kaggle/working/my_voice_dataset')\n",
+    201 +    "WAVS_DIR = DATASET_DIR / 'wavs'\n",
+    202 +    "WAVS_DIR.mkdir(parents=True, exist_ok=True)\n",
+    203 +    "\n",
+    204 +    "MIN_SEC = 2.0\n",
+    205 +    "MAX_SEC = 14.0\n",
+    206 +    "MIN_CHARS = 8\n",
+    207 +    "PAD_SEC = 0.08\n",
+    208 +    "\n",
+    209 +    "def ffmpeg_slice(src, dst, start, end):\n",
+    210 +    "    start = max(0.0, float(start) - PAD_SEC)\n",
+    211 +    "    duration = max(0.1, float(end) - start + PAD_SEC)\n",
+    212 +    "    cmd = [\n",
+    213 +    "        'ffmpeg', '-hide_banner', '-loglevel', 'error', '-y',\n",
+    214 +    "        '-ss', f'{start:.3f}', '-t', f'{duration:.3f}',\n",
+    215 +    "        '-i', str(src),\n",
+    216 +    "        '-ac', '1', '-ar', '24000', '-sample_fmt', 's16',\n",
+    217 +    "        str(dst),\n",
+    218 +    "    ]\n",
+    219 +    "    subprocess.run(cmd, check=True)\n",
+    220 +    "\n",
+    221 +    "dataset_rows = []\n",
+    222 +    "counter = 0\n",
+    223 +    "\n",
+    224 +    "for row in tqdm(transcript_rows):\n",
+    225 +    "    payload = json.loads(Path(row['transcript_json']).read_text(encoding='utf-8'))\n",
+    226 +    "    src = Path(row['kaggle_audio_path'])\n",
+    227 +    "    for seg in payload.get('segments', []):\n",
+    228 +    "        text = seg.get('text', '').strip()\n",
+    229 +    "        dur = float(seg['end']) - float(seg['start'])\n",
+    230 +    "        if dur < MIN_SEC or dur > MAX_SEC:\n",
+    231 +    "            continue\n",
+    232 +    "        if len(text) < MIN_CHARS:\n",
+    233 +    "            continue\n",
+    234 +    "        out_name = f\"{row['speaker']}_{row['language']}_{counter:05d}.wav\"\n",
+    235 +    "        out_path = WAVS_DIR / out_name\n",
+    236 +    "        ffmpeg_slice(src, out_path, seg['start'], seg['end'])\n",
+    237 +    "        dataset_rows.append({\n",
+    238 +    "            'audio_path': str(out_path),\n",
+    239 +    "            'text': text,\n",
+    240 +    "            'speaker': row['speaker'],\n",
+    241 +    "            'language': row['language'],\n",
+    242 +    "            'source_file': src.name,\n",
+    243 +    "            'start': seg['start'],\n",
+    244 +    "            'end': seg['end'],\n",
+    245 +    "            'duration': round(dur, 3),\n",
+    246 +    "            'needs_review': True,\n",
+    247 +    "        })\n",
+    248 +    "        counter += 1\n",
+    249 +    "\n",
+    250 +    "dataset_jsonl = DATASET_DIR / 'dataset.draft.jsonl'\n",
+    251 +    "metadata_csv = DATASET_DIR / 'metadata.draft.csv'\n",
+    252 +    "\n",
+    253 +    "with open(dataset_jsonl, 'w', encoding='utf-8') as f:\n",
+    254 +    "    for row in dataset_rows:\n",
+    255 +    "        f.write(json.dumps(row, ensure_ascii=False) + '\\n')\n",
+    256 +    "\n",
+    257 +    "pd.DataFrame(dataset_rows).to_csv(metadata_csv, index=False)\n",
+    258 +    "\n",
+    259 +    "print('Segments:', len(dataset_rows))\n",
+    260 +    "print('Total minutes:', round(sum(r['duration'] for r in dataset_rows) / 60, 2))\n",
+    261 +    "print('Dataset:', DATASET_DIR)"
+    262 +   ]
+    263 +  },
+    264 +  {
+    265 +   "cell_type": "code",
+    266 +   "execution_count": null,
+    267 +   "metadata": {},
+    268 +   "outputs": [],
+    269 +   "source": [
+    270 +    "# CELL 7 - Preview summary\n",
+    271 +    "draft = pd.DataFrame(dataset_rows)\n",
+    272 +    "if len(draft):\n",
+    273 +    "    display(draft.groupby(['speaker', 'language'])['duration'].agg(['count', 'sum']))\n",
+    274 +    "    display(draft.sample(min(10, len(draft)), random_state=1)[['speaker', 'language', 'duration', 'text']])\n",
+    275 +    "else:\n",
+    276 +    "    print('No segments produced. Check transcription output and filters.')"
+    277 +   ]
+    278 +  },
+    279 +  {
+    280 +   "cell_type": "code",
+    281 +   "execution_count": null,
+    282 +   "metadata": {},
+    283 +   "outputs": [],
+    287 +    "!cd /kaggle/working && zip -qr my_voice_dataset_draft.zip my_voice_dataset\n",
+    288 +    "print('/kaggle/working/my_voice_transcripts.zip')\n",
+    289 +    "print('/kaggle/working/my_voice_dataset_draft.zip')"
+    290 +   ]
+    291 +  }
+    294 +  "kernelspec": {
+    295 +   "display_name": "Python 3",
+    297 +   "name": "python3"
+    298 +  },
+    299 +  "language_info": {
+    300 +   "name": "python",
+    301 +   "pygments_lexer": "ipython3"
+    302 +  }
+    303 + },
+    304 + "nbformat": 4,
+    305 + "nbformat_minor": 5
+    306 +}
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The Kaggle notebook is in place. I’m going to create the upload zip containing the prepared manifest.jsonl and normalized/ audio files, then
+  verify the archive.
+
+• Ran Compress-Archive -Path audio\my_voice_recordings\manifest.jsonl,audio\my_voice_recordings\normalized -DestinationPath
+  │ audio\my_voice_recordings_upload.zip -Force
+  └ (no output)
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• The upload zip is created. I’ll inspect its size and make sure the notebook JSON is valid.
+
+• Running Get-ChildItem audio\my_voice_recordings_upload.zip,audio\kaggle_transcribe_my_voice.ipynb | Select-Object FullName,Length,LastWriteTime
+
+• Running python -c "import json; json.load(open(r'audio\kaggle_transcribe_my_voice.ipynb',encoding='utf-8')); print('notebook json ok')"
+
+• Ran python -c "import json; json.load(open(r'audio\kaggle_transcribe_my_voice.ipynb',encoding='utf-8')); print('notebook json ok')"
+  └ notebook json ok
+
+• Ran Get-ChildItem audio\my_voice_recordings_upload.zip,audio\kaggle_transcribe_my_voice.ipynb | Select-Object FullName,Length,LastWriteTime
+  └
+    FullName                                                   Length LastWriteTime
+    … +3 lines (ctrl + t to view transcript)
+
+
+
+• Ran python -c "import zipfile; z=zipfile.ZipFile(r'audio\my_voice_recordings_upload.zip'); names=z.namelist(); print('files',len(names));
+  │ print(names[:5]); print(names[-5:])"
+  └ files 24
+    ['normalized/lk_bhojpuri_gags.wav', 'normalized/lk_bhojpuri_intro.wav', 'normalized/lk_expressive.wav', 'normalized/lk_hindi_explain.wav',
+    'normalized/lk_hindi_expressive.wav']
+    ['normalized/rk_introduction.wav', 'normalized/skt_check.wav', 'normalized/skt_intro.wav', 'normalized/skt_purchase_question.wav',
+    'manifest.jsonl']
+
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+• Yes, move to Kaggle.
+
+  I created:
+
+  - Kaggle notebook: audio/kaggle_transcribe_my_voice.ipynb
+  - Upload archive: audio/my_voice_recordings_upload.zip
+
+  The zip is about 199 MB and contains:
+
+  manifest.jsonl
+  normalized/*.wav
+
+  What to do on Kaggle:
+
+  1. Create a new Kaggle Notebook.
+  2. Upload audio/my_voice_recordings_upload.zip as a Kaggle Dataset.
+  3. Add that dataset to the notebook.
+  4. Upload/open audio/kaggle_transcribe_my_voice.ipynb.
+  5. Enable Internet.
+  6. Use GPU T4.
+  7. Run all cells.
+
+  The notebook will produce:
+
+  /kaggle/working/my_voice_transcripts.zip
+  /kaggle/working/my_voice_dataset_draft.zip
+
+  Download both after it finishes.
+
+  Important: the dataset it creates is still marked draft. We must review/correct transcripts before fine-tuning. But Kaggle is the right place now
+  because local small failed on memory, and tiny/base quality is not enough for serious multilingual transcripts.
+
+─ Worked for 4m 06s ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+
+› Implement {feature}
+
+  gpt-5.5 medium · E:\something_new
+
+explain what to do next. I've checked the transcript, corrected most of the things. I've tried to cover as much as possible. There is too much
+  content, but I've tried to cover most.
+
+
+• Next, turn your corrected transcript file into a clean training dataset.
+
+  What To Do Now
+
+  1. Put the corrected file here:
+
+  E:\something_new\audio\lk_transcripts_fixed.csv
+
+  or, if you corrected JSONL:
+
+  E:\something_new\audio\lk_transcripts_fixed.jsonl
+
+  2. We should treat that corrected file as the source of truth.
+  3. Rebuild a clean dataset folder:
+
+  audio/lk_voice_dataset_fixed/
+    wavs/
+    metadata.csv
+    metadata.jsonl
+    README.txt
+
+  4. For training, use only rows where:
+
+  speaker = lk
+  text is not empty
+  audio exists
+  audio is not badly wrong
+
+  5. Decide on mixed.wav.
+
+  My recommendation:
+
+  Exclude mixed.wav for first training.
+
+  Train first on clean English/Hindi/Tamil/Bhojpuri files. Add mixed later only if the transcript is carefully corrected.
+
+  Training Data Rule
+  For TTS / voice cloning, the transcript does not need to be literary perfect, but it must match the spoken audio closely.
+
+  Bad:
+
+  Audio says Hindi, transcript says English translation.
+
+  Good:
+
+  Audio says Hindi, transcript is Hindi or accurate romanized Hindi matching the actual words.
+
+  Best:
+
+  Transcript is in the same language/script as spoken, with clear punctuation.
+
+  Quality Check Before Training
+
+  Review these especially:
+
+  hindi/*.wav
+  tamil/*.wav
+  bhojpuri/*.wav
+  mixed.wav
+
+  English is usually easier. Indic transcripts are where ASR makes the worst mistakes.
+
+  Next Technical Step
+
+  Once the corrected CSV is local, we run a script to:
+
+  - match each row to local LK audio
+  - copy audio into a fixed dataset folder
+  - write clean metadata
+  - optionally exclude mixed.wav
+  - create lk_voice_dataset_fixed.zip
+
+  Then you can use that for XTTS/F5-style experiments.
+
+  The key point: don’t go back to Kaggle now unless needed. If the corrected transcript is downloaded, we can finish the dataset locally.
+
+
+› Find and fix a bug in @filename
+
+  gpt-5.5 medium · E:\something_new
+
+Free Voice Cloning Options (No Payment)
+1. GPT-SoVITS ✅ BEST BET FOR YOU
+Type: Text-to-Speech voice cloning (type text → get voice)
+Why it wins: Has a one-click Windows integrated package with a WebUI. No Python commands needed. Just download, extract, run.
+┌────────────────────┬──────────────────────────────────────────┐
+│ Feature            │ Detail                                   │
+├────────────────────┼──────────────────────────────────────────┤
+│ Reference needed   │ Just 3-10 seconds of clean audio         │
+│ Works on CPU?      │ Yes (slow but works)                     │
+│ Works on free GPU? │ Yes, Colab/Kaggle                        │
+│ Languages          │ English, Hindi, Chinese, Japanese + more │
+│ Ease of use        │ Highest — WebUI with buttons and sliders │
+└────────────────────┴──────────────────────────────────────────┘
+Get it: github.com/RVC-Boss/GPT-SoVITS → Download the "Integrated Package" (Windows .7z file)
+2. RVC (Retrieval-based Voice Conversion)
+Type: Voice conversion (record yourself → convert to target voice)
+Why: Also has a one-click Windows package. But different workflow — you record yourself saying the demo text, then the tool converts your voice to sound like Ashwini's.
+┌──────────────────┬────────────────────────────────────────────────────┐
+│ Feature          │ Detail                                             │
+├──────────────────┼────────────────────────────────────────────────────┤
+│ Reference needed │ 1-2 minutes clean audio                            │
+│ Works on CPU?    │ Yes, lightweight                                   │
+│ Use case         │ If you can record yourself speaking the demo lines │
+└──────────────────┴────────────────────────────────────────────────────┘
+Get it: github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI
+3. OpenVoice (MyShell)
+Type: TTS voice cloning — lightweight, zero-shot
+Why: MIT licensed, runs fast. But requires Python setup, no one-click installer.
+4. Hugging Face Spaces (Browser-only, no install)
+There might be free Spaces running GPT-SoVITS or F5-TTS inference in the browser. Let me check:
+Good news — there's an even simpler option that works entirely in your browser with zero setup:
+Hugging Face Spaces — Browser-Based, Free, No Install
+These run on free GPUs hosted by Hugging Face. You just open a URL in your browser, upload your WAV, type text, and download the result.
+🏆 Best Option: F5-TTS on Hugging Face
+ mrfakename/E2-F5-TTS  — This is a Hugging Face Space running F5-TTS in the browser.
+What you do:
+1. Open this URL: https://huggingface.co/spaces/mrfakename/E2-F5-TTS
+2. Upload your reference WAV (e.g.,  lk_expressive.wav )
+3. Type what's said in that WAV (reference text)
+4. Type what you want it to say (generation text)
+5. Click generate → download the WAV
+No Colab, no code, no API keys, no payment. Just a web page.
+Second Option: OpenVoice Space
+ myshell-ai/OpenVoice  — Official Space by MyShell, also zero-shot, no install.
+────────────────────────────────────────────────────────────────────────────────
+Quick Comparison
+┌───────────────────────────────┬────────────────────────────────────────────────┬──────────────────────┐
+│ Option                        │ What You Do                                    │ Time to First Output │
+├───────────────────────────────┼────────────────────────────────────────────────┼──────────────────────┤
+│ Hugging Face F5-TTS Space     │ Open URL → Upload WAV → Type → Download        │ 2 minutes            │
+│ Colab F5-TTS (I already made) │ Upload to Drive → Open notebook → Run          │ 10 minutes           │
+│ GPT-SoVITS WebUI (Windows)    │ Download 7z → Extract → Run bat file           │ 15 minutes           │
+│ RVC WebUI (Windows)           │ Download → Extract → Record yourself → Convert │ 15 minutes           │
+│ OpenVoice                     │ Python setup                                   │ 20+ minutes          │
+└───────────────────────────────┴────────────────────────────────────────────────┴──────────────────────┘
+For tomorrow morning's demo, the Hugging Face Space is your fastest path. Want me to verify the Space is actually working right now?
+Suggested followups:

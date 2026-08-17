@@ -28,19 +28,27 @@ class TwilioCommunicator(TelephonyCommunicator):
                         "media": {"payload": b64_audio}
                     })
             except Exception as e:
-                # Silently catch closed socket errors
-                if "close message has been sent" not in str(e):
+                # Silently catch closed socket errors as normal hangups
+                if "closed" in str(e).lower() or "close message has been sent" in str(e).lower():
+                    logger.info("ℹ️ [Twilio] Media send failed (Phone hung up)")
+                else:
                     logger.error(f"❌ [Twilio] Error sending media: {e}")
         else:
             logger.warning("⚠️ [Twilio] Attempted to send media but stream_sid is missing!")
 
     async def clear_audio_buffer(self):
         if self.stream_sid:
-            logger.info(f"🚫 [Twilio] Clearing audio buffer for StreamSid: {self.stream_sid}")
             try:
-                await self.websocket.send_json({
-                    "event": "clear",
-                    "streamSid": self.stream_sid
-                })
+                # Robust check for open websocket
+                if self.websocket.client_state.name == "CONNECTED":
+                    logger.info(f"🚫 [Twilio] Clearing audio buffer for StreamSid: {self.stream_sid}")
+                    await self.websocket.send_json({
+                        "event": "clear",
+                        "streamSid": self.stream_sid
+                    })
             except Exception as e:
-                logger.error(f"❌ [Twilio] Error clearing buffer: {e}")
+                # Silently catch closed socket/ASGI errors as normal hangups
+                if any(x in str(e).lower() for x in ("closed", "close message", "websocket.close", "already completed")):
+                    logger.info("ℹ️ [Twilio] Clear buffer failed (Websocket already closed)")
+                else:
+                    logger.error(f"❌ [Twilio] Error clearing buffer: {e}")

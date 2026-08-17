@@ -1,0 +1,145 @@
+{
+  "amarnath - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 8.589374999999999,
+      "SPEAKER_01": 0.3712500000000022
+    }
+  },
+  "anup menon - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 13.500000000000004,
+      "SPEAKER_00": 3.9656249999999993
+    }
+  },
+  "arunkumar - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_01": 4.471874999999998,
+      "SPEAKER_00": 9.045000000000002
+    }
+  },
+  "badri - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 59.68687499999995,
+      "SPEAKER_01": 23.22000000000002
+    }
+  },
+  "bindu chakravartys husband - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 28.012500000000003,
+      "SPEAKER_02": 3.2400000000000007,
+      "SPEAKER_01": 4.404374999999998
+    }
+  },
+  "final_price-krishnaveni-aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 13.466250000000002,
+      "SPEAKER_01": 9.365625000000001
+    }
+  },
+  "franklin - kalaivani - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_00": 14.276250000000006,
+      "SPEAKER_01": 36.838125000000005
+    }
+  },
+  "hariprasad - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 106.95375000000003,
+      "SPEAKER_01": 8.06624999999999
+    }
+  },
+  "krishnaveeni - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 35.538750000000014,
+      "SPEAKER_01": 12.082500000000007,
+      "SPEAKER_02": 11.93062500000001
+    }
+  },
+  "krishnaveni - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 29.9025,
+      "SPEAKER_01": 2.8350000000000044
+    }
+  },
+  "magesh - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 149.056875,
+      "SPEAKER_01": 111.45937500000014
+    }
+  },
+  "mohammad - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_00": 201.538125,
+      "SPEAKER_01": 104.91187499999995
+    }
+  },
+  "no - amarnath - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_01": 7.576875000000003,
+      "SPEAKER_00": 27.81000000000001
+    }
+  },
+  "ramesh - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 38.205,
+      "SPEAKER_00": 8.268749999999997
+    }
+  },
+  "sadasivam - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 44.364375,
+      "SPEAKER_00": 18.93375
+    }
+  },
+  "safik - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 14.056875000000003,
+      "SPEAKER_00": 5.416874999999996
+    }
+  },
+  "sankarsir - aswini": {
+    "aswini_label": "SPEAKER_00",
+    "speaker_durations": {
+      "SPEAKER_01": 12.403125000000006,
+      "SPEAKER_00": 55.771874999999994
+    }
+  },
+  "sreetharan - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 67.55062500000001,
+      "SPEAKER_00": 50.69250000000001
+    }
+  },
+  "udaykumar - aswini": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 50.70937500000001,
+      "SPEAKER_00": 9.365624999999998,
+      "SPEAKER_02": 8.049375000000005
+    }
+  },
+  "voicemail": {
+    "aswini_label": "SPEAKER_01",
+    "speaker_durations": {
+      "SPEAKER_01": 13.415625000000002,
+      "SPEAKER_00": 12.335625
+    }
+  }
+}

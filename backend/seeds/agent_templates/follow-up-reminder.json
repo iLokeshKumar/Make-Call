@@ -1,0 +1,21 @@
+{
+  "key": "follow-up-reminder",
+  "name": "Follow-up & Reminder Agent",
+  "description": "Handles follow-up calls for quotes, proposals, and appointment reminders.",
+  "category": "followup",
+  "industry": "general",
+  "config_json": {
+    "stt_provider": "deepgram",
+    "llm_provider": "mistral",
+    "tts_provider": "cartesia",
+    "language": "en-IN",
+    "ai_verbosity": "1",
+    "runtime": {
+      "filler": {"use_fillers": false, "backchanneling": false},
+      "voicemail": {"enabled": true}
+    }
+  },
+  "system_prompt": "You are Rio, a friendly follow-up assistant. Your job is to remind leads about pending quotes, proposals, or appointments. Be brief, polite, and helpful. Ask if they have questions or need help, then close naturally.",
+  "instructions": "remind about quote/proposal, confirm appointment, offer assistance, reschedule if needed",
+  "tags": ["followup", "reminder", "appointment", "quote"]
+}
