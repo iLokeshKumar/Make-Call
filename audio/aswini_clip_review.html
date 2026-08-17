@@ -1,0 +1,308 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Aswini Clip Review</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #f6f7f8;
+      --panel: #ffffff;
+      --text: #182026;
+      --muted: #68747f;
+      --line: #d8dee4;
+      --keep: #0f7b45;
+      --reject: #b42318;
+      --warn: #8a5a00;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 16px;
+      align-items: center;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.94);
+      backdrop-filter: blur(8px);
+    }
+    h1 {
+      margin: 0;
+      font-size: 18px;
+      font-weight: 650;
+      letter-spacing: 0;
+    }
+    .summary {
+      color: var(--muted);
+      margin-top: 2px;
+      font-size: 13px;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    button, select {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel);
+      color: var(--text);
+      padding: 0 10px;
+      font: inherit;
+    }
+    button {
+      cursor: pointer;
+    }
+    button.primary {
+      border-color: #1f6feb;
+      background: #1f6feb;
+      color: white;
+    }
+    main {
+      display: grid;
+      gap: 10px;
+      max-width: 1180px;
+      margin: 0 auto;
+      padding: 14px;
+    }
+    .clip {
+      display: grid;
+      grid-template-columns: minmax(260px, 360px) 1fr auto;
+      gap: 12px;
+      align-items: center;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+    }
+    .clip[data-status="keep"] {
+      border-left: 5px solid var(--keep);
+    }
+    .clip[data-status="reject"] {
+      border-left: 5px solid var(--reject);
+      opacity: 0.68;
+    }
+    .meta {
+      display: flex;
+      flex-direction: column;
+      gap: 7px;
+      min-width: 0;
+    }
+    audio {
+      width: 100%;
+      height: 34px;
+    }
+    .source {
+      color: var(--muted);
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-size: 13px;
+    }
+    .badges {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .badge {
+      border-radius: 999px;
+      background: #eef2f6;
+      color: #43515c;
+      padding: 2px 8px;
+      font-size: 12px;
+    }
+    .badge.warn {
+      background: #fff4d6;
+      color: var(--warn);
+    }
+    textarea {
+      width: 100%;
+      min-height: 58px;
+      resize: vertical;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      padding: 8px;
+      color: var(--text);
+      font: inherit;
+    }
+    .decision {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      width: 158px;
+    }
+    .decision button {
+      padding: 0 8px;
+    }
+    .decision .keep.active {
+      border-color: var(--keep);
+      background: var(--keep);
+      color: white;
+    }
+    .decision .reject.active {
+      border-color: var(--reject);
+      background: var(--reject);
+      color: white;
+    }
+    .notes {
+      grid-column: span 2;
+    }
+    @media (max-width: 840px) {
+      header {
+        grid-template-columns: 1fr;
+      }
+      .actions {
+        justify-content: flex-start;
+      }
+      .clip {
+        grid-template-columns: 1fr;
+      }
+      .decision {
+        width: 100%;
+      }
+      .notes {
+        grid-column: auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Aswini Clip Review</h1>
+      <div class="summary" id="summary"></div>
+    </div>
+    <div class="actions">
+      <select id="filter">
+        <option value="all">All clips</option>
+        <option value="unreviewed">Unreviewed</option>
+        <option value="keep">Kept</option>
+        <option value="reject">Rejected</option>
+        <option value="flagged">Flagged</option>
+      </select>
+      <button type="button" id="exportJsonl" class="primary">Export JSONL</button>
+      <button type="button" id="exportCsv">Export CSV</button>
+    </div>
+  </header>
+  <main id="clips"></main>
+  <script>
+    const rows = [{"id": 0, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0000.wav", "audio_src": "aswini_clips/aswini_0000.wav", "source": "amarnath - aswini", "start": 0.571, "end": 4.03, "duration": 3.459, "text": "Hello? Hello, good evening, sir. Ms. Amarnath, sir.", "flags": []}, {"id": 1, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0001.wav", "audio_src": "aswini_clips/aswini_0001.wav", "source": "amarnath - aswini", "start": 5.228, "end": 9.886, "duration": 4.657, "text": "So this is Ashwini sir calling from XS Electronics.", "flags": []}, {"id": 2, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0002.wav", "audio_src": "aswini_clips/aswini_0002.wav", "source": "anup menon - aswini", "start": 2.68, "end": 5.195, "duration": 2.514, "text": "Sir, a very good evening. Is this Mr. Anupmanan?", "flags": ["short"]}, {"id": 3, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0003.wav", "audio_src": "aswini_clips/aswini_0003.wav", "source": "arunkumar - aswini", "start": 2.36, "end": 5.33, "duration": 2.97, "text": "Hello, good morning sir.", "flags": ["short"]}, {"id": 4, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0004.wav", "audio_src": "aswini_clips/aswini_0004.wav", "source": "arunkumar - aswini", "start": 6.528, "end": 11.59, "duration": 5.063, "text": "Sir, this is Ashwini sir calling from XS Electronics. Madam, you call me after some time.", "flags": ["check text"]}, {"id": 5, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0005.wav", "audio_src": "aswini_clips/aswini_0005.wav", "source": "badri - aswini", "start": 0.892, "end": 5.448, "duration": 4.556, "text": "Hello, sir, very good morning. Is this Mr. Badri, sir?", "flags": []}, {"id": 6, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0006.wav", "audio_src": "aswini_clips/aswini_0006.wav", "source": "badri - aswini", "start": 6.663, "end": 9.667, "duration": 3.004, "text": "Sir Ashwin is calling from XS Electronics.", "flags": []}, {"id": 7, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0007.wav", "audio_src": "aswini_clips/aswini_0007.wav", "source": "badri - aswini", "start": 9.903, "end": 12.569, "duration": 2.666, "text": "regional distributors of Tamsung.", "flags": ["short"]}, {"id": 8, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0008.wav", "audio_src": "aswini_clips/aswini_0008.wav", "source": "badri - aswini", "start": 14.341, "end": 19.066, "duration": 4.725, "text": "Pardon, Regional? Regional distributors of Samsung sir, Samsung.", "flags": ["check text"]}, {"id": 9, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0009.wav", "audio_src": "aswini_clips/aswini_0009.wav", "source": "badri - aswini", "start": 24.567, "end": 27.2, "duration": 2.633, "text": "Is this right time to speak with you, sir? Yes, yes, yes.", "flags": ["short", "check text"]}, {"id": 10, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0010.wav", "audio_src": "aswini_clips/aswini_0010.wav", "source": "badri - aswini", "start": 27.385, "end": 34.203, "duration": 6.817, "text": "Yes sir, earlier Mr. Manikandan sir have met you at your office. No, I already discussed with him.", "flags": ["check text"]}, {"id": 11, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0011.wav", "audio_src": "aswini_clips/aswini_0011.wav", "source": "badri - aswini", "start": 35.941, "end": 39.586, "duration": 3.645, "text": "Is there any requirement now or in the future for the...", "flags": []}, {"id": 12, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0012.wav", "audio_src": "aswini_clips/aswini_0012.wav", "source": "badri - aswini", "start": 39.923, "end": 42.607, "duration": 2.683, "text": "and Samsung displays, signage boards.", "flags": ["short"]}, {"id": 13, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0013.wav", "audio_src": "aswini_clips/aswini_0013.wav", "source": "badri - aswini", "start": 53.474, "end": 56.208, "duration": 2.734, "text": "Okay, sir. Actually, it's just a courtesy call.", "flags": ["short"]}, {"id": 14, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0014.wav", "audio_src": "aswini_clips/aswini_0014.wav", "source": "badri - aswini", "start": 56.461, "end": 62.553, "duration": 6.092, "text": "So I would like to send in a brief about the companies.", "flags": []}, {"id": 15, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0015.wav", "audio_src": "aswini_clips/aswini_0015.wav", "source": "badri - aswini", "start": 66.89, "end": 71.294, "duration": 4.404, "text": "I'll just send you a brief about it in WhatsApp. Please do send me your email id sir.", "flags": ["check text"]}, {"id": 16, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0016.wav", "audio_src": "aswini_clips/aswini_0016.wav", "source": "badri - aswini", "start": 71.8, "end": 75.715, "duration": 3.915, "text": "Thank you, sir. Thank you for your time.", "flags": []}, {"id": 17, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0017.wav", "audio_src": "aswini_clips/aswini_0017.wav", "source": "bindu chakravartys husband - aswini", "start": 4.52, "end": 9.818, "duration": 5.299, "text": "So very good evening. Is this Bindu Chakravarti?", "flags": []}, {"id": 18, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0018.wav", "audio_src": "aswini_clips/aswini_0018.wav", "source": "bindu chakravartys husband - aswini", "start": 35.772, "end": 39.62, "duration": 3.848, "text": "yeah okay sure sir we will do okay sir thank you sir thank you", "flags": []}, {"id": 19, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0019.wav", "audio_src": "aswini_clips/aswini_0019.wav", "source": "final_price-krishnaveni-aswini", "start": 1.195, "end": 4.52, "duration": 3.324, "text": "Good evening, ma'am. Ashwini here.", "flags": []}, {"id": 20, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0020.wav", "audio_src": "aswini_clips/aswini_0020.wav", "source": "final_price-krishnaveni-aswini", "start": 5.043, "end": 10.072, "duration": 5.029, "text": "Madam today, I have sent you final bests price. Yes, take a look at it madam.", "flags": []}, {"id": 21, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0021.wav", "audio_src": "aswini_clips/aswini_0021.wav", "source": "final_price-krishnaveni-aswini", "start": 12.873, "end": 15.995, "duration": 3.122, "text": "Okay, ma'am. Okay, ma'am. Sure, ma'am. Thank you, ma'am.", "flags": []}, {"id": 22, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0022.wav", "audio_src": "aswini_clips/aswini_0022.wav", "source": "franklin - kalaivani - aswini", "start": 1.128, "end": 4.148, "duration": 3.021, "text": "Hello, good evening, sir. Mr. Franklin, sir.", "flags": []}, {"id": 23, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0023.wav", "audio_src": "aswini_clips/aswini_0023.wav", "source": "franklin - kalaivani - aswini", "start": 37.831, "end": 41.881, "duration": 4.05, "text": "Sure sir. Sir, who is the contact in the Purchase Department? Kalli.", "flags": []}, {"id": 24, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0024.wav", "audio_src": "aswini_clips/aswini_0024.wav", "source": "franklin - kalaivani - aswini", "start": 44.446, "end": 47.973, "duration": 3.527, "text": "Okay, sir, I'll talk to her. Thank you. Thank you.", "flags": []}, {"id": 25, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0025.wav", "audio_src": "aswini_clips/aswini_0025.wav", "source": "hariprasad - aswini", "start": 22.154, "end": 26.626, "duration": 4.472, "text": "before 2-3 months, sir. For Samsung, sir.", "flags": []}, {"id": 26, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0026.wav", "audio_src": "aswini_clips/aswini_0026.wav", "source": "hariprasad - aswini", "start": 49.762, "end": 53.423, "duration": 3.662, "text": "So far nothing. If there is anything else, I'll get back to you.", "flags": []}, {"id": 27, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0027.wav", "audio_src": "aswini_clips/aswini_0027.wav", "source": "krishnaveeni - aswini", "start": 3.423, "end": 6.427, "duration": 3.004, "text": "I am Ashwini from XS Electronics", "flags": []}, {"id": 28, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0028.wav", "audio_src": "aswini_clips/aswini_0028.wav", "source": "krishnaveeni - aswini", "start": 9.953, "end": 15.809, "duration": 5.856, "text": "So earlier Mr. Manikandan sir would have met you. You would have given him orders.", "flags": []}, {"id": 29, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0029.wav", "audio_src": "aswini_clips/aswini_0029.wav", "source": "krishnaveeni - aswini", "start": 16.332, "end": 21.682, "duration": 5.349, "text": "I guess to follow that mum made a requirement or type of", "flags": []}, {"id": 30, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0030.wav", "audio_src": "aswini_clips/aswini_0030.wav", "source": "krishnaveeni - aswini", "start": 30.777, "end": 33.308, "duration": 2.531, "text": "Ok Mom, I will let him know when I know that it won´t hurt.", "flags": ["short"]}, {"id": 31, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0031.wav", "audio_src": "aswini_clips/aswini_0031.wav", "source": "krishnaveeni - aswini", "start": 37.882, "end": 41.037, "duration": 3.156, "text": "Do you want normal or this? Normal", "flags": []}, {"id": 32, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0032.wav", "audio_src": "aswini_clips/aswini_0032.wav", "source": "krishnaveeni - aswini", "start": 46.792, "end": 49.897, "duration": 3.105, "text": "Okay, thank you.", "flags": ["few words"]}, {"id": 33, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0033.wav", "audio_src": "aswini_clips/aswini_0033.wav", "source": "krishnaveni - aswini", "start": 0.385, "end": 2.9, "duration": 2.514, "text": "Hello, good morning, ma'am. Krishnamini ma'am.", "flags": ["short"]}, {"id": 34, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0034.wav", "audio_src": "aswini_clips/aswini_0034.wav", "source": "krishnaveni - aswini", "start": 4.334, "end": 7.338, "duration": 3.004, "text": "I am Ashwini Peslammam from XS Electronics.", "flags": []}, {"id": 35, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0035.wav", "audio_src": "aswini_clips/aswini_0035.wav", "source": "krishnaveni - aswini", "start": 9.008, "end": 16.788, "duration": 7.779, "text": "So, before four days, you asked me to share a quotation for Samsung TV.", "flags": []}, {"id": 36, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0036.wav", "audio_src": "aswini_clips/aswini_0036.wav", "source": "krishnaveni - aswini", "start": 18.374, "end": 23.167, "duration": 4.793, "text": "I will share the quotation in WhatsApp. Okay, I will check and give you.", "flags": []}, {"id": 37, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0037.wav", "audio_src": "aswini_clips/aswini_0037.wav", "source": "krishnaveni - aswini", "start": 23.2, "end": 29.09, "duration": 5.889, "text": "Yes, Swamiji. Just email it to me. I will share it in WhatsApp. I will share the official email.", "flags": []}, {"id": 38, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0038.wav", "audio_src": "aswini_clips/aswini_0038.wav", "source": "krishnaveni - aswini", "start": 29.377, "end": 33.224, "duration": 3.848, "text": "Okay. Thank you.", "flags": ["few words"]}, {"id": 39, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0039.wav", "audio_src": "aswini_clips/aswini_0039.wav", "source": "magesh - aswini", "start": 26.66, "end": 32.566, "duration": 5.906, "text": "Exactly, actually we have no control. We don't recommend it. You can buy it from Samsung.", "flags": []}, {"id": 40, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0040.wav", "audio_src": "aswini_clips/aswini_0040.wav", "source": "magesh - aswini", "start": 32.819, "end": 35.738, "duration": 2.919, "text": "It is a personal choice of the...", "flags": ["short"]}, {"id": 41, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0041.wav", "audio_src": "aswini_clips/aswini_0041.wav", "source": "magesh - aswini", "start": 38.945, "end": 42.353, "duration": 3.409, "text": "So, we are brand new, Salman is brand new to it.", "flags": []}, {"id": 42, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0042.wav", "audio_src": "aswini_clips/aswini_0042.wav", "source": "magesh - aswini", "start": 42.674, "end": 47.72, "duration": 5.046, "text": "It is the choice of the employees.", "flags": []}, {"id": 43, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0043.wav", "audio_src": "aswini_clips/aswini_0043.wav", "source": "magesh - aswini", "start": 48.007, "end": 52.732, "duration": 4.725, "text": "people to say put kiosks here and say market their products.", "flags": []}, {"id": 44, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0044.wav", "audio_src": "aswini_clips/aswini_0044.wav", "source": "magesh - aswini", "start": 52.934, "end": 56.377, "duration": 3.443, "text": "Even for cars also we are not doing it. I'll just check.", "flags": []}, {"id": 45, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0045.wav", "audio_src": "aswini_clips/aswini_0045.wav", "source": "magesh - aswini", "start": 56.697, "end": 60.089, "duration": 3.392, "text": "what is whether it is possible and I get back to you.", "flags": []}, {"id": 46, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0046.wav", "audio_src": "aswini_clips/aswini_0046.wav", "source": "magesh - aswini", "start": 86.549, "end": 92.033, "duration": 5.484, "text": "They didn't come and meet regarding factory EACs and other things.", "flags": []}, {"id": 47, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0047.wav", "audio_src": "aswini_clips/aswini_0047.wav", "source": "magesh - aswini", "start": 92.303, "end": 96.421, "duration": 4.117, "text": "whatever is the other products you are having. They came and met her. Yeah.", "flags": []}, {"id": 48, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0048.wav", "audio_src": "aswini_clips/aswini_0048.wav", "source": "magesh - aswini", "start": 96.792, "end": 100.032, "duration": 3.24, "text": "Without the purchase the shoulder.", "flags": []}, {"id": 49, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0049.wav", "audio_src": "aswini_clips/aswini_0049.wav", "source": "magesh - aswini", "start": 102.935, "end": 105.584, "duration": 2.649, "text": "The Samsung OEMs came and met Akshar Ania.", "flags": ["short"]}, {"id": 50, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0050.wav", "audio_src": "aswini_clips/aswini_0050.wav", "source": "magesh - aswini", "start": 110.984, "end": 114.038, "duration": 3.054, "text": "I am not sure what happened after that because I have no idea.", "flags": []}, {"id": 51, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0051.wav", "audio_src": "aswini_clips/aswini_0051.wav", "source": "magesh - aswini", "start": 114.258, "end": 117.92, "duration": 3.662, "text": "where it is being bought or from whom it is being bought.", "flags": []}, {"id": 52, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0052.wav", "audio_src": "aswini_clips/aswini_0052.wav", "source": "magesh - aswini", "start": 118.139, "end": 122.02, "duration": 3.881, "text": "So, the best thing is you have to talk to our...", "flags": []}, {"id": 53, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0053.wav", "audio_src": "aswini_clips/aswini_0053.wav", "source": "magesh - aswini", "start": 139.807, "end": 143.671, "duration": 3.864, "text": "monitors I think we buy only Dell monitors", "flags": []}, {"id": 54, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0054.wav", "audio_src": "aswini_clips/aswini_0054.wav", "source": "magesh - aswini", "start": 143.857, "end": 150.505, "duration": 6.649, "text": "Okay. Just Dell laptops and desktops. We buy only Dell monitors. Okay. In case there's any requirement for any displays and other things.", "flags": []}, {"id": 55, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0055.wav", "audio_src": "aswini_clips/aswini_0055.wav", "source": "magesh - aswini", "start": 175.058, "end": 177.573, "duration": 2.514, "text": "What was 2000 supporting is we have some uh", "flags": ["short"]}, {"id": 56, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0056.wav", "audio_src": "aswini_clips/aswini_0056.wav", "source": "magesh - aswini", "start": 180.34, "end": 183.125, "duration": 2.784, "text": "displays are there, professional displays are there.", "flags": ["short"]}, {"id": 57, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0057.wav", "audio_src": "aswini_clips/aswini_0057.wav", "source": "magesh - aswini", "start": 185.453, "end": 189.166, "duration": 3.713, "text": "and Office 2000 is supporting us.", "flags": []}, {"id": 58, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0058.wav", "audio_src": "aswini_clips/aswini_0058.wav", "source": "magesh - aswini", "start": 214.765, "end": 218.545, "duration": 3.78, "text": "No, because she has already spoken to the Samsung OEM team and", "flags": []}, {"id": 59, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0059.wav", "audio_src": "aswini_clips/aswini_0059.wav", "source": "magesh - aswini", "start": 220.537, "end": 225.093, "duration": 4.556, "text": "And she has already discussed and she has shared I think what was the requirement at that point of time.", "flags": []}, {"id": 60, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0060.wav", "audio_src": "aswini_clips/aswini_0060.wav", "source": "magesh - aswini", "start": 235.032, "end": 241.242, "duration": 6.21, "text": "happens like that only.", "flags": []}, {"id": 61, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0061.wav", "audio_src": "aswini_clips/aswini_0061.wav", "source": "magesh - aswini", "start": 242.609, "end": 248.313, "duration": 5.704, "text": "2812 8500. 8500 okay.", "flags": []}, {"id": 62, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0062.wav", "audio_src": "aswini_clips/aswini_0062.wav", "source": "mohammad - aswini", "start": 1.06, "end": 4.267, "duration": 3.206, "text": "Hello, sir. Good afternoon, sir. Mohamed Sara.", "flags": []}, {"id": 63, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0063.wav", "audio_src": "aswini_clips/aswini_0063.wav", "source": "mohammad - aswini", "start": 77.892, "end": 84.44, "duration": 6.548, "text": "Alright, let's split this. Desktop, monitors, laptops. Desktop, monitors, laptops.", "flags": []}, {"id": 64, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0065.wav", "audio_src": "aswini_clips/aswini_0065.wav", "source": "mohammad - aswini", "start": 90.498, "end": 93.299, "duration": 2.801, "text": "All consumer electronics.", "flags": ["short", "few words"]}, {"id": 65, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0066.wav", "audio_src": "aswini_clips/aswini_0066.wav", "source": "mohammad - aswini", "start": 107.035, "end": 110.782, "duration": 3.746, "text": "in Tamil", "flags": ["few words"]}, {"id": 66, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0067.wav", "audio_src": "aswini_clips/aswini_0067.wav", "source": "mohammad - aswini", "start": 123.218, "end": 130.171, "duration": 6.953, "text": "Okay, sir. Like, directly, can a person come and meet you, sir? Like, if required. I can come tomorrow.", "flags": []}, {"id": 67, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0068.wav", "audio_src": "aswini_clips/aswini_0068.wav", "source": "mohammad - aswini", "start": 239.521, "end": 243.132, "duration": 3.611, "text": "Okay, so you are in the Paris corner?", "flags": []}, {"id": 68, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0069.wav", "audio_src": "aswini_clips/aswini_0069.wav", "source": "mohammad - aswini", "start": 248.836, "end": 252.532, "duration": 3.696, "text": "Tabii, steel celebrate", "flags": ["few words"]}, {"id": 69, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0070.wav", "audio_src": "aswini_clips/aswini_0070.wav", "source": "no - amarnath - aswini", "start": 1.82, "end": 4.486, "duration": 2.666, "text": "Hello, good evening. This is Amarnath, sir.", "flags": ["short"]}, {"id": 70, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0071.wav", "audio_src": "aswini_clips/aswini_0071.wav", "source": "no - amarnath - aswini", "start": 6.14, "end": 9.059, "duration": 2.919, "text": "Sir, this is Ashwini calling from Excess Electronics.", "flags": ["short"]}, {"id": 71, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0072.wav", "audio_src": "aswini_clips/aswini_0072.wav", "source": "no - amarnath - aswini", "start": 9.413, "end": 12.012, "duration": 2.599, "text": "regional distributors of Samsung.", "flags": ["short"]}, {"id": 72, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0073.wav", "audio_src": "aswini_clips/aswini_0073.wav", "source": "no - amarnath - aswini", "start": 12.535, "end": 15.134, "duration": 2.599, "text": "So is this the right time to speak with you, sir?", "flags": ["short"]}, {"id": 73, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0074.wav", "audio_src": "aswini_clips/aswini_0074.wav", "source": "no - amarnath - aswini", "start": 18.492, "end": 21.344, "duration": 2.852, "text": "This is regarding the HVAC solutions.", "flags": ["short"]}, {"id": 74, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0075.wav", "audio_src": "aswini_clips/aswini_0075.wav", "source": "no - amarnath - aswini", "start": 21.732, "end": 24.955, "duration": 3.223, "text": "VRF and commercial displays and signage boards.", "flags": []}, {"id": 75, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0076.wav", "audio_src": "aswini_clips/aswini_0076.wav", "source": "no - amarnath - aswini", "start": 25.445, "end": 28.313, "duration": 2.869, "text": "and all consumer products and IT.", "flags": ["short"]}, {"id": 76, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0077.wav", "audio_src": "aswini_clips/aswini_0077.wav", "source": "no - amarnath - aswini", "start": 28.82, "end": 31.688, "duration": 2.869, "text": "Peripherals, we are doing everything. I don't need any of this.", "flags": ["short"]}, {"id": 77, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0078.wav", "audio_src": "aswini_clips/aswini_0078.wav", "source": "no - amarnath - aswini", "start": 35.333, "end": 38.945, "duration": 3.611, "text": "Yeah sure sir, any Samsung requirements please do call us. No, no.", "flags": ["check text"]}, {"id": 78, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0079.wav", "audio_src": "aswini_clips/aswini_0079.wav", "source": "ramesh - aswini", "start": 23.032, "end": 27.571, "duration": 4.539, "text": "Okay, sir. Sir, number is on the card, sir, I will go.", "flags": []}, {"id": 79, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0080.wav", "audio_src": "aswini_clips/aswini_0080.wav", "source": "ramesh - aswini", "start": 47.298, "end": 51.162, "duration": 3.864, "text": "4 double 0. 4 double 0, okay. 5 double 8 double 2.", "flags": []}, {"id": 80, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0081.wav", "audio_src": "aswini_clips/aswini_0081.wav", "source": "ramesh - aswini", "start": 52.985, "end": 55.668, "duration": 2.683, "text": "OK, so thank you so thank you so much.", "flags": ["short"]}, {"id": 81, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0082.wav", "audio_src": "aswini_clips/aswini_0082.wav", "source": "sadasivam - aswini", "start": 0.031, "end": 5.195, "duration": 5.164, "text": "Hello, very good morning sir. Hello, very good morning sir. Mr. Sadasivam sir.", "flags": []}, {"id": 82, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0083.wav", "audio_src": "aswini_clips/aswini_0083.wav", "source": "sadasivam - aswini", "start": 20.382, "end": 23.048, "duration": 2.666, "text": "It's on the... You can send me the...", "flags": ["short"]}, {"id": 83, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0084.wav", "audio_src": "aswini_clips/aswini_0084.wav", "source": "sadasivam - aswini", "start": 39.35, "end": 44.243, "duration": 4.894, "text": "next week certain like and I know the dates are so that any Tuesday or Wednesday", "flags": []}, {"id": 84, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0085.wav", "audio_src": "aswini_clips/aswini_0085.wav", "source": "safik - aswini", "start": 2.444, "end": 5.566, "duration": 3.122, "text": "Sir, very good evening. Sir, is this Saafic?", "flags": []}, {"id": 85, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0086.wav", "audio_src": "aswini_clips/aswini_0086.wav", "source": "sankarsir - aswini", "start": 2.798, "end": 7.456, "duration": 4.658, "text": "Sir, very good afternoon. Is this Mr. Shankar sir?", "flags": []}, {"id": 86, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0087.wav", "audio_src": "aswini_clips/aswini_0087.wav", "source": "sankarsir - aswini", "start": 41.864, "end": 45.644, "duration": 3.78, "text": "So is there any requirement now or in the future?", "flags": []}, {"id": 87, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0088.wav", "audio_src": "aswini_clips/aswini_0088.wav", "source": "sankarsir - aswini", "start": 49.036, "end": 52.31, "duration": 3.274, "text": "Yeah sure sir, this is your WhatsApp number I'm right.", "flags": []}, {"id": 88, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0089.wav", "audio_src": "aswini_clips/aswini_0089.wav", "source": "sankarsir - aswini", "start": 53.542, "end": 60.865, "duration": 7.324, "text": "I will just send up the brief about what we do, all the products. So whenever there is a requirement, please do contact us.", "flags": []}, {"id": 89, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0090.wav", "audio_src": "aswini_clips/aswini_0090.wav", "source": "sreetharan - aswini", "start": 0.858, "end": 4.891, "duration": 4.033, "text": "Hello. Hello. Good evening, sir. I'm Mr. Sridharan, sir.", "flags": []}, {"id": 90, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0091.wav", "audio_src": "aswini_clips/aswini_0091.wav", "source": "sreetharan - aswini", "start": 42.337, "end": 47.753, "duration": 5.417, "text": "So that is why I said so further requirements please contact. Definitely. Thank you.", "flags": []}, {"id": 91, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0092.wav", "audio_src": "aswini_clips/aswini_0092.wav", "source": "sreetharan - aswini", "start": 52.377, "end": 56.95, "duration": 4.573, "text": "This one, oh okay. Sorry, chair, this one. Happy retirement, sir. Thank you.", "flags": []}, {"id": 92, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0093.wav", "audio_src": "aswini_clips/aswini_0093.wav", "source": "sreetharan - aswini", "start": 75.918, "end": 82.499, "duration": 6.581, "text": "I am just sending you the profile what we do.", "flags": []}, {"id": 93, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0094.wav", "audio_src": "aswini_clips/aswini_0094.wav", "source": "udaykumar - aswini", "start": 44.851, "end": 49.576, "duration": 4.725, "text": "Next week sir. Yeah any two days sir, and please stay in the date", "flags": []}, {"id": 94, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0095.wav", "audio_src": "aswini_clips/aswini_0095.wav", "source": "voicemail", "start": 0.115, "end": 3.811, "duration": 3.696, "text": "Cut your name and reason for calling. I'll see if this person is available.", "flags": []}, {"id": 95, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0096.wav", "audio_src": "aswini_clips/aswini_0096.wav", "source": "voicemail", "start": 21.04, "end": 24.044, "duration": 3.004, "text": "Thanks Ashwini. Please stay on the line.", "flags": []}, {"id": 96, "audio_path": "E:\\something_new\\audio\\aswini_clips\\aswini_0097.wav", "audio_src": "aswini_clips/aswini_0097.wav", "source": "voicemail", "start": 48.85, "end": 52.968, "duration": 4.117, "text": "If you would like to leave an additional message, please reply after the tone.", "flags": []}];
+    const storageKey = "aswini-review-v1";
+    const state = JSON.parse(localStorage.getItem(storageKey) || "{}");
+    const clipsEl = document.getElementById("clips");
+    const filterEl = document.getElementById("filter");
+    const summaryEl = document.getElementById("summary");
+
+    function getReview(id) {
+      return state[id] || { status: "unreviewed", text: rows[id].text, notes: "" };
+    }
+
+    function saveReview(id, patch) {
+      state[id] = { ...getReview(id), ...patch };
+      localStorage.setItem(storageKey, JSON.stringify(state));
+      render();
+    }
+
+    function escapeCsv(value) {
+      return '"' + String(value ?? "").replaceAll('"', '""') + '"';
+    }
+
+    function keptRows() {
+      return rows
+        .map(row => ({ ...row, review: getReview(row.id) }))
+        .filter(row => row.review.status === "keep")
+        .map(row => ({
+          audio_path: row.audio_path,
+          text: row.review.text.trim(),
+          source: row.source,
+          start: row.start,
+          end: row.end,
+          duration: row.duration,
+          notes: row.review.notes || ""
+        }));
+    }
+
+    function download(filename, mime, text) {
+      const blob = new Blob([text], { type: mime });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = filename;
+      link.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function render() {
+      const filter = filterEl.value;
+      const counts = { keep: 0, reject: 0, unreviewed: 0 };
+      rows.forEach(row => counts[getReview(row.id).status]++);
+      summaryEl.textContent = `${rows.length} clips | ${counts.keep} kept | ${counts.reject} rejected | ${counts.unreviewed} unreviewed`;
+
+      clipsEl.innerHTML = "";
+      rows.forEach(row => {
+        const review = getReview(row.id);
+        if (filter !== "all") {
+          if (filter === "flagged" && row.flags.length === 0) return;
+          if (filter !== "flagged" && review.status !== filter) return;
+        }
+
+        const card = document.createElement("section");
+        card.className = "clip";
+        card.dataset.status = review.status;
+        card.innerHTML = `
+          <div class="meta">
+            <audio controls preload="none" src="${row.audio_src}"></audio>
+            <div class="source">#${String(row.id).padStart(3, "0")} | ${row.source} | ${row.duration}s</div>
+            <div class="badges">
+              ${row.flags.map(flag => `<span class="badge warn">${flag}</span>`).join("")}
+              ${row.flags.length ? "" : '<span class="badge">no auto flags</span>'}
+            </div>
+          </div>
+          <textarea aria-label="Transcript">${review.text}</textarea>
+          <div class="decision">
+            <button type="button" class="keep ${review.status === "keep" ? "active" : ""}">Keep</button>
+            <button type="button" class="reject ${review.status === "reject" ? "active" : ""}">Reject</button>
+            <textarea class="notes" aria-label="Notes" placeholder="Notes">${review.notes || ""}</textarea>
+          </div>
+        `;
+
+        const transcript = card.querySelector("textarea");
+        transcript.addEventListener("change", event => saveReview(row.id, { text: event.target.value }));
+        card.querySelector(".notes").addEventListener("change", event => saveReview(row.id, { notes: event.target.value }));
+        card.querySelector(".keep").addEventListener("click", () => saveReview(row.id, { status: "keep", text: transcript.value }));
+        card.querySelector(".reject").addEventListener("click", () => saveReview(row.id, { status: "reject", text: transcript.value }));
+        clipsEl.appendChild(card);
+      });
+    }
+
+    filterEl.addEventListener("change", render);
+    document.getElementById("exportJsonl").addEventListener("click", () => {
+      const body = keptRows().map(row => JSON.stringify(row)).join("\n") + "\n";
+      download("aswini_gold_dataset.jsonl", "application/jsonl", body);
+    });
+    document.getElementById("exportCsv").addEventListener("click", () => {
+      const header = ["audio_file", "text", "source", "start", "end", "duration", "notes"];
+      const body = keptRows().map(row => [
+        row.audio_path, row.text, row.source, row.start, row.end, row.duration, row.notes
+      ].map(escapeCsv).join(","));
+      download("aswini_gold_metadata.csv", "text/csv", [header.join(","), ...body].join("\n"));
+    });
+
+    render();
+  </script>
+</body>
+</html>

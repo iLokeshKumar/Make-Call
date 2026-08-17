@@ -1,0 +1,20 @@
+﻿Recording preparation summary
+Input: E:\something_new\audio\recording
+Output: E:\something_new\audio\my_voice_recordings\normalized
+Files: 23
+Total minutes: 57.21
+
+By speaker/language:
+- lk/bhojpuri: 6.46 min
+- lk/english: 27.36 min
+- lk/hindi: 11.66 min
+- lk/mixed: 1.98 min
+- lk/tamil: 7.10 min
+- rk/hindi: 0.68 min
+- skt/english: 1.96 min
+
+Notes:
+- WAV files were prepared with the stdlib script.
+- rk/introduction.mpeg was converted with ffmpeg to rk_introduction.wav.
+- Transcripts are intentionally blank; fill them after transcription/review.
+- Sample rate is preserved at 48 kHz for these recordings.
